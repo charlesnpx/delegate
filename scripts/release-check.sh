@@ -3,7 +3,33 @@ set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 VERSION=$(tr -d '[:space:]' <"$ROOT/VERSION")
-TAG=${1:-${RELEASE_TAG:-}}
+POSITIONAL_TAG=""
+ALLOW_DIRTY=false
+while (( $# > 0 )); do
+  case "$1" in
+    --allow-dirty)
+      ALLOW_DIRTY=true
+      ;;
+    --help|-h)
+      printf 'usage: scripts/release-check.sh [--allow-dirty] [v%s]\n' "$VERSION"
+      exit 0
+      ;;
+    --*)
+      printf 'release-check: unknown option: %s\n' "$1" >&2
+      printf 'usage: scripts/release-check.sh [--allow-dirty] [v%s]\n' "$VERSION" >&2
+      exit 2
+      ;;
+    *)
+      if [[ -n "$POSITIONAL_TAG" ]]; then
+        printf 'release-check: multiple tags supplied: %s and %s\n' "$POSITIONAL_TAG" "$1" >&2
+        exit 2
+      fi
+      POSITIONAL_TAG=$1
+      ;;
+  esac
+  shift
+done
+TAG=${POSITIONAL_TAG:-${RELEASE_TAG:-}}
 HEAD_TAG=""
 
 if [[ -z "$TAG" ]]; then
@@ -22,13 +48,29 @@ fi
 
 if [[ -z "$TAG" ]]; then
   printf 'release-check: no tag supplied and current commit is not exactly tagged\n' >&2
-  printf 'usage: scripts/release-check.sh v%s\n' "$VERSION" >&2
+  printf 'usage: scripts/release-check.sh [--allow-dirty] [v%s]\n' "$VERSION" >&2
   exit 2
 fi
 
 EXPECTED_TAG="v$VERSION"
 if [[ "$TAG" != "$EXPECTED_TAG" ]]; then
   printf 'release-check: tag mismatch: got %s, want %s from VERSION\n' "$TAG" "$EXPECTED_TAG" >&2
+  exit 1
+fi
+
+if ! WORKTREE_STATUS=$(git -C "$ROOT" status --porcelain --untracked-files=all); then
+  printf 'release-check: unable to inspect git worktree cleanliness\n' >&2
+  exit 1
+fi
+if [[ "$ALLOW_DIRTY" == true ]]; then
+  printf 'release-check: !!! WARNING: --allow-dirty bypassed the clean-worktree release gate !!!\n' >&2
+  if [[ -n "$WORKTREE_STATUS" ]]; then
+    printf '%s\n' "$WORKTREE_STATUS" >&2
+  fi
+elif [[ -n "$WORKTREE_STATUS" ]]; then
+  printf 'release-check: worktree is dirty; commit or stash tracked and non-ignored untracked files before release\n' >&2
+  printf '%s\n' "$WORKTREE_STATUS" >&2
+  printf 'release-check: --allow-dirty is an unsafe explicit bypass\n' >&2
   exit 1
 fi
 

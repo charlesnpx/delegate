@@ -142,6 +142,40 @@ func mostRecentDelegateSession(stateDir, backend, cwd string) (string, bool, err
 	return latest.SessionID, true, nil
 }
 
+func delegateSessionMetadata(stateDir, sessionID string) (jobMetadata, bool, error) {
+	dir, err := jobMetadataDir(stateDir)
+	if err != nil {
+		return jobMetadata{}, false, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return jobMetadata{}, false, err
+	}
+	var latest jobMetadata
+	found := false
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		jobID := strings.TrimSuffix(entry.Name(), ".json")
+		if err := validateDelegateJobID(jobID); err != nil {
+			continue
+		}
+		meta, exists, err := loadJobMetadata(stateDir, jobID)
+		if err != nil {
+			return jobMetadata{}, false, err
+		}
+		if !exists || meta.SessionID != sessionID {
+			continue
+		}
+		if !found || metadataIsNewer(meta, latest) {
+			latest = meta
+			found = true
+		}
+	}
+	return latest, found, nil
+}
+
 func metadataIsNewer(candidate, current jobMetadata) bool {
 	if !candidate.CreatedAt.Equal(current.CreatedAt) {
 		return candidate.CreatedAt.After(current.CreatedAt)

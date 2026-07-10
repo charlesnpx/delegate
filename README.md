@@ -36,7 +36,7 @@ delegate install-skills [--plan|--install|--uninstall] [--target claude|codex|al
 delegate handoff create --json
 
 delegate task --backend claude|codex [--background|--wait] [--json] [--cwd <abs>]
-              [--resume|--resume-session <id>|--fresh] [--model <model>] [--effort <effort>]
+              [(--resume|--resume-session <id>) --wait|--fresh] [--model <model>] [--effort <effort>]
               [--timeout <duration>] [--write] [--strict-contract|--no-contract]
               [--origin <skill>] [--embedded] [prompt source]
 
@@ -47,7 +47,7 @@ delegate cancel --job <id> [--json]
 
 Prompt sources are mutually exclusive: `--prompt`, `--prompt-file`, `--prompt-stdin`, `--handoff-prompt-file`, or positional text. `--prompt` and positional text are visible in process arguments and shell history; use stdin, a prompt file, or a handoff file for sensitive input.
 
-Use `--resume-session <id>` to resume an explicit agentbus session. `--resume` selects the most recent session recorded in delegate job metadata for the selected backend and cwd. Omitting the resume flags, or passing `--fresh` explicitly, starts a new session.
+Use `--resume-session <id>` to resume an explicit agentbus session. `--resume` selects the most recent session recorded in delegate job metadata for the selected backend and cwd. Before resuming, delegate verifies that the session's actual backend and cwd match the requested `--backend` and effective `--cwd`; use `--fresh` instead when they differ. In v0.1.0, both resume forms require `--wait` because background resume lands post-v0.1.0. Omitting the resume flags, or passing `--fresh` explicitly, starts a new session.
 
 Daemon mode is the default. It connects through `agentbus/client`, checks the protocol capabilities required by the selected policy, and returns a launch envelope unless `--wait` is set. `--embedded --wait` uses the vendored `agentbus/engine` for tests and foreground-only local execution; it intentionally cannot supervise a background job after the CLI exits.
 
@@ -156,7 +156,7 @@ bash -n install-skill.sh scripts/*.sh
 scripts/release-check.sh v0.1.0
 ```
 
-The release check requires the requested tag to point exactly at `HEAD`, requires `VERSION` to match `v<version>`, JSON-decodes installer and CLI output, verifies every staged binary/skill hash, and confirms the staged binary reports the release version.
+The release check requires a clean worktree, including no modified tracked files and no untracked files outside ignored paths. Manually inspect the same gate with `git status --short --untracked-files=all`. It also requires the requested tag to point exactly at `HEAD`, requires `VERSION` to match `v<version>`, JSON-decodes installer and CLI output, verifies every staged binary/skill hash, and confirms the staged binary reports the release version. `--allow-dirty` is an unsafe escape hatch and always prints a loud warning when used.
 
 ## Roadmap
 

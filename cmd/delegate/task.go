@@ -121,11 +121,11 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	var background bool
 	fs.StringVar(&opts.Backend, "backend", "", "backend name")
 	fs.BoolVar(&background, "background", false, "return after launch")
-	fs.BoolVar(&opts.Wait, "wait", false, "wait for terminal result")
+	fs.BoolVar(&opts.Wait, "wait", false, "wait for terminal result (required with resume flags in v0.1.0)")
 	fs.BoolVar(&opts.JSON, "json", false, "emit JSON")
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute working directory")
-	fs.BoolVar(&opts.Resume, "resume", false, "resume the last session")
-	fs.StringVar(&opts.ResumeSession, "resume-session", "", "resume a session id")
+	fs.BoolVar(&opts.Resume, "resume", false, "resume the last session (requires --wait in v0.1.0)")
+	fs.StringVar(&opts.ResumeSession, "resume-session", "", "resume a session id (requires --wait in v0.1.0)")
 	fs.BoolVar(&opts.Fresh, "fresh", false, "start a fresh session")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
@@ -157,6 +157,9 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	}
 	if opts.Resume && opts.Fresh || opts.ResumeSession != "" && opts.Fresh {
 		return taskOptions{}, fmt.Errorf("use only one of resume flags or --fresh")
+	}
+	if (opts.Resume || opts.ResumeSession != "") && !opts.Wait {
+		return taskOptions{}, fmt.Errorf("--resume and --resume-session require --wait in v0.1.0; background resume lands post-v0.1.0")
 	}
 	if opts.Embedded && !opts.Wait {
 		return taskOptions{}, fmt.Errorf("--embedded requires --wait; background supervision is daemon-only")
@@ -262,6 +265,14 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 }
 
 func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy) (taskRunResult, error) {
+	target, err := resumableSessionInfo(ctx, c, opts.StateDir, opts.ResumeSession)
+	if err != nil {
+		return taskRunResult{}, err
+	}
+	actualCWD := filepath.Clean(target.CWD)
+	if target.Backend != opts.Backend || actualCWD != opts.CWD {
+		return taskRunResult{}, fmt.Errorf("session %q has backend %q and cwd %q, which do not match requested --backend %q and effective --cwd %q; use --fresh to start a new session", opts.ResumeSession, target.Backend, actualCWD, opts.Backend, opts.CWD)
+	}
 	session, err := c.SessionResume(ctx, client.SessionResumeParams{SessionID: opts.ResumeSession})
 	if err != nil {
 		return taskRunResult{}, err
@@ -313,6 +324,28 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 		return taskRunResult{}, err
 	}
 	return taskRunResult{Launch: &env, Warnings: warnings}, nil
+}
+
+func resumableSessionInfo(ctx context.Context, c agentbusClient, stateDir, sessionID string) (client.SessionInfo, error) {
+	listed, listErr := c.SessionList(ctx, client.SessionListParams{})
+	if listErr == nil {
+		for _, session := range listed.Sessions {
+			if session.SessionID == sessionID && session.Backend != "" && session.CWD != "" {
+				return session, nil
+			}
+		}
+	}
+	meta, found, err := delegateSessionMetadata(stateDir, sessionID)
+	if err != nil {
+		return client.SessionInfo{}, err
+	}
+	if found && meta.Backend != "" && meta.CWD != "" {
+		return client.SessionInfo{SessionID: sessionID, Backend: meta.Backend, CWD: meta.CWD}, nil
+	}
+	if listErr != nil {
+		return client.SessionInfo{}, fmt.Errorf("inspect session %q before resume: %w; use --fresh to start a new session", sessionID, listErr)
+	}
+	return client.SessionInfo{}, fmt.Errorf("cannot verify backend and cwd for session %q before resume; use --fresh to start a new session", sessionID)
 }
 
 var saveDelegateJobMetadata = saveJobMetadata

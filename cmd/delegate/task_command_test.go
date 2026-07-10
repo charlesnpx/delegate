@@ -447,18 +447,19 @@ func TestBackgroundJobInputIsSweptByNextResult(t *testing.T) {
 }
 
 func TestTaskResumeSessionUsesResumeAndTurnStart(t *testing.T) {
+	cwd := t.TempDir()
 	fake := &fakeAgentbusClient{
 		hello:        helloWithCapabilities(),
+		sessions:     []client.SessionInfo{{SessionID: "session_explicit", Backend: "codex", CWD: cwd}},
 		resumeResult: client.SessionStartResult{SessionID: "session_explicit", Backend: "codex"},
 		turnResult:   client.TurnStartResult{TurnID: "turn_explicit", JobID: "job_explicit_resume", SessionID: "session_explicit"},
 	}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	cwd := t.TempDir()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"task", "--backend", "codex", "--cwd", cwd, "--resume-session", "session_explicit", "--prompt", "continue"}, nil, &stdout, &stderr)
+	code := run([]string{"task", "--backend", "codex", "--cwd", cwd, "--resume-session", "session_explicit", "--prompt", "continue", "--wait"}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
 	}
@@ -502,7 +503,7 @@ func TestTaskResumeSelectsMostRecentSessionForBackendAndCWD(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"task", "--backend", "codex", "--cwd", cwd, "--resume", "--prompt", "continue latest"}, nil, &stdout, &stderr)
+	code := run([]string{"task", "--backend", "codex", "--cwd", cwd, "--resume", "--prompt", "continue latest", "--wait"}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
 	}
@@ -521,7 +522,7 @@ func TestTaskResumeWithoutRecordedSessionHasGuidance(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--resume", "--prompt", "continue"}, nil, &stdout, &stderr)
+	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--resume", "--prompt", "continue", "--wait"}, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("task succeeded, stdout = %q", stdout.String())
 	}
@@ -532,6 +533,70 @@ func TestTaskResumeWithoutRecordedSessionHasGuidance(t *testing.T) {
 	}
 	if len(fake.resumes) != 0 || len(fake.submits) != 0 {
 		t.Fatalf("daemon calls on missing resume metadata: resumes=%#v submits=%#v", fake.resumes, fake.submits)
+	}
+}
+
+func TestTaskResumeRequiresWaitInV010(t *testing.T) {
+	for _, resumeArgs := range [][]string{{"--resume"}, {"--resume-session", "session_background"}} {
+		t.Run(strings.Join(resumeArgs, "_"), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			args := []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "continue"}
+			args = append(args, resumeArgs...)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, nil, &stdout, &stderr); code == 0 {
+				t.Fatalf("task succeeded, stdout = %q", stdout.String())
+			}
+			if want := "background resume lands post-v0.1.0"; !strings.Contains(stderr.String(), want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+			}
+		})
+	}
+}
+
+func TestTaskResumeRejectsSessionBackendOrCWDMismatch(t *testing.T) {
+	requestedCWD := t.TempDir()
+	otherCWD := t.TempDir()
+	for _, tc := range []struct {
+		name          string
+		actualBackend string
+		actualCWD     string
+	}{
+		{name: "backend", actualBackend: "claude", actualCWD: requestedCWD},
+		{name: "cwd", actualBackend: "codex", actualCWD: otherCWD},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{
+				hello:    helloWithCapabilities(),
+				sessions: []client.SessionInfo{{SessionID: "session_mismatch", Backend: tc.actualBackend, CWD: tc.actualCWD}},
+			}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"task", "--backend", "codex", "--cwd", requestedCWD, "--resume-session", "session_mismatch", "--prompt", "continue", "--wait"}, nil, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("task succeeded, stdout = %q", stdout.String())
+			}
+			for _, want := range []string{tc.actualBackend, filepath.Clean(tc.actualCWD), "--fresh"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want actual session detail %q", stderr.String(), want)
+				}
+			}
+			if len(fake.resumes) != 0 || len(fake.turns) != 0 {
+				t.Fatalf("mismatched session was resumed: resumes=%#v turns=%#v", fake.resumes, fake.turns)
+			}
+		})
+	}
+}
+
+func TestTaskHelpDocumentsResumeWaitRequirement(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"task", "--help"}, nil, &stdout, &stderr); code == 0 {
+		t.Fatalf("task --help code = 0, want flag package help exit")
+	}
+	if want := "required with resume flags in v0.1.0"; !strings.Contains(stderr.String(), want) {
+		t.Fatalf("task --help stderr = %q, want %q", stderr.String(), want)
 	}
 }
 
@@ -615,6 +680,8 @@ func helloWithCapabilities() client.HelloResult {
 
 type fakeAgentbusClient struct {
 	hello        client.HelloResult
+	sessions     []client.SessionInfo
+	sessionLists []client.SessionListParams
 	resumes      []client.SessionResumeParams
 	resumeResult client.SessionStartResult
 	resumeErr    error
@@ -653,6 +720,11 @@ func (f *fakeAgentbusClient) SessionResume(_ context.Context, params client.Sess
 	return f.resumeResult, nil
 }
 
+func (f *fakeAgentbusClient) SessionList(_ context.Context, params client.SessionListParams) (client.SessionListResult, error) {
+	f.sessionLists = append(f.sessionLists, params)
+	return client.SessionListResult{Sessions: f.sessions}, nil
+}
+
 func (f *fakeAgentbusClient) TurnStart(_ context.Context, params client.TurnStartParams) (client.TurnStartResult, <-chan client.TurnNotification, error) {
 	f.turns = append(f.turns, params)
 	if f.turnErr != nil {
@@ -661,7 +733,16 @@ func (f *fakeAgentbusClient) TurnStart(_ context.Context, params client.TurnStar
 	if f.turnResult.JobID == "" {
 		return client.TurnStartResult{}, nil, errors.New("unexpected TurnStart")
 	}
-	return f.turnResult, make(chan client.TurnNotification), nil
+	notifications := make(chan client.TurnNotification, 1)
+	notifications <- client.TurnNotification{Result: &client.TurnResultParams{
+		SessionID: f.turnResult.SessionID,
+		TurnID:    f.turnResult.TurnID,
+		JobID:     f.turnResult.JobID,
+		State:     engine.StateCompleted,
+		Result:    &engine.ResultInfo{SHA256: strings.Repeat("d", 64)},
+	}}
+	close(notifications)
+	return f.turnResult, notifications, nil
 }
 
 func (f *fakeAgentbusClient) JobSubmit(_ context.Context, params client.JobSubmitParams) (client.JobSubmitResult, error) {

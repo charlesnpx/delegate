@@ -17,6 +17,7 @@ type agentbusClient interface {
 	HelloResult() client.HelloResult
 	SessionStart(context.Context, client.SessionStartParams) (client.SessionStartResult, error)
 	SessionResume(context.Context, client.SessionResumeParams) (client.SessionStartResult, error)
+	SessionList(context.Context, client.SessionListParams) (client.SessionListResult, error)
 	TurnStart(context.Context, client.TurnStartParams) (client.TurnStartResult, <-chan client.TurnNotification, error)
 	JobSubmit(context.Context, client.JobSubmitParams) (client.JobSubmitResult, error)
 	JobStatus(context.Context, client.JobStatusParams) (client.JobStatusResult, error)
