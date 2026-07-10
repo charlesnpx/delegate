@@ -7,12 +7,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/delegate/internal/handoff"
+	"github.com/charlesnpx/delegate/internal/policy"
 )
 
 func TestEnvelopeSchemasAndHashes(t *testing.T) {
@@ -82,7 +86,7 @@ func TestSetupCapabilityGateReportsStaleAgentbus(t *testing.T) {
 	if code == 0 {
 		t.Fatal("setup succeeded, want stale capability failure")
 	}
-	want := "agentbus v0.0.7 lacks capability policy.shape; run mise-en-place install agentbus"
+	want := "agentbus v0.0.7 lacks capability `policy.shape`; run mise-en-place install agentbus"
 	if !strings.Contains(stderr.String(), want) {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
@@ -156,39 +160,152 @@ func TestTaskPolicyTierWiring(t *testing.T) {
 	}
 }
 
-func TestEmbeddedAndDaemonTaskParityNoContract(t *testing.T) {
-	report := compliantReport()
-	rawHash := rawSHA256(report)
-	fixedJobID := "job_parity"
+func TestEmbeddedAndDaemonTaskParity(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		flags            []string
+		contract         *engine.ContractStamp
+		wantContractKind string
+		wantStatus       engine.ContractStatus
+	}{
+		{
+			name:             "no_contract",
+			flags:            []string{"--no-contract"},
+			wantContractKind: contractKindNone,
+			wantStatus:       engine.ContractDisabled,
+		},
+		{
+			name:             "default_contract",
+			contract:         ptr(compliantContractStamp(t, compliantReport())),
+			wantContractKind: contractKindShape,
+			wantStatus:       engine.ContractCompliant,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := compliantReport()
+			rawHash := rawSHA256(report)
+			fixedJobID := "job_parity_" + tc.name
 
-	fakeClient := &fakeAgentbusClient{
+			fakeClient := &fakeAgentbusClient{
+				hello: helloWithCapabilities(),
+				result: client.JobResult{
+					JobID:     fixedJobID,
+					SessionID: "session_parity",
+					State:     engine.StateCompleted,
+					Result:    &engine.ResultInfo{Text: report, SHA256: rawHash, Bytes: int64(len(report))},
+					Contract:  tc.contract,
+				},
+			}
+			restoreClient := stubAgentbusGlobals(t, fakeClient)
+			defer restoreClient()
+			restoreEmbedded := stubEmbeddedGlobals(t, fixedJobID, fakeBackendWithResult("codex", report))
+			defer restoreEmbedded()
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cwd := t.TempDir()
+
+			baseArgs := []string{"task", "--backend", "codex", "--cwd", cwd, "--prompt", "same task", "--wait"}
+			var daemonOut, daemonErr bytes.Buffer
+			daemonCode := run(append(append([]string{}, baseArgs...), tc.flags...), nil, &daemonOut, &daemonErr)
+			if daemonCode != 0 {
+				t.Fatalf("daemon task code = %d, stderr = %q", daemonCode, daemonErr.String())
+			}
+			var embeddedOut, embeddedErr bytes.Buffer
+			embeddedArgs := append(append(append([]string{}, baseArgs...), tc.flags...), "--embedded")
+			embeddedCode := run(embeddedArgs, nil, &embeddedOut, &embeddedErr)
+			if embeddedCode != 0 {
+				t.Fatalf("embedded task code = %d, stderr = %q", embeddedCode, embeddedErr.String())
+			}
+			if daemonOut.String() != embeddedOut.String() {
+				t.Fatalf("daemon envelope:\n%s\nembedded envelope:\n%s", daemonOut.String(), embeddedOut.String())
+			}
+			var env TerminalEnvelope
+			if err := json.Unmarshal(bytes.TrimSpace(daemonOut.Bytes()), &env); err != nil {
+				t.Fatalf("terminal envelope JSON invalid: %v; raw = %q", err, daemonOut.String())
+			}
+			if env.ContractKind != tc.wantContractKind {
+				t.Fatalf("contractKind = %q, want %q", env.ContractKind, tc.wantContractKind)
+			}
+			if env.Contract.Status != tc.wantStatus {
+				t.Fatalf("contract status = %q, want %q", env.Contract.Status, tc.wantStatus)
+			}
+			if tc.contract != nil {
+				if env.Contract.ContractSHA256 == "" || env.Contract.ValidatedAt.IsZero() || env.Contract.Attempts != 1 {
+					t.Fatalf("contract stamp = %#v, want populated hash, validatedAt, attempts", env.Contract)
+				}
+			}
+		})
+	}
+}
+
+func TestTaskSubmitFailureUnlinksHandoffAndDeletesJobInput(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: helloWithCapabilities(), submitErr: errors.New("submit failed")}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	xdgState := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", xdgState)
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoffResult, err := handoff.Create(handoff.CreateOptions{
+		StateDir: stateDir,
+		Reader:   strings.NewReader("durable prompt"),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--handoff-prompt-file", handoffResult.HandoffPath}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("task code = 0, want submit failure; stdout = %q stderr = %q", stdout.String(), stderr.String())
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("JobSubmit calls = %d, want 1", len(fake.submits))
+	}
+	if _, err := os.Stat(handoffResult.HandoffPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("handoff file still exists or unexpected stat error: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(stateDir, "job-input.*.prompt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("job input cleanup left files: %#v", matches)
+	}
+}
+
+func TestTaskMetadataPersistFailureStillLaunchesWithWarning(t *testing.T) {
+	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		result: client.JobResult{
-			JobID:     fixedJobID,
-			SessionID: "session_parity",
-			State:     engine.StateCompleted,
-			Result:    &engine.ResultInfo{Text: report, SHA256: rawHash, Bytes: int64(len(report))},
+			JobID: "job_meta_warning",
 		},
 	}
-	restoreClient := stubAgentbusGlobals(t, fakeClient)
-	defer restoreClient()
-	restoreEmbedded := stubEmbeddedGlobals(t, fixedJobID, fakeBackendWithResult("codex", report))
-	defer restoreEmbedded()
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	oldSave := saveDelegateJobMetadata
+	saveDelegateJobMetadata = func(string, jobMetadata) error {
+		return errors.New("metadata store read-only")
+	}
+	defer func() { saveDelegateJobMetadata = oldSave }()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	cwd := t.TempDir()
 
-	var daemonOut, daemonErr bytes.Buffer
-	daemonCode := run([]string{"task", "--backend", "codex", "--cwd", cwd, "--prompt", "same task", "--wait", "--no-contract"}, nil, &daemonOut, &daemonErr)
-	if daemonCode != 0 {
-		t.Fatalf("daemon task code = %d, stderr = %q", daemonCode, daemonErr.String())
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "launch only"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
 	}
-	var embeddedOut, embeddedErr bytes.Buffer
-	embeddedCode := run([]string{"task", "--backend", "codex", "--cwd", cwd, "--prompt", "same task", "--wait", "--no-contract", "--embedded"}, nil, &embeddedOut, &embeddedErr)
-	if embeddedCode != 0 {
-		t.Fatalf("embedded task code = %d, stderr = %q", embeddedCode, embeddedErr.String())
+	var launch LaunchEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &launch); err != nil {
+		t.Fatalf("launch envelope JSON invalid: %v; raw = %q", err, stdout.String())
 	}
-	if daemonOut.String() != embeddedOut.String() {
-		t.Fatalf("daemon envelope:\n%s\nembedded envelope:\n%s", daemonOut.String(), embeddedOut.String())
+	if launch.JobID != "job_meta_warning" || launch.Status != string(engine.StateQueued) {
+		t.Fatalf("launch = %#v, want queued job_meta_warning", launch)
+	}
+	wantWarning := "warning: delegate job metadata for job_meta_warning was not persisted: metadata store read-only"
+	if !strings.Contains(stderr.String(), wantWarning) {
+		t.Fatalf("stderr = %q, want warning %q", stderr.String(), wantWarning)
 	}
 }
 
@@ -247,9 +364,10 @@ func helloWithCapabilities() client.HelloResult {
 }
 
 type fakeAgentbusClient struct {
-	hello   client.HelloResult
-	submits []client.JobSubmitParams
-	result  client.JobResult
+	hello     client.HelloResult
+	submits   []client.JobSubmitParams
+	submitErr error
+	result    client.JobResult
 }
 
 func (f *fakeAgentbusClient) Close() error { return nil }
@@ -274,6 +392,9 @@ func (f *fakeAgentbusClient) TurnStart(context.Context, client.TurnStartParams) 
 
 func (f *fakeAgentbusClient) JobSubmit(_ context.Context, params client.JobSubmitParams) (client.JobSubmitResult, error) {
 	f.submits = append(f.submits, params)
+	if f.submitErr != nil {
+		return client.JobSubmitResult{}, f.submitErr
+	}
 	jobID := "job_fake"
 	if f.result.JobID != "" {
 		jobID = f.result.JobID
@@ -354,6 +475,23 @@ func compliantReport() string {
 		"- task-command tests",
 		"",
 	}, "\n")
+}
+
+func compliantContractStamp(t *testing.T, text string) engine.ContractStamp {
+	t.Helper()
+	spec, err := policy.DelegateReportSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := engine.ValidateContract(text, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return engine.StampValidation(1, false, "", result, time.Unix(42, 0).UTC())
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }
 
 func rawSHA256(text string) string {

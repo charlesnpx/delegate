@@ -55,6 +55,7 @@ type taskOptions struct {
 type taskRunResult struct {
 	Launch   *LaunchEnvelope
 	Terminal *TerminalEnvelope
+	Warnings []string
 }
 
 func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
@@ -92,6 +93,11 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 	}
 	if err != nil {
 		return 0, err
+	}
+	for _, warning := range result.Warnings {
+		if _, err := fmt.Fprintf(stderr, "warning: %s\n", warning); err != nil {
+			return 0, err
+		}
 	}
 	if result.Terminal != nil {
 		if err := writeJSONLine(stdout, result.Terminal); err != nil {
@@ -201,14 +207,27 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 	if opts.ResumeSession != "" {
 		return runDaemonSessionTask(ctx, c, opts, resolved, turnPolicy)
 	}
-	submitted, err := c.JobSubmit(ctx, client.JobSubmitParams{TaskSpec: spec})
+	input, err := persistPreLaunchJobInput(opts, resolved)
 	if err != nil {
 		return taskRunResult{}, err
 	}
-	if _, err := persistDelegateJob(opts, resolved, submitted.JobID, contractKindForPolicy(turnPolicy, opts.NoContract)); err != nil {
+	submitted, err := c.JobSubmit(ctx, client.JobSubmitParams{TaskSpec: spec})
+	if err != nil {
+		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
 		return taskRunResult{}, err
 	}
-	if err := cleanupJobInput(opts.StateDir, submitted.JobID, "", submitted.State); err != nil {
+	var warnings []string
+	metadataSaved := true
+	if _, err := persistDelegateJobMetadata(opts, input, submitted.JobID, contractKindForPolicy(turnPolicy, opts.NoContract)); err != nil {
+		metadataSaved = false
+		warnings = append(warnings, metadataPersistWarning(submitted.JobID, err))
+	}
+	if metadataSaved {
+		err = cleanupJobInput(opts.StateDir, submitted.JobID, "", submitted.State)
+	} else {
+		err = cleanupUntrackedJobInput(input, "", submitted.State)
+	}
+	if err != nil {
 		return taskRunResult{}, err
 	}
 	if opts.Wait {
@@ -220,17 +239,26 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 		if err != nil {
 			return taskRunResult{}, err
 		}
-		return taskRunResult{Terminal: &env}, nil
+		if !metadataSaved {
+			if err := cleanupUntrackedJobInput(input, jobResult.SessionID, jobResult.State); err != nil {
+				return taskRunResult{}, err
+			}
+		}
+		return taskRunResult{Terminal: &env, Warnings: warnings}, nil
 	}
 	env, err := newLaunchEnvelope(submitted.JobID, submitted.State)
 	if err != nil {
 		return taskRunResult{}, err
 	}
-	return taskRunResult{Launch: &env}, nil
+	return taskRunResult{Launch: &env, Warnings: warnings}, nil
 }
 
 func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy) (taskRunResult, error) {
 	session, err := c.SessionResume(ctx, client.SessionResumeParams{SessionID: opts.ResumeSession})
+	if err != nil {
+		return taskRunResult{}, err
+	}
+	input, err := persistPreLaunchJobInput(opts, resolved)
 	if err != nil {
 		return taskRunResult{}, err
 	}
@@ -243,12 +271,21 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 		TimeoutMs: timeoutMillis(opts.Timeout),
 	})
 	if err != nil {
+		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
 		return taskRunResult{}, err
 	}
-	if _, err := persistDelegateJob(opts, resolved, started.JobID, contractKindForPolicy(turnPolicy, opts.NoContract)); err != nil {
-		return taskRunResult{}, err
+	var warnings []string
+	metadataSaved := true
+	if _, err := persistDelegateJobMetadata(opts, input, started.JobID, contractKindForPolicy(turnPolicy, opts.NoContract)); err != nil {
+		metadataSaved = false
+		warnings = append(warnings, metadataPersistWarning(started.JobID, err))
 	}
-	if err := cleanupJobInput(opts.StateDir, started.JobID, started.SessionID, engine.StateRunning); err != nil {
+	if metadataSaved {
+		err = cleanupJobInput(opts.StateDir, started.JobID, started.SessionID, engine.StateRunning)
+	} else {
+		err = cleanupUntrackedJobInput(input, started.SessionID, engine.StateRunning)
+	}
+	if err != nil {
 		return taskRunResult{}, err
 	}
 	if opts.Wait {
@@ -260,24 +297,47 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 		if err != nil {
 			return taskRunResult{}, err
 		}
-		return taskRunResult{Terminal: &env}, nil
+		return taskRunResult{Terminal: &env, Warnings: warnings}, nil
 	}
 	env, err := newLaunchEnvelope(started.JobID, engine.StateRunning)
 	if err != nil {
 		return taskRunResult{}, err
 	}
-	return taskRunResult{Launch: &env}, nil
+	return taskRunResult{Launch: &env, Warnings: warnings}, nil
 }
 
+var saveDelegateJobMetadata = saveJobMetadata
+
 func persistDelegateJob(opts taskOptions, resolved handoff.ResolvedPrompt, jobID, contractKind string) (jobMetadata, error) {
-	input, err := handoff.PersistJobInput(handoff.JobInputOptions{
+	input, err := persistDelegateJobInput(opts, resolved, jobID)
+	if err != nil {
+		return jobMetadata{}, err
+	}
+	meta, err := persistDelegateJobMetadata(opts, input, jobID, contractKind)
+	if err != nil {
+		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
+		return jobMetadata{}, err
+	}
+	return meta, nil
+}
+
+func persistPreLaunchJobInput(opts taskOptions, resolved handoff.ResolvedPrompt) (handoff.JobInput, error) {
+	jobID, err := newJobID()
+	if err != nil {
+		return handoff.JobInput{}, err
+	}
+	return persistDelegateJobInput(opts, resolved, jobID)
+}
+
+func persistDelegateJobInput(opts taskOptions, resolved handoff.ResolvedPrompt, jobID string) (handoff.JobInput, error) {
+	return handoff.PersistJobInput(handoff.JobInputOptions{
 		StateDir: opts.StateDir,
 		JobID:    jobID,
 		Prompt:   resolved,
 	})
-	if err != nil {
-		return jobMetadata{}, err
-	}
+}
+
+func persistDelegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) (jobMetadata, error) {
 	meta := jobMetadata{
 		Schema:       envelopeSchema,
 		JobID:        jobID,
@@ -286,11 +346,26 @@ func persistDelegateJob(opts taskOptions, resolved handoff.ResolvedPrompt, jobID
 		NoContract:   opts.NoContract,
 		JobInputPath: input.Path,
 	}
-	if err := saveJobMetadata(opts.StateDir, meta); err != nil {
-		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
+	if err := saveDelegateJobMetadata(opts.StateDir, meta); err != nil {
 		return jobMetadata{}, err
 	}
 	return meta, nil
+}
+
+func metadataPersistWarning(jobID string, err error) string {
+	return fmt.Sprintf("delegate job metadata for %s was not persisted: %v", jobID, err)
+}
+
+func cleanupUntrackedJobInput(input handoff.JobInput, sessionID string, state engine.JobState) error {
+	var err error
+	if sessionID != "" {
+		_, err = handoff.DeleteJobInputOnSessionRecorded(input, handoff.Hooks{})
+		return err
+	}
+	if engine.IsTerminal(state) {
+		_, err = handoff.DeleteJobInputOnTerminalState(input, state, handoff.Hooks{})
+	}
+	return err
 }
 
 func taskTags(opts taskOptions) map[string]string {

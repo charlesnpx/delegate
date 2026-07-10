@@ -97,7 +97,7 @@ func setupRequiredCapabilities() []string {
 }
 
 func capabilityMissingError(hello client.HelloResult, version, capName string) error {
-	return fmt.Errorf("%s lacks capability %s; run mise-en-place install agentbus", agentbusLabel(hello, version), capName)
+	return fmt.Errorf("%s lacks capability `%s`; run mise-en-place install agentbus", agentbusLabel(hello, version), capName)
 }
 
 func agentbusLabel(hello client.HelloResult, version string) string {

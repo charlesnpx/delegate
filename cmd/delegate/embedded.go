@@ -11,11 +11,20 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/agentbus/engine/adapter/claudecli"
+	"github.com/charlesnpx/agentbus/engine/adapter/codexcli"
 	"github.com/charlesnpx/delegate/internal/handoff"
 )
 
 var embeddedBackend = func(name string) (engine.Backend, bool) {
-	return nil, false
+	switch name {
+	case "codex":
+		return codexcli.New(codexcli.Options{}), true
+	case "claude":
+		return claudecli.New(claudecli.Options{}), true
+	default:
+		return nil, false
+	}
 }
 
 var nowUTC = func() time.Time {

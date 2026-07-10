@@ -2,6 +2,9 @@
 ## explicit; go 1.26
 github.com/charlesnpx/agentbus/client
 github.com/charlesnpx/agentbus/engine
+github.com/charlesnpx/agentbus/engine/adapter/claudecli
+github.com/charlesnpx/agentbus/engine/adapter/codexcli
+github.com/charlesnpx/agentbus/engine/adapter/internal/cliadapter
 github.com/charlesnpx/agentbus/internal/protocol
 # github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 ## explicit; go 1.21
