@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/delegate/internal/handoff"
 	"github.com/charlesnpx/delegate/internal/policy"
 )
 
@@ -45,13 +47,12 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		status, err = waitForJobStatus(ctx, c, "", *jobID)
 	} else {
 		status, err = c.JobStatus(ctx, client.JobStatusParams{JobID: *jobID, All: *jobID == ""})
-		if err == nil {
-			cleanupStatuses("", status)
-		}
 	}
 	if err != nil {
 		return 0, err
 	}
+	_ = sweepTerminalJobInputs(ctx, c, "")
+	cleanupStatuses("", status)
 	if *probe {
 		job, ok := findJobStatus(status, *jobID)
 		if !ok {
@@ -132,13 +133,12 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 		result, err = waitForJobResult(ctx, c, "", *jobID)
 	} else {
 		result, err = c.JobResult(ctx, client.JobResultParams{JobID: *jobID})
-		if err == nil {
-			_ = cleanupJobInput("", result.JobID, result.SessionID, result.State)
-		}
 	}
 	if err != nil {
 		return 0, err
 	}
+	_ = sweepTerminalJobInputs(ctx, c, "")
+	_ = cleanupJobInput("", result.JobID, result.SessionID, result.State)
 	env, err := terminalEnvelopeFromJobResult("", result)
 	if err != nil {
 		return 0, err
@@ -264,6 +264,24 @@ func cleanupStatuses(stateDir string, status client.JobStatusResult) {
 	for _, job := range status.Jobs {
 		_ = cleanupJobInput(stateDir, job.JobID, job.SessionID, job.State)
 	}
+}
+
+func sweepTerminalJobInputs(ctx context.Context, c agentbusClient, stateDir string) error {
+	removed, sweepErr := handoff.SweepTerminalJobInputs(stateDir, func(jobID string) (engine.JobState, bool, error) {
+		status, err := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
+		if err != nil {
+			return "", false, err
+		}
+		job, found := findJobStatus(status, jobID)
+		if !found {
+			return "", false, nil
+		}
+		return job.State, true, nil
+	}, handoff.Hooks{})
+	for _, input := range removed {
+		sweepErr = errors.Join(sweepErr, cleanupJobInput(stateDir, input.JobID, "", engine.StateCompleted))
+	}
+	return sweepErr
 }
 
 func terminalEnvelopeFromJobResult(stateDir string, result client.JobResult) (TerminalEnvelope, error) {

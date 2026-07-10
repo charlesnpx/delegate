@@ -47,7 +47,7 @@ delegate cancel --job <id> [--json]
 
 Prompt sources are mutually exclusive: `--prompt`, `--prompt-file`, `--prompt-stdin`, `--handoff-prompt-file`, or positional text. `--prompt` and positional text are visible in process arguments and shell history; use stdin, a prompt file, or a handoff file for sensitive input.
 
-The unqualified `--resume` spelling is reserved but not supported by agentbus v0.1.0; use `--resume-session <id>` for an explicit resume or `--fresh` for a new session.
+Use `--resume-session <id>` to resume an explicit agentbus session. `--resume` selects the most recent session recorded in delegate job metadata for the selected backend and cwd. Omitting the resume flags, or passing `--fresh` explicitly, starts a new session.
 
 Daemon mode is the default. It connects through `agentbus/client`, checks the protocol capabilities required by the selected policy, and returns a launch envelope unless `--wait` is set. `--embedded --wait` uses the vendored `agentbus/engine` for tests and foreground-only local execution; it intentionally cannot supervise a background job after the CLI exits.
 
@@ -56,8 +56,11 @@ Daemon mode is the default. It connects through `agentbus/client`, checks the pr
 The rescue skills use a durable stdin handoff instead of exposing the delegated prompt in argv:
 
 ```sh
-printf '%s' 'Investigate the issue and report evidence.' |
-  delegate handoff create --json
+HANDOFF_PATH=$(
+  printf '%s' 'Investigate the issue and report evidence.' |
+    delegate handoff create --json |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["handoff_path"])'
+)
 
 delegate task --backend codex --origin codex:rescue --cwd "$PWD" \
   --handoff-prompt-file "$HANDOFF_PATH" --background --json

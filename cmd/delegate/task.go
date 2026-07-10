@@ -158,9 +158,6 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	if opts.Resume && opts.Fresh || opts.ResumeSession != "" && opts.Fresh {
 		return taskOptions{}, fmt.Errorf("use only one of resume flags or --fresh")
 	}
-	if opts.Resume {
-		return taskOptions{}, fmt.Errorf("--resume without --resume-session is not supported by agentbus v0.1.0")
-	}
 	if opts.Embedded && !opts.Wait {
 		return taskOptions{}, fmt.Errorf("--embedded requires --wait; background supervision is daemon-only")
 	}
@@ -181,6 +178,16 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 		return taskOptions{}, err
 	}
 	opts.StateDir = stateDir
+	if opts.Resume {
+		sessionID, found, err := mostRecentDelegateSession(opts.StateDir, opts.Backend, opts.CWD)
+		if err != nil {
+			return taskOptions{}, err
+		}
+		if !found {
+			return taskOptions{}, fmt.Errorf("no resumable delegate session for backend %q in cwd %q; run a fresh task first or pass --resume-session <id>", opts.Backend, opts.CWD)
+		}
+		opts.ResumeSession = sessionID
+	}
 	if stdin == nil {
 		stdin = os.Stdin
 	}
@@ -217,6 +224,7 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 		return taskRunResult{}, err
 	}
 	var warnings []string
+	input, warnings = reassociateSubmittedJobInput(input, submitted.JobID, warnings)
 	metadataSaved := true
 	if _, err := persistDelegateJobMetadata(opts, input, submitted.JobID, contractKindForPolicy(turnPolicy, opts.NoContract)); err != nil {
 		metadataSaved = false
@@ -275,6 +283,7 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 		return taskRunResult{}, err
 	}
 	var warnings []string
+	input, warnings = reassociateSubmittedJobInput(input, started.JobID, warnings)
 	metadataSaved := true
 	if _, err := persistDelegateJobMetadata(opts, input, started.JobID, contractKindForPolicy(turnPolicy, opts.NoContract)); err != nil {
 		metadataSaved = false
@@ -342,6 +351,8 @@ func persistDelegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID,
 		Schema:       envelopeSchema,
 		JobID:        jobID,
 		Kind:         taskKind,
+		Backend:      opts.Backend,
+		CWD:          opts.CWD,
 		ContractKind: contractKind,
 		NoContract:   opts.NoContract,
 		JobInputPath: input.Path,
@@ -354,6 +365,17 @@ func persistDelegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID,
 
 func metadataPersistWarning(jobID string, err error) string {
 	return fmt.Sprintf("delegate job metadata for %s was not persisted: %v", jobID, err)
+}
+
+func reassociateSubmittedJobInput(input handoff.JobInput, jobID string, warnings []string) (handoff.JobInput, []string) {
+	reassociated, err := handoff.ReassociateJobInput(input, jobID, handoff.Hooks{})
+	if reassociated.Path != "" {
+		input = reassociated
+	}
+	if err != nil {
+		warnings = append(warnings, fmt.Sprintf("job input for %s could not be re-associated: %v", jobID, err))
+	}
+	return input, warnings
 }
 
 func cleanupUntrackedJobInput(input handoff.JobInput, sessionID string, state engine.JobState) error {

@@ -174,6 +174,75 @@ print(version)
   return 2
 }
 
+sha256_file() {
+  local path=$1
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -- "$path" | awk '{print $1}'
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 -- "$path" | awk '{print $1}'
+    return
+  fi
+  printf 'release-check: sha256sum or shasum is required to verify staged files\n' >&2
+  return 2
+}
+
+verify_staged_hashes() {
+  local raw
+  raw=$(cat)
+
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$raw" | python3 -c '
+import hashlib
+import json
+import sys
+
+doc = json.load(sys.stdin)
+for target, target_doc in doc["targets"].items():
+    for index, file_doc in enumerate(target_doc["files"]):
+        path = file_doc["path"]
+        expected = file_doc["sha256"]
+        try:
+            with open(path, "rb") as staged_file:
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: staged_file.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                actual = digest.hexdigest()
+        except (OSError, ValueError) as exc:
+            print(f"release-check: cannot hash staged {target} file {path}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if actual != expected:
+            print(
+                f"release-check: staged hash mismatch for targets.{target}.files[{index}] {path}: got {actual}, want {expected}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+'
+    return
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    local target index path expected actual
+    while IFS=$'\t' read -r target index path expected; do
+      if [[ ! -f "$path" ]]; then
+        printf 'release-check: staged file missing for targets.%s.files[%s]: %s\n' "$target" "$index" "$path" >&2
+        return 1
+      fi
+      actual=$(sha256_file "$path") || return
+      if [[ "$actual" != "$expected" ]]; then
+        printf 'release-check: staged hash mismatch for targets.%s.files[%s] %s: got %s, want %s\n' \
+          "$target" "$index" "$path" "$actual" "$expected" >&2
+        return 1
+      fi
+    done < <(printf '%s' "$raw" | jq -r '.targets | to_entries[] as $target | $target.value.files | to_entries[] | [$target.key, (.key | tostring), .value.path, .value.sha256] | @tsv')
+    return
+  fi
+
+  printf 'release-check: python3 or jq is required to verify staged file hashes\n' >&2
+  return 2
+}
+
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/delegate-release-check.XXXXXX")
 cleanup() {
   rm -rf -- "$STAGE"
@@ -186,6 +255,7 @@ if [[ "$INSTALL_VERSION" != "$VERSION" ]]; then
   printf 'release-check: installer version mismatch: got %s, want %s\n' "$INSTALL_VERSION" "$VERSION" >&2
   exit 1
 fi
+printf '%s' "$INSTALL_JSON" | verify_staged_hashes
 
 BIN="$STAGE/.local/bin/delegate"
 if [[ ! -x "$BIN" ]]; then
