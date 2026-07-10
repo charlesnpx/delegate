@@ -18,6 +18,7 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	jobID := fs.String("job", "", "job id")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	wait := fs.Bool("wait", false, "wait for terminal status")
+	probe := fs.Bool("probe", false, "run process/socket/log liveness probes for the job")
 	if err := fs.Parse(args); err != nil {
 		return 0, err
 	}
@@ -26,6 +27,12 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	if *wait && *jobID == "" {
 		return 0, fmt.Errorf("delegate status --wait requires --job")
+	}
+	if *probe && *jobID == "" {
+		return 0, fmt.Errorf("delegate status --probe requires --job")
+	}
+	if *probe && *wait {
+		return 0, fmt.Errorf("use only one of --probe or --wait")
 	}
 	ctx := context.Background()
 	c, _, err := connectAgentbusCommand(ctx, setupRequiredCapabilities())
@@ -45,6 +52,20 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if *probe {
+		job, ok := findJobStatus(status, *jobID)
+		if !ok {
+			return 0, fmt.Errorf("job %q not found", *jobID)
+		}
+		probeResult, err := probeJobStatus(ctx, job)
+		if err != nil {
+			return 0, err
+		}
+		if *jsonOut {
+			return 0, writeJSONLine(stdout, probeResult)
+		}
+		return 0, writeProbeSummary(stdout, probeResult)
+	}
 	if *jsonOut {
 		return 0, writeJSONLine(stdout, status)
 	}
@@ -54,6 +75,35 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 	}
 	return 0, nil
+}
+
+func findJobStatus(status client.JobStatusResult, jobID string) (client.JobStatus, bool) {
+	for _, job := range status.Jobs {
+		if job.JobID == jobID {
+			return job, true
+		}
+	}
+	return client.JobStatus{}, false
+}
+
+func writeProbeSummary(stdout io.Writer, result statusProbeResult) error {
+	if _, err := fmt.Fprintf(stdout, "%s %s verdict=%s\n", result.JobID, result.State, result.Verdict); err != nil {
+		return err
+	}
+	for _, probe := range result.Probes {
+		if _, err := fmt.Fprintf(stdout, "%s: %s", probe.Name, probe.Status); err != nil {
+			return err
+		}
+		if probe.Detail != "" {
+			if _, err := fmt.Fprintf(stdout, " (%s)", probe.Detail); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintln(stdout); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func runResult(args []string, stdout, stderr io.Writer) (int, error) {

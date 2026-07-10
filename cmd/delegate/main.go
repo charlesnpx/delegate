@@ -10,8 +10,8 @@ import (
 	"github.com/charlesnpx/delegate/internal/handoff"
 )
 
-// Version is the development version reported by the initial scaffold.
-const Version = "v0.0.0-dev"
+// Version is the development version overridden by release builds.
+var Version = "0.0.0-dev"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
@@ -37,6 +37,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return finishCommand(code, err, stderr)
 	case "cancel":
 		code, err := runCancel(args[1:], stdout, stderr)
+		return finishCommand(code, err, stderr)
+	case "install-skills":
+		code, err := runInstallSkills(args[1:], stdout, stderr)
 		return finishCommand(code, err, stderr)
 	}
 	if len(args) >= 2 && args[0] == "handoff" && args[1] == "create" {
