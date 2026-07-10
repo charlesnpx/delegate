@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -251,17 +252,11 @@ func verifyProcessIdentity(ctx context.Context, ops probeOps, job client.JobStat
 }
 
 func expectedProcessStartTime(job client.JobStatus, pid int) (string, bool) {
-	refs := []engine.ProcessRef{job.BackendChild, job.Worker}
-	for _, ref := range refs {
-		if ref.PID == pid {
-			return ref.StartTime, ref.StartTime != ""
-		}
+	if job.BackendChildPID == pid {
+		return job.BackendChildStartTime, job.BackendChildStartTime != ""
 	}
-	if job.BackendChildPID == pid && job.BackendChild.PID == 0 && job.BackendChild.StartTime != "" {
-		return job.BackendChild.StartTime, true
-	}
-	if job.WorkerPID == pid && job.Worker.PID == 0 && job.Worker.StartTime != "" {
-		return job.Worker.StartTime, true
+	if job.WorkerPID == pid {
+		return job.WorkerStartTime, job.WorkerStartTime != ""
 	}
 	return "", false
 }
@@ -460,14 +455,19 @@ func realProcessObservation(ctx context.Context, pid int) processObservation {
 }
 
 func realSocketObservation(ctx context.Context, pid int) socketObservation {
-	out, err := probeCommandOutput(ctx, "lsof", "-p", strconv.Itoa(pid), "-iTCP", "-sTCP:ESTABLISHED")
+	out, err := probeCommandOutput(ctx, "lsof", "-a", "-p", strconv.Itoa(pid), "-iTCP", "-sTCP:ESTABLISHED")
 	raw := strings.TrimSpace(string(out))
 	obs := socketObservation{Raw: raw}
+	if err != nil {
+		var exitErr *exec.ExitError
+		if raw == "" && errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return obs
+		}
+		obs.Err = err.Error()
+		return obs
+	}
 	if raw != "" && strings.Contains(raw, "TCP") {
 		obs.Established = true
-	}
-	if err != nil {
-		obs.Err = err.Error()
 	}
 	return obs
 }

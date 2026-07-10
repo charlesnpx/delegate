@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -34,13 +35,13 @@ func TestRunStatusProbeFlatWithInjectedProcessSocketAndFS(t *testing.T) {
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		status: client.JobStatusResult{Jobs: []client.JobStatus{{
-			JobID:           "job_probe",
-			State:           engine.StateRunning,
-			WorkerPID:       100,
-			BackendChildPID: 200,
-			Worker:          engine.ProcessRef{PID: 100, StartTime: "worker-start"},
-			BackendChild:    engine.ProcessRef{PID: 200, StartTime: "backend-start"},
-			LogPaths:        engine.LogPaths{Stdout: "/tmp/out.log"},
+			JobID:                 "job_probe",
+			State:                 engine.StateRunning,
+			WorkerPID:             100,
+			WorkerStartTime:       "worker-start",
+			BackendChildPID:       200,
+			BackendChildStartTime: "backend-start",
+			LogPaths:              engine.LogPaths{Stdout: "/tmp/out.log"},
 		}}},
 	}
 	restoreAgentbus := stubAgentbusGlobals(t, fake)
@@ -156,6 +157,33 @@ func TestRunStatusProbeMissingLsofIsInconclusive(t *testing.T) {
 	assertProbeStatus(t, result.Probes, "network", probeStatusUnknown)
 }
 
+func TestRealSocketObservationNoMatchIsFlat(t *testing.T) {
+	exitOne := exec.Command("sh", "-c", "exit 1").Run()
+	if exitOne == nil {
+		t.Fatal("exit 1 command unexpectedly succeeded")
+	}
+	restoreCommand := stubProbeCommandOutput(t, func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name != "lsof" {
+			t.Fatalf("command = %q, want lsof", name)
+		}
+		wantArgs := []string{"-a", "-p", "200", "-iTCP", "-sTCP:ESTABLISHED"}
+		if strings.Join(args, "\x00") != strings.Join(wantArgs, "\x00") {
+			t.Fatalf("args = %q, want %q", args, wantArgs)
+		}
+		return nil, exitOne
+	})
+	defer restoreCommand()
+
+	obs := realSocketObservation(context.Background(), 200)
+	if obs.Established || obs.Err != "" || obs.Raw != "" {
+		t.Fatalf("observation = %#v, want empty no-match observation", obs)
+	}
+	probe := socketProbe(obs, obs, 200)
+	if probe.Status != probeStatusFlat {
+		t.Fatalf("status = %q, want %q", probe.Status, probeStatusFlat)
+	}
+}
+
 func TestRunStatusProbeMissingProcessStartTimeIsInconclusive(t *testing.T) {
 	restoreProbe := stubProbeOps(t, probeOps{
 		ProcessIdentity: func(context.Context, int) processIdentityObservation {
@@ -179,7 +207,7 @@ func TestRunStatusProbeMissingProcessStartTimeIsInconclusive(t *testing.T) {
 	defer restoreProbe()
 
 	job := verifiedProbeJob()
-	job.BackendChild = engine.ProcessRef{}
+	job.BackendChildStartTime = ""
 	result, err := probeJobStatus(context.Background(), job)
 	if err != nil {
 		t.Fatal(err)
@@ -230,11 +258,11 @@ func TestRunStatusProbePIDReuseIsInconclusive(t *testing.T) {
 
 func TestLivenessVerdictActiveWhenAnyProbeMoves(t *testing.T) {
 	probes, err := runLivenessProbes(context.Background(), client.JobStatus{
-		JobID:           "job_active",
-		State:           engine.StateRunning,
-		BackendChildPID: 42,
-		BackendChild:    engine.ProcessRef{PID: 42, StartTime: "backend-start"},
-		LogPaths:        engine.LogPaths{Stdout: "/tmp/out.log"},
+		JobID:                 "job_active",
+		State:                 engine.StateRunning,
+		BackendChildPID:       42,
+		BackendChildStartTime: "backend-start",
+		LogPaths:              engine.LogPaths{Stdout: "/tmp/out.log"},
 	}, probeOps{
 		ProcessIdentity: matchingProcessIdentity(42, "backend-start"),
 		Process: sequenceProcess(
@@ -329,13 +357,13 @@ func matchingProcessIdentity(wantPID int, startTime string) func(context.Context
 
 func verifiedProbeJob() client.JobStatus {
 	return client.JobStatus{
-		JobID:           "job_probe",
-		State:           engine.StateRunning,
-		WorkerPID:       100,
-		BackendChildPID: 200,
-		Worker:          engine.ProcessRef{PID: 100, StartTime: "worker-start"},
-		BackendChild:    engine.ProcessRef{PID: 200, StartTime: "backend-start"},
-		LogPaths:        engine.LogPaths{Stdout: "/tmp/out.log"},
+		JobID:                 "job_probe",
+		State:                 engine.StateRunning,
+		WorkerPID:             100,
+		WorkerStartTime:       "worker-start",
+		BackendChildPID:       200,
+		BackendChildStartTime: "backend-start",
+		LogPaths:              engine.LogPaths{Stdout: "/tmp/out.log"},
 	}
 }
 
