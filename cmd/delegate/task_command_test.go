@@ -459,6 +459,58 @@ func TestBackgroundJobInputIsSweptByNextResult(t *testing.T) {
 	}
 }
 
+func TestSweepAdoptsOldProvisionalMetadataBySubmittedJobTag(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "delegate")
+	provisionalID := "job_provisional_adoption"
+	actualID := "job_actual_adoption"
+	input, err := handoff.PersistJobInput(handoff.JobInputOptions{
+		StateDir: stateDir,
+		JobID:    provisionalID,
+		Prompt:   handoff.ResolvedPrompt{Prompt: "review prompt", Source: handoff.SourcePrompt},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir, err = handoff.ResolveStateDir(handoff.StateConfig{StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := os.MkdirTemp(stateDir, "review-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveJobMetadata(stateDir, jobMetadata{
+		Schema:          envelopeSchema,
+		JobID:           provisionalID,
+		Kind:            reviewKind,
+		JobInputPath:    input.Path,
+		ReviewWorkspace: workspace,
+		Provisional:     true,
+		CreatedAt:       time.Now().Add(-2 * provisionalMetadataAdoptionThreshold),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAgentbusClient{status: client.JobStatusResult{Jobs: []client.JobStatus{{
+		JobID: actualID,
+		State: engine.StateCompleted,
+		Tags:  map[string]string{provisionalJobIDTag: provisionalID},
+	}}}}
+
+	if err := sweepTerminalJobInputs(context.Background(), fake, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("adopted terminal workspace remains: %v", err)
+	}
+	if _, found, err := loadJobMetadata(stateDir, provisionalID); err != nil || found {
+		t.Fatalf("provisional metadata found=%v err=%v", found, err)
+	}
+	meta, found, err := loadJobMetadata(stateDir, actualID)
+	if err != nil || !found || meta.Provisional || meta.JobInputPath != "" || meta.ReviewWorkspace != "" {
+		t.Fatalf("adopted metadata=%#v found=%v err=%v", meta, found, err)
+	}
+}
+
 func TestTaskResumeSessionUsesResumeAndTurnStart(t *testing.T) {
 	cwd := t.TempDir()
 	fake := &fakeAgentbusClient{

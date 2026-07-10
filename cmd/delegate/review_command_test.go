@@ -231,6 +231,65 @@ func TestReviewMetadataFailureAfterLaunchUsesDurableFallbackAndPreservesKind(t *
 	}
 }
 
+func TestReviewMetadataFailureAfterSubmitReturnsRealJobEnvelopeAndKeepsWorkspace(t *testing.T) {
+	repo := newCommandGitFixture(t)
+	writeCommandFixture(t, repo, "visible.txt", "change\n")
+	fake := &fakeAgentbusClient{
+		hello:  helloWithCapabilities(),
+		result: client.JobResult{JobID: "job_review_metadata_orphan", State: engine.StateRunning},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	oldPrimary := saveDelegateJobMetadata
+	oldFallback := saveLaunchedJobMetadataFallback
+	primaryCalls := 0
+	saveDelegateJobMetadata = func(stateDir string, meta jobMetadata) error {
+		primaryCalls++
+		if primaryCalls > 1 {
+			return errors.New("primary metadata unavailable after submit")
+		}
+		return saveJobMetadata(stateDir, meta)
+	}
+	saveLaunchedJobMetadataFallback = func(string, jobMetadata) error {
+		return errors.New("fallback metadata unavailable after submit")
+	}
+	defer func() {
+		saveDelegateJobMetadata = oldPrimary
+		saveLaunchedJobMetadataFallback = oldFallback
+	}()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--wait", "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("review code=%d stderr=%q", code, stderr.String())
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("JobSubmit calls=%d, want 1", len(fake.submits))
+	}
+	var env LaunchEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("launch envelope invalid: %v; raw=%q", err, stdout.String())
+	}
+	if env.JobID != "job_review_metadata_orphan" || env.Status != string(engine.StateQueued) {
+		t.Fatalf("launch envelope=%#v, want real submitted job", env)
+	}
+	workspace := fake.submits[0].TaskSpec.CWD
+	if info, err := os.Stat(workspace); err != nil || !info.IsDir() {
+		t.Fatalf("review workspace removed after successful submit: info=%v err=%v", info, err)
+	}
+	for _, warning := range []string{"primary metadata unavailable after submit", "fallback metadata unavailable after submit"} {
+		if !strings.Contains(stderr.String(), warning) {
+			t.Fatalf("stderr=%q, want warning %q", stderr.String(), warning)
+		}
+	}
+	provisionalID := fake.submits[0].TaskSpec.Tags[provisionalJobIDTag]
+	meta, found, err := loadJobMetadata("", provisionalID)
+	if err != nil || !found || !meta.Provisional || meta.ReviewWorkspace != workspace {
+		t.Fatalf("provisional metadata=%#v found=%v err=%v", meta, found, err)
+	}
+}
+
 func TestReviewAllowLiveRepoReadIsExplicitAndWarned(t *testing.T) {
 	repo := newCommandGitFixture(t)
 	writeCommandFixture(t, repo, "visible.txt", "change\n")

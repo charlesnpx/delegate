@@ -75,6 +75,11 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		ReviewWorkspace: assembled.Workspace,
 	}
 	result, err := executeTask(taskOpts, handoff.ResolvedPrompt{Prompt: prompt, Source: handoff.SourcePrompt}, turnPolicy)
+	if result.Submitted {
+		// A successful daemon submission owns the workspace even if later local
+		// bookkeeping fails; provisional metadata and the launch envelope recover it.
+		ownsWorkspace = false
+	}
 	if err != nil {
 		return 0, err
 	}

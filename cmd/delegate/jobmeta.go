@@ -25,6 +25,7 @@ type jobMetadata struct {
 	NoContract      bool      `json:"no_contract,omitempty"`
 	JobInputPath    string    `json:"job_input_path,omitempty"`
 	ReviewWorkspace string    `json:"review_workspace,omitempty"`
+	Provisional     bool      `json:"provisional,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
@@ -206,6 +207,36 @@ func delegateSessionMetadata(stateDir, sessionID string) (jobMetadata, bool, err
 		}
 	}
 	return latest, found, nil
+}
+
+func provisionalJobMetadataOlderThan(stateDir string, cutoff time.Time) ([]jobMetadata, error) {
+	dir, err := jobMetadataDir(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var provisional []jobMetadata
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		jobID := strings.TrimSuffix(entry.Name(), ".json")
+		if err := validateDelegateJobID(jobID); err != nil {
+			continue
+		}
+		meta, found, err := loadJobMetadata(stateDir, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if !found || !meta.Provisional || meta.CreatedAt.IsZero() || meta.CreatedAt.After(cutoff) {
+			continue
+		}
+		provisional = append(provisional, meta)
+	}
+	return provisional, nil
 }
 
 func metadataIsNewer(candidate, current jobMetadata) bool {

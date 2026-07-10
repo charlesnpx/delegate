@@ -122,6 +122,10 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	if err != nil {
 		return Context{}, err
 	}
+	secretBlobs, err := collectSecretBlobHashes(ctx, repoRoot, diffBase)
+	if err != nil {
+		return Context{}, err
+	}
 
 	for i := range changed {
 		changed[i].Redacted = IsSecretPath(changed[i].Path) || IsSecretPath(changed[i].sourcePath)
@@ -139,6 +143,10 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 		}
 		if err != nil {
 			return Context{}, err
+		}
+		if diffReferencesSecretBlob(changed[i].diff, secretBlobs) {
+			changed[i].Redacted = true
+			changed[i].diff = nil
 		}
 	}
 
@@ -258,21 +266,25 @@ func IsSecretPath(path string) bool {
 	}
 	normalized := strings.ToLower(filepath.ToSlash(path))
 	parts := strings.Split(normalized, "/")
-	for _, part := range parts {
+	for i, part := range parts {
+		matchedPart := strings.NewReplacer("_", ".", "-", ".").Replace(part)
+		if part == ".kube" && i+1 < len(parts) && parts[i+1] == "config" {
+			return true
+		}
 		if part == ".aws" || part == ".ssh" || part == ".gnupg" || part == ".netrc" || part == ".npmrc" {
 			return true
 		}
-		if strings.HasPrefix(part, ".env") || strings.HasSuffix(part, ".env") ||
-			strings.Contains(part, "credential") || strings.Contains(part, "creds") ||
-			strings.Contains(part, "password") || strings.Contains(part, "secret") || strings.Contains(part, "token") ||
-			strings.HasPrefix(part, "kubeconfig") || strings.HasPrefix(part, "id_rsa") ||
-			strings.HasPrefix(part, "id_ecdsa") || strings.HasPrefix(part, "id_ed25519") {
+		if strings.HasPrefix(matchedPart, ".env") || strings.HasSuffix(matchedPart, ".env") ||
+			strings.Contains(matchedPart, "credential") || strings.Contains(matchedPart, "creds") ||
+			strings.Contains(matchedPart, "password") || strings.Contains(matchedPart, "secret") || strings.Contains(matchedPart, "token") ||
+			strings.HasPrefix(matchedPart, "kubeconfig") || strings.HasPrefix(matchedPart, "kube.config") ||
+			strings.HasPrefix(matchedPart, "id.rsa") || strings.HasPrefix(matchedPart, "id.ecdsa") || strings.HasPrefix(matchedPart, "id.ed25519") {
 			return true
 		}
-		if strings.Contains(part, "service-account") && strings.HasSuffix(part, ".json") {
+		if (strings.Contains(matchedPart, "service.account") || strings.Contains(matchedPart, "serviceaccount")) && strings.HasSuffix(matchedPart, ".json") {
 			return true
 		}
-		compact := strings.NewReplacer("-", "", "_", "", ".", "").Replace(part)
+		compact := strings.ReplaceAll(matchedPart, ".", "")
 		if strings.Contains(compact, "apikey") || strings.Contains(compact, "privatekey") || strings.Contains(compact, "accesskey") || strings.Contains(compact, "authkey") || strings.Contains(compact, "apitoken") || strings.Contains(compact, "accesstoken") || strings.Contains(compact, "authtoken") || strings.Contains(compact, "refreshtoken") {
 			return true
 		}
@@ -487,22 +499,120 @@ func nameStatusArgs(from, to string) []string {
 }
 
 func appendUntracked(ctx context.Context, repoRoot string, files *[]changedFile) error {
-	seen := make(map[string]bool, len(*files))
-	for _, file := range *files {
-		seen[file.Path] = true
-		seen[file.sourcePath] = true
+	seen := make(map[string]int, len(*files))
+	for i, file := range *files {
+		seen[file.Path] = i
 	}
 	untracked, err := gitOutput(ctx, repoRoot, false, "ls-files", "--others", "--exclude-standard", "-z", "--")
 	if err != nil {
 		return fmt.Errorf("collect untracked working-tree paths: %w", err)
 	}
 	for _, path := range splitNUL(untracked) {
-		if path == "" || seen[path] {
+		if path == "" {
 			continue
 		}
-		*files = append(*files, changedFile{File: File{Path: path, Status: "??"}, untracked: true})
+		untrackedFile := changedFile{File: File{Path: path, Status: "??"}, untracked: true}
+		if index, ok := seen[path]; ok {
+			if strings.HasPrefix((*files)[index].Status, "D") {
+				(*files)[index] = untrackedFile
+			}
+			continue
+		}
+		*files = append(*files, untrackedFile)
 	}
 	return nil
+}
+
+// collectSecretBlobHashes taints content that appeared at a secret-looking
+// path anywhere in the committed review range, index, or current worktree.
+// Diffs referencing a tainted pre- or post-image are rendered path/status-only.
+func collectSecretBlobHashes(ctx context.Context, repoRoot, historyBase string) (map[string]struct{}, error) {
+	hashes := make(map[string]struct{})
+	var commits []string
+	if historyBase != "" {
+		raw, err := gitOutput(ctx, repoRoot, false, "rev-list", historyBase+"..HEAD")
+		if err != nil {
+			return nil, fmt.Errorf("collect review commits for secret redaction: %w", err)
+		}
+		commits = strings.Fields(string(raw))
+	} else {
+		commits = []string{"HEAD"}
+	}
+	for _, commit := range commits {
+		raw, err := gitOutput(ctx, repoRoot, false, "ls-tree", "-r", "-z", "--full-tree", commit)
+		if err != nil {
+			return nil, fmt.Errorf("inspect commit %s for secret redaction: %w", commit, err)
+		}
+		for _, entry := range splitNUL(raw) {
+			metadata, path, ok := strings.Cut(entry, "\t")
+			fields := strings.Fields(metadata)
+			if !ok || len(fields) < 3 || !IsSecretPath(path) {
+				continue
+			}
+			hashes[fields[2]] = struct{}{}
+		}
+	}
+
+	index, err := gitOutput(ctx, repoRoot, false, "ls-files", "--stage", "-z", "--")
+	if err != nil {
+		return nil, fmt.Errorf("inspect index for secret redaction: %w", err)
+	}
+	for _, entry := range splitNUL(index) {
+		metadata, path, ok := strings.Cut(entry, "\t")
+		fields := strings.Fields(metadata)
+		if !ok || len(fields) < 2 || !IsSecretPath(path) {
+			continue
+		}
+		hashes[fields[1]] = struct{}{}
+	}
+
+	paths, err := gitOutput(ctx, repoRoot, false, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--")
+	if err != nil {
+		return nil, fmt.Errorf("inspect worktree paths for secret redaction: %w", err)
+	}
+	for _, path := range splitNUL(paths) {
+		if !IsSecretPath(path) {
+			continue
+		}
+		info, statErr := os.Lstat(filepath.Join(repoRoot, filepath.FromSlash(path)))
+		if errors.Is(statErr, os.ErrNotExist) || statErr == nil && info.IsDir() {
+			continue
+		}
+		if statErr != nil {
+			return nil, fmt.Errorf("inspect secret worktree path %q: %w", path, statErr)
+		}
+		raw, hashErr := gitOutput(ctx, repoRoot, false, "hash-object", "--no-filters", "--", path)
+		if hashErr != nil {
+			return nil, fmt.Errorf("hash secret worktree path %q: %w", path, hashErr)
+		}
+		if hash := strings.TrimSpace(string(raw)); hash != "" {
+			hashes[hash] = struct{}{}
+		}
+	}
+	return hashes, nil
+}
+
+func diffReferencesSecretBlob(diff []byte, secretBlobs map[string]struct{}) bool {
+	for _, line := range bytes.Split(diff, []byte{'\n'}) {
+		if !bytes.HasPrefix(line, []byte("index ")) {
+			continue
+		}
+		fields := bytes.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		pre, post, ok := bytes.Cut(fields[1], []byte(".."))
+		if !ok {
+			continue
+		}
+		if _, tainted := secretBlobs[string(pre)]; tainted {
+			return true
+		}
+		if _, tainted := secretBlobs[string(post)]; tainted {
+			return true
+		}
+	}
+	return false
 }
 
 func trackedDiff(ctx context.Context, repoRoot, from, to string, paths ...string) ([]byte, error) {

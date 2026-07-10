@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -133,6 +134,30 @@ func TestAssembleAutoCombinesCommittedBranchAndWorkingTreeOverlay(t *testing.T) 
 	}
 }
 
+func TestAssembleAutoUsesUntrackedRecreationOverBranchDeletion(t *testing.T) {
+	repo := newGitFixture(t)
+	writeFixtureFile(t, repo, "recreated.txt", "base content\n")
+	gitFixture(t, repo, "add", "recreated.txt")
+	gitFixture(t, repo, "commit", "-m", "add file")
+	base := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	gitFixture(t, repo, "switch", "-c", "feature")
+	gitFixture(t, repo, "rm", "recreated.txt")
+	gitFixture(t, repo, "commit", "-m", "delete file")
+	writeFixtureFile(t, repo, "recreated.txt", "UNTRACKED_RECREATION_WINS\n")
+
+	assembled, err := Assemble(context.Background(), Options{CWD: repo, Base: base, Scope: ScopeAuto, StateDir: filepath.Join(t.TempDir(), "state")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	if !strings.Contains(assembled.Inline, "UNTRACKED_RECREATION_WINS") {
+		t.Fatalf("automatic context dropped untracked recreation: %q", assembled.Inline)
+	}
+	if len(assembled.Files) != 1 || assembled.Files[0].Path != "recreated.txt" || assembled.Files[0].Status != "??" {
+		t.Fatalf("automatic files = %#v, want untracked recreation", assembled.Files)
+	}
+}
+
 func TestAssembleSanitizesTrackedAndUntrackedSecretPathsBeforeArtifact(t *testing.T) {
 	repo := newGitFixture(t)
 	writeFixtureFile(t, repo, ".env.production", "TRACKED_SECRET_OLD=never\n")
@@ -232,6 +257,68 @@ func TestAssembleRedactsRenameCopyWhenEitherEndpointIsSecretAndOmitsBinaryConten
 		if strings.Contains(assembled.Inline, forbidden) {
 			t.Fatalf("sanitized context leaked binary/secret marker %q: %q", forbidden, assembled.Inline)
 		}
+	}
+}
+
+func TestAssembleRedactsContentThatTraversedSecretRenameChainAndCopies(t *testing.T) {
+	repo := newGitFixture(t)
+	writeFixtureFile(t, repo, "public.txt", "public base\n")
+	gitFixture(t, repo, "add", "public.txt")
+	gitFixture(t, repo, "commit", "-m", "public base")
+	base := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	gitFixture(t, repo, "switch", "-c", "feature")
+	gitFixture(t, repo, "mv", "public.txt", ".ENV")
+	writeFixtureFile(t, repo, ".ENV", "CHAIN_SECRET_MUST_NOT_LEAK\n")
+	gitFixture(t, repo, "add", ".ENV")
+	gitFixture(t, repo, "commit", "-m", "move through secret path")
+	gitFixture(t, repo, "mv", ".ENV", "public.txt")
+	raw, err := os.ReadFile(filepath.Join(repo, "public.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "public-copy.txt"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitFixture(t, repo, "add", "public.txt", "public-copy.txt")
+	gitFixture(t, repo, "commit", "-m", "return to public paths")
+
+	assembled, err := Assemble(context.Background(), Options{CWD: repo, Base: base, Scope: ScopeBranch, StateDir: filepath.Join(t.TempDir(), "state")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	if strings.Contains(assembled.Inline, "CHAIN_SECRET_MUST_NOT_LEAK") {
+		t.Fatalf("secret rename-chain content leaked: %q", assembled.Inline)
+	}
+	redacted := make(map[string]bool)
+	for _, file := range assembled.Files {
+		redacted[file.Path] = file.Redacted
+	}
+	for _, path := range []string{"public.txt", "public-copy.txt"} {
+		if !redacted[path] || !strings.Contains(assembled.Inline, "REDACTED") || !strings.Contains(assembled.Inline, strconv.Quote(path)) {
+			t.Fatalf("%s was not content-redacted: files=%#v context=%q", path, assembled.Files, assembled.Inline)
+		}
+	}
+}
+
+func TestAssembleRedactsNormalizedSecretPathVariants(t *testing.T) {
+	paths := []string{"SERVICE_ACCOUNT.JSON", "service_account.json", ".kube/config", "KUBE_CONFIG"}
+	for _, path := range paths {
+		t.Run(strings.NewReplacer("/", "_", ".", "_").Replace(path), func(t *testing.T) {
+			repo := newGitFixture(t)
+			writeFixtureFile(t, repo, path, "NORMALIZED_SECRET_MUST_NOT_LEAK\n")
+			assembled, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeWorkingTree, StateDir: filepath.Join(t.TempDir(), "state")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer Cleanup(assembled)
+			if !strings.Contains(assembled.Inline, "REDACTED\t??\t"+strconv.Quote(path)) {
+				t.Fatalf("normalized secret path %q was not redacted: %q", path, assembled.Inline)
+			}
+			if strings.Contains(assembled.Inline, "NORMALIZED_SECRET_MUST_NOT_LEAK") {
+				t.Fatalf("normalized secret content leaked: %q", assembled.Inline)
+			}
+		})
 	}
 }
 
@@ -455,7 +542,7 @@ func TestIsSecretPath(t *testing.T) {
 	for _, path := range []string{
 		".ENV", "config/.env.local", "config/PROD.ENV", ".NETRC", ".NPMRC",
 		"Credentials.json", "backup-creds.yml", "db-PASSWORD.txt", "nested/secrets/value.txt", "api-token.txt",
-		"KUBECONFIG-prod", "prod-SERVICE-ACCOUNT-key.JSON", "service_api_key.json",
+		"KUBECONFIG-prod", "KUBE_CONFIG", "prod-SERVICE-ACCOUNT-key.JSON", "SERVICE_ACCOUNT.JSON", "service_account.json", "service_api_key.json", ".kube/config",
 		"id_rsa", "id_ECDSA.pub", "id_ed25519_backup", "cert/client.P12", "cert/client.PFX",
 		"stores/app.JKS", "stores/app.KEYSTORE", "tls/private.PEM", "tls/private.KEY", "auth/session.TOKEN",
 		"home/.AWS/config", "home/.SSH/config", "home/.GNUPG/pubring.kbx",
