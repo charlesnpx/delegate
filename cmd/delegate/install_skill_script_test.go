@@ -127,8 +127,13 @@ func TestDelegatedInstallerToolsInstallBuildsDelegate(t *testing.T) {
 	}
 
 	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "tools", "--json", "--install-root", root}, env)
-	if installed.Version != "0.2.0" {
-		t.Fatalf("installer version = %q, want 0.2.0", installed.Version)
+	versionBytes, err := os.ReadFile(filepath.Join("..", "..", "VERSION"))
+	if err != nil {
+		t.Fatalf("read VERSION: %v", err)
+	}
+	expectedVersion := strings.TrimSpace(string(versionBytes))
+	if installed.Version != expectedVersion {
+		t.Fatalf("installer version = %q, want %s", installed.Version, expectedVersion)
 	}
 	toolsTarget := installed.Targets["tools"]
 	if len(toolsTarget.Files) != 1 {
@@ -155,7 +160,7 @@ func TestDelegatedInstallerToolsInstallBuildsDelegate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("staged delegate version failed: %v\n%s", err, out)
 	}
-	if got, want := string(out), "delegate 0.2.0\n"; got != want {
+	if got, want := string(out), "delegate "+expectedVersion+"\n"; got != want {
 		t.Fatalf("staged delegate version = %q, want %q", got, want)
 	}
 }

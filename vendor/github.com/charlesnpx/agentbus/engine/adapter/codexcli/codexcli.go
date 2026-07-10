@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/charlesnpx/agentbus/engine"
@@ -44,33 +42,11 @@ func New(opts Options) engine.Backend {
 }
 
 func discoverModels(ctx context.Context, binary string) (*engine.ModelDiscovery, error) {
-	out, err := exec.CommandContext(ctx, binary, "--help").CombinedOutput()
+	_, err := exec.CommandContext(ctx, binary, "--help").CombinedOutput()
 	if err != nil {
 		return nil, err
 	}
-	models := helpValues(string(out), `(?i)models?\s*(?:available|possible values|choices)?\s*[:=]\s*\[?([^\]\n]+)`)
-	efforts := helpValues(string(out), `(?i)(?:effort|reasoning effort)\s*(?:available|possible values|choices)?\s*[:=]\s*\[?([^\]\n]+)`)
-	if len(models) == 0 && len(efforts) == 0 {
-		return nil, fmt.Errorf("codex --help model discovery parser found no model or effort listings")
-	}
-	return &engine.ModelDiscovery{Models: models, Efforts: efforts, Source: "codex --help (listing syntax when exposed)"}, nil
-}
-
-func helpValues(text, pattern string) []string {
-	match := regexp.MustCompile(pattern).FindStringSubmatch(text)
-	if len(match) < 2 {
-		return nil
-	}
-	seen := map[string]struct{}{}
-	for _, value := range regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9._-]*`).FindAllString(match[1], -1) {
-		seen[value] = struct{}{}
-	}
-	values := make([]string, 0, len(seen))
-	for value := range seen {
-		values = append(values, value)
-	}
-	sort.Strings(values)
-	return values
+	return nil, fmt.Errorf("codex model discovery unavailable: no catalog exposed")
 }
 
 func buildArgs(resumeID string, opts engine.SessionOpts, input engine.TurnInput) ([]string, error) {
@@ -91,16 +67,23 @@ func buildArgs(resumeID string, opts engine.SessionOpts, input engine.TurnInput)
 	}
 	if resumeID != "" {
 		args = append(args, "resume", resumeID, "-")
+	} else {
+		args = append(args, "-")
 	}
 	return args, nil
 }
 
 func parseEvent(obj map[string]any) ([]engine.Event, string, error) {
-	id := firstString(obj, "session_id", "sessionId", "conversation_id", "conversationId", "id")
+	id := firstString(obj, "thread_id", "session_id", "sessionId", "conversation_id", "conversationId", "id")
 	typ := strings.ToLower(firstString(obj, "type", "event"))
 	switch typ {
-	case "task_started", "turn_started", "session_configured", "token_count":
+	case "thread.started", "task_started", "turn.started", "turn_started", "item.updated", "session_configured", "token_count":
 		return nil, id, nil
+	case "item.completed":
+		return parseItemCompleted(obj, id)
+	case "turn.completed":
+		text := firstString(obj, "last_agent_message", "lastAgentMessage", "result", "message", "text", "content", "output")
+		return []engine.Event{{Type: engine.EventResultMessage, Text: text, Metadata: obj}}, id, nil
 	case "agent_message", "agent_message_content_delta", "agentmessage", "agenttext", "agent_text", "assistant_text", "message", "assistant_message":
 		return agentTextEvent(obj, id)
 	case "task_complete", "turn_complete", "taskcomplete", "result":
@@ -131,10 +114,8 @@ func parseItemCompleted(obj map[string]any, id string) ([]engine.Event, string, 
 	switch itemType {
 	case "agent_message", "agentmessage", "assistant_message", "message":
 		return agentTextEvent(item, id)
-	case "local_shell_call", "exec_command", "tool_call", "function_call", "custom_tool_call", "mcp_tool_call":
-		return toolUseEvent(item, id)
 	default:
-		return nil, id, nil
+		return toolUseEvent(item, id)
 	}
 }
 

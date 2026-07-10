@@ -118,7 +118,7 @@ func TestWaitForJobResultSynthesizesEnvelopeInputAcrossTerminalStates(t *testing
 }
 
 func TestValidateBackendUsesHelloDiscoveryAndMetadata(t *testing.T) {
-	hello := client.HelloResult{Backends: []string{"gemini", "codex"}, BackendMetadata: []client.BackendInfo{{Backend: "gemini", Models: []string{"gemini-2.5-pro"}, Efforts: []string{"high"}}}}
+	hello := client.HelloResult{Backends: []string{"gemini", "codex"}, BackendMetadata: []client.BackendInfo{{Name: "gemini", Models: []string{"gemini-2.5-pro"}, Efforts: []string{"high"}}}}
 	if err := validateBackend(hello, "gemini", "gemini-2.5-pro", "high"); err != nil {
 		t.Fatal(err)
 	}
