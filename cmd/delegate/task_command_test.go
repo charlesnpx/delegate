@@ -367,7 +367,10 @@ type fakeAgentbusClient struct {
 	hello     client.HelloResult
 	submits   []client.JobSubmitParams
 	submitErr error
+	status    client.JobStatusResult
 	result    client.JobResult
+	cancel    client.JobCancelResult
+	cancelErr error
 }
 
 func (f *fakeAgentbusClient) Close() error { return nil }
@@ -403,6 +406,9 @@ func (f *fakeAgentbusClient) JobSubmit(_ context.Context, params client.JobSubmi
 }
 
 func (f *fakeAgentbusClient) JobStatus(context.Context, client.JobStatusParams) (client.JobStatusResult, error) {
+	if len(f.status.Jobs) > 0 {
+		return f.status, nil
+	}
 	if f.result.JobID == "" {
 		return client.JobStatusResult{}, nil
 	}
@@ -417,6 +423,12 @@ func (f *fakeAgentbusClient) JobResult(context.Context, client.JobResultParams) 
 }
 
 func (f *fakeAgentbusClient) JobCancel(context.Context, client.JobCancelParams) (client.JobCancelResult, error) {
+	if f.cancelErr != nil {
+		return client.JobCancelResult{}, f.cancelErr
+	}
+	if f.cancel.JobID != "" {
+		return f.cancel, nil
+	}
 	return client.JobCancelResult{}, errors.New("unexpected JobCancel")
 }
 
