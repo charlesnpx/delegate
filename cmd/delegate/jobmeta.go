@@ -11,20 +11,24 @@ import (
 
 	"github.com/charlesnpx/agentbus/engine"
 	"github.com/charlesnpx/delegate/internal/handoff"
+	reviewpkg "github.com/charlesnpx/delegate/internal/review"
 )
 
 type jobMetadata struct {
-	Schema       int       `json:"schema"`
-	JobID        string    `json:"job_id"`
-	Kind         string    `json:"kind"`
-	Backend      string    `json:"backend,omitempty"`
-	CWD          string    `json:"cwd,omitempty"`
-	SessionID    string    `json:"session_id,omitempty"`
-	ContractKind string    `json:"contractKind"`
-	NoContract   bool      `json:"no_contract,omitempty"`
-	JobInputPath string    `json:"job_input_path,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	Schema          int       `json:"schema"`
+	JobID           string    `json:"job_id"`
+	Kind            string    `json:"kind"`
+	Backend         string    `json:"backend,omitempty"`
+	CWD             string    `json:"cwd,omitempty"`
+	SessionID       string    `json:"session_id,omitempty"`
+	ContractKind    string    `json:"contractKind"`
+	NoContract      bool      `json:"no_contract,omitempty"`
+	JobInputPath    string    `json:"job_input_path,omitempty"`
+	ReviewWorkspace string    `json:"review_workspace,omitempty"`
+	Provisional     bool      `json:"provisional,omitempty"`
+	AdoptedJobID    string    `json:"adopted_job_id,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 func saveJobMetadata(stateDir string, meta jobMetadata) error {
@@ -76,6 +80,29 @@ func loadJobMetadata(stateDir, jobID string) (jobMetadata, bool, error) {
 	return meta, true, nil
 }
 
+func deleteJobMetadata(stateDir, jobID string) error {
+	if err := validateDelegateJobID(jobID); err != nil {
+		return err
+	}
+	dir, err := jobMetadataDir(stateDir)
+	if err != nil {
+		return err
+	}
+	err = os.Remove(filepath.Join(dir, jobID+".json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirFile.Close()
+	return dirFile.Sync()
+}
+
 func cleanupJobInput(stateDir, jobID, sessionID string, state engine.JobState) error {
 	meta, found, err := loadJobMetadata(stateDir, jobID)
 	if err != nil || !found {
@@ -97,6 +124,13 @@ func cleanupJobInput(stateDir, jobID, sessionID string, state engine.JobState) e
 			return err
 		}
 		meta.JobInputPath = ""
+		changed = true
+	}
+	if meta.ReviewWorkspace != "" && engine.IsTerminal(state) {
+		if err := reviewpkg.CleanupWorkspace(stateDir, meta.ReviewWorkspace); err != nil {
+			return err
+		}
+		meta.ReviewWorkspace = ""
 		changed = true
 	}
 	if !changed {
@@ -174,6 +208,36 @@ func delegateSessionMetadata(stateDir, sessionID string) (jobMetadata, bool, err
 		}
 	}
 	return latest, found, nil
+}
+
+func provisionalJobMetadataOlderThan(stateDir string, cutoff time.Time) ([]jobMetadata, error) {
+	dir, err := jobMetadataDir(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var provisional []jobMetadata
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		jobID := strings.TrimSuffix(entry.Name(), ".json")
+		if err := validateDelegateJobID(jobID); err != nil {
+			continue
+		}
+		meta, found, err := loadJobMetadata(stateDir, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if !found || !meta.Provisional || meta.CreatedAt.IsZero() || meta.CreatedAt.After(cutoff) {
+			continue
+		}
+		provisional = append(provisional, meta)
+	}
+	return provisional, nil
 }
 
 func metadataIsNewer(candidate, current jobMetadata) bool {

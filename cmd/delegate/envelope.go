@@ -13,8 +13,10 @@ import (
 )
 
 const (
-	envelopeSchema = 1
-	taskKind       = "task"
+	envelopeSchema        = 1
+	taskKind              = "task"
+	reviewKind            = "review"
+	adversarialReviewKind = "adversarial_review"
 
 	contractKindShape      = "shape"
 	contractKindJSONSchema = "jsonSchema"

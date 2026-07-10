@@ -16,13 +16,14 @@ import (
 
 const (
 	// Version is the content version for the generated skill prose.
-	Version = "v0.1.0"
+	Version = "v0.1.1"
 
 	TargetClaude = "claude"
 	TargetCodex  = "codex"
 	TargetAll    = "all"
 
 	KindLaunch     = "launch"
+	KindReview     = "review"
 	KindJobControl = "job-control"
 	KindSetup      = "setup"
 )
@@ -68,6 +69,7 @@ type renderData struct {
 
 var (
 	launchTemplate = template.Must(template.New("launch").Parse(strings.TrimSpace(launchSkillTemplate) + "\n"))
+	reviewTemplate = template.Must(template.New("review").Parse(strings.TrimSpace(reviewSkillTemplate) + "\n"))
 	jobTemplate    = template.Must(template.New("job").Parse(strings.TrimSpace(jobControlSkillTemplate) + "\n"))
 	setupTemplate  = template.Must(template.New("setup").Parse(strings.TrimSpace(setupSkillTemplate) + "\n"))
 )
@@ -298,9 +300,29 @@ func crossAgentSpecs(target, backend, otherAgent, hostAgent string) []skillSpec 
 			Description:  fmt.Sprintf("Delegate a rescue task from %s to %s through delegate and return the launch envelope verbatim.", hostAgent, otherAgent),
 			SourceTarget: target,
 		},
+		reviewSpec(target, prefix+":review", backend, otherAgent, hostAgent, "review"),
+		reviewSpec(target, prefix+":adversarial-review", backend, otherAgent, hostAgent, "adversarial-review"),
 		jobSpec(target, prefix+":status", backend, otherAgent, hostAgent, "status", "Check a delegated job status", fmt.Sprintf("delegate status --job \"$JOB_ID\" --json")),
 		jobSpec(target, prefix+":result", backend, otherAgent, hostAgent, "result", "Fetch and present a delegated job result", fmt.Sprintf("delegate result --job \"$JOB_ID\" --json")),
 		jobSpec(target, prefix+":cancel", backend, otherAgent, hostAgent, "cancel", "Cancel a delegated job after confirming it is stalled", fmt.Sprintf("delegate cancel --job \"$JOB_ID\" --json")),
+	}
+}
+
+func reviewSpec(target, name, backend, otherAgent, hostAgent, command string) skillSpec {
+	label := "code review"
+	if command == "adversarial-review" {
+		label = "refute-first adversarial code review"
+	}
+	return skillSpec{
+		Name:         name,
+		Kind:         KindReview,
+		Backend:      backend,
+		OtherAgent:   otherAgent,
+		HostAgent:    hostAgent,
+		Action:       command,
+		Description:  fmt.Sprintf("Delegate a %s from %s to %s through sanitized delegate review context and return the launch envelope verbatim.", label, hostAgent, otherAgent),
+		Command:      command,
+		SourceTarget: target,
 	}
 }
 
@@ -344,6 +366,8 @@ func render(spec skillSpec) (string, error) {
 	switch spec.Kind {
 	case KindLaunch:
 		tmpl = launchTemplate
+	case KindReview:
+		tmpl = reviewTemplate
 	case KindJobControl:
 		tmpl = jobTemplate
 	case KindSetup:
@@ -431,6 +455,59 @@ Only if all three probes are flat is the job stalled. On confirmed stall, report
 When the delegated run returns, preserve the helper's verdict, summary, findings, and next steps structure. For review-style output, present findings first and keep them ordered by severity. Preserve file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing. After presenting review findings, do not auto-fix; ask the user which issues to address.
 
 Use delegate-report discipline in your own handoff: score criteria, label evidence as observed/inferred/assumed, separate changed from verified, state scope boundaries, and report divergences instead of hiding them.`
+
+const reviewSkillTemplate = `---
+name: {{.Name}}
+description: {{.Description}}
+version: {{.Version}}
+---
+
+# {{.Name}}
+
+Use this when {{.HostAgent}} should delegate a read-only {{if eq .Action "adversarial-review"}}refute-first adversarial {{end}}code review to {{.OtherAgent}} through delegate's sanitized review-context pipeline and return immediately with the launch envelope.
+
+## Preflight
+
+Before launching, check the subagent context and stop with a clear setup error if any item is missing:
+
+- no-fork support: the job must run through "delegate {{.Action}}"/agentbus supervision, not an unmanaged background shell or a local substitute review.
+- shared fs: {{.HostAgent}}, "delegate", agentbus, and {{.OtherAgent}} can see the delegate state path. Using the private workspace as backend cwd is not OS isolation; a same-user backend can still read repository or other filesystem files when process permissions allow it.
+- exec: "delegate", "agentbus", "git", and the {{.Backend}} backend executable are runnable.
+- repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate applies path/history redaction and a final content scan to every assembled inline or spilled diff payload.
+- cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
+- backend reachability: "delegate setup --json" shows agentbus capabilities and {{.Backend}} backend availability.
+
+Threat model: v0.1 is accident prevention, not a security boundary against an adversarial repository or history. Deliberate history shuffles such as delete-and-recreate sequences intended to evade the heuristics are out of scope. v0.2 OS isolation is the boundary fix for that class.
+
+Do not add "--allow-live-repo-read" unless the user explicitly requests live-repository access after being told that using the repository as backend cwd makes backend file reads easier. It does not change OS filesystem permissions. A container/sandbox profile for OS-level isolation is planned for v0.2.
+
+## Launch
+
+Spawn the no-fork delegated review exactly through the CLI. Add "--base" or "--scope" only when the requested review scope requires it:
+
+~~~bash
+delegate {{.Command}} --backend {{.Backend}} --origin {{.Name}} --cwd "$PWD" --background --json
+~~~
+
+Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "result_sha256", or "sha256" fields.
+
+## Stall Monitoring
+
+While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call.
+
+An expired heartbeat lease in "delegate status" is an immediate stall signal. Otherwise, distinguish a long agent turn from a genuine stall before cancelling: run "delegate status --job <id> --probe" before any cancel. The probe automates all three checks and reports per-probe results:
+
+- "ps -p <pid> -o %cpu,etime,stat" sampled twice for child process activity.
+- "lsof -p <pid> -iTCP -sTCP:ESTABLISHED" to confirm a live API socket.
+- captured log file size watched over 60 seconds, because progress can land without a command event.
+
+Only if all three probes are flat is the job stalled. On confirmed stall, report the job id and last-known phase, then either "delegate cancel --job <id>" and relaunch fresh or with "--resume-session", or keep waiting. Never silently drop the job, never substitute your own answer for the delegated run, and escalate after a 30-minute patience cap without progress.
+
+## Review Result Discipline
+
+Present findings first and keep them ordered by severity. Preserve the delegated review's file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Distinguish observed evidence from inferred risk and assumptions. If there are no findings, say so explicitly and keep residual risk brief. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing or substituting a local review.
+
+Never auto-fix after presenting review findings. Ask the user which issues, if any, they want addressed.`
 
 const jobControlSkillTemplate = `---
 name: {{.Name}}

@@ -15,11 +15,11 @@ func TestTargetMatrices(t *testing.T) {
 	}{
 		{
 			target: TargetClaude,
-			want:   []string{"codex:rescue", "codex:status", "codex:result", "codex:cancel", "delegate:setup"},
+			want:   []string{"codex:rescue", "codex:review", "codex:adversarial-review", "codex:status", "codex:result", "codex:cancel", "delegate:setup"},
 		},
 		{
 			target: TargetCodex,
-			want:   []string{"claude:rescue", "claude:status", "claude:result", "claude:cancel", "delegate:setup"},
+			want:   []string{"claude:rescue", "claude:review", "claude:adversarial-review", "claude:status", "claude:result", "claude:cancel", "delegate:setup"},
 		},
 	} {
 		t.Run(tc.target, func(t *testing.T) {
@@ -60,6 +60,27 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				`--handoff-prompt-file "$HANDOFF_PATH"`,
 				"Return the launch envelope verbatim",
 			})
+			requireStallGuidance(t, skill)
+		case KindReview:
+			requireFragments(t, skill, []string{
+				"no-fork support",
+				"shared fs",
+				"exec:",
+				"repo+state access",
+				"backend reachability",
+				`--cwd "$PWD"`,
+				"Return the launch envelope verbatim",
+				"findings first",
+				"ordered by severity",
+				"Preserve the delegated review's file paths, line numbers, evidence labels",
+				"Never auto-fix",
+				"accident prevention",
+				"delete-and-recreate",
+				"v0.2 OS isolation is the boundary fix",
+			})
+			if !strings.Contains(skill.Content, "delegate "+strings.TrimPrefix(skill.Name, strings.Split(skill.Name, ":")[0]+":")+" --backend") {
+				t.Fatalf("%s missing review command", skill.Name)
+			}
 			requireStallGuidance(t, skill)
 		case KindJobControl:
 			requireFragments(t, skill, []string{
@@ -125,8 +146,8 @@ func TestSourceFixturesMatchGeneratedTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 9 {
-		t.Fatalf("SourceFiles count = %d, want 9", len(files))
+	if len(files) != 13 {
+		t.Fatalf("SourceFiles count = %d, want 13", len(files))
 	}
 	for _, rel := range SortedSourcePaths(files) {
 		if !strings.Contains(filepath.Dir(rel), "__colon__") {

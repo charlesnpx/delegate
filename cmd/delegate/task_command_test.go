@@ -136,8 +136,8 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	if result.StopReviewGate != "not available (planned v0.2)" {
 		t.Fatalf("stop_review_gate = %q", result.StopReviewGate)
 	}
-	if len(result.Skills) != 10 {
-		t.Fatalf("skill statuses = %d, want 10: %#v", len(result.Skills), result.Skills)
+	if len(result.Skills) != 14 {
+		t.Fatalf("skill statuses = %d, want 14: %#v", len(result.Skills), result.Skills)
 	}
 	for _, skill := range result.Skills {
 		if skill.Target == "" || skill.Name == "" || skill.Path == "" {
@@ -318,7 +318,7 @@ func TestTaskSubmitFailureUnlinksHandoffAndDeletesJobInput(t *testing.T) {
 	}
 }
 
-func TestTaskMetadataPersistFailureStillLaunchesWithWarning(t *testing.T) {
+func TestTaskMetadataPersistFailureBeforeLaunchAborts(t *testing.T) {
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		result: client.JobResult{
@@ -335,20 +335,23 @@ func TestTaskMetadataPersistFailureStillLaunchesWithWarning(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "launch only"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do not launch"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("task code = 0, want metadata failure; stdout = %q", stdout.String())
 	}
-	var launch LaunchEnvelope
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &launch); err != nil {
-		t.Fatalf("launch envelope JSON invalid: %v; raw = %q", err, stdout.String())
+	if len(fake.submits) != 0 {
+		t.Fatalf("JobSubmit calls = %d, want 0", len(fake.submits))
 	}
-	if launch.JobID != "job_meta_warning" || launch.Status != string(engine.StateQueued) {
-		t.Fatalf("launch = %#v, want queued job_meta_warning", launch)
+	if !strings.Contains(stderr.String(), "persist metadata before launch: metadata store read-only") {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
-	wantWarning := "warning: delegate job metadata for job_meta_warning was not persisted: metadata store read-only"
-	if !strings.Contains(stderr.String(), wantWarning) {
-		t.Fatalf("stderr = %q, want warning %q", stderr.String(), wantWarning)
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches, err := filepath.Glob(filepath.Join(stateDir, "job-input.*.prompt"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("job inputs after aborted launch = %#v, %v", matches, err)
 	}
 }
 
@@ -363,8 +366,13 @@ func TestBackgroundJobInputIsReassociatedAndSweptByNextStatus(t *testing.T) {
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
 	oldSave := saveDelegateJobMetadata
+	saveCalls := 0
 	saveDelegateJobMetadata = func(string, jobMetadata) error {
-		return errors.New("metadata unavailable")
+		saveCalls++
+		if saveCalls == 2 {
+			return errors.New("metadata unavailable after launch")
+		}
+		return nil
 	}
 	defer func() { saveDelegateJobMetadata = oldSave }()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -415,8 +423,13 @@ func TestBackgroundJobInputIsSweptByNextResult(t *testing.T) {
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
 	oldSave := saveDelegateJobMetadata
+	saveCalls := 0
 	saveDelegateJobMetadata = func(string, jobMetadata) error {
-		return errors.New("metadata unavailable")
+		saveCalls++
+		if saveCalls == 2 {
+			return errors.New("metadata unavailable after launch")
+		}
+		return nil
 	}
 	defer func() { saveDelegateJobMetadata = oldSave }()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -443,6 +456,58 @@ func TestBackgroundJobInputIsSweptByNextResult(t *testing.T) {
 	}
 	if len(fake.statuses) == 0 {
 		t.Fatal("result did not perform terminal job-input status lookup")
+	}
+}
+
+func TestSweepAdoptsOldProvisionalMetadataBySubmittedJobTag(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "delegate")
+	provisionalID := "job_provisional_adoption"
+	actualID := "job_actual_adoption"
+	input, err := handoff.PersistJobInput(handoff.JobInputOptions{
+		StateDir: stateDir,
+		JobID:    provisionalID,
+		Prompt:   handoff.ResolvedPrompt{Prompt: "review prompt", Source: handoff.SourcePrompt},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir, err = handoff.ResolveStateDir(handoff.StateConfig{StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := os.MkdirTemp(stateDir, "review-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveJobMetadata(stateDir, jobMetadata{
+		Schema:          envelopeSchema,
+		JobID:           provisionalID,
+		Kind:            reviewKind,
+		JobInputPath:    input.Path,
+		ReviewWorkspace: workspace,
+		Provisional:     true,
+		CreatedAt:       time.Now().Add(-2 * provisionalMetadataAdoptionThreshold),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAgentbusClient{status: client.JobStatusResult{Jobs: []client.JobStatus{{
+		JobID: actualID,
+		State: engine.StateCompleted,
+		Tags:  map[string]string{provisionalJobIDTag: provisionalID},
+	}}}}
+
+	if err := sweepTerminalJobInputs(context.Background(), fake, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("adopted terminal workspace remains: %v", err)
+	}
+	if _, found, err := loadJobMetadata(stateDir, provisionalID); err != nil || found {
+		t.Fatalf("provisional metadata found=%v err=%v", found, err)
+	}
+	meta, found, err := loadJobMetadata(stateDir, actualID)
+	if err != nil || !found || meta.Provisional || meta.JobInputPath != "" || meta.ReviewWorkspace != "" {
+		t.Fatalf("adopted metadata=%#v found=%v err=%v", meta, found, err)
 	}
 }
 
@@ -478,6 +543,131 @@ func TestTaskResumeSessionUsesResumeAndTurnStart(t *testing.T) {
 	}
 	if meta.Backend != "codex" || meta.CWD != cwd || meta.SessionID != "session_explicit" {
 		t.Fatalf("resume metadata = %#v", meta)
+	}
+}
+
+func TestTaskResumeMetadataFailureAfterTurnStartEmitsLaunchAndPreservesInput(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "delegate")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	stateDir, err = handoff.ResolveStateDir(handoff.StateConfig{StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := os.MkdirTemp(stateDir, "review-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := t.TempDir()
+	fake := &fakeAgentbusClient{
+		sessions:     []client.SessionInfo{{SessionID: "session_durable_resume", Backend: "codex", CWD: cwd}},
+		resumeResult: client.SessionStartResult{SessionID: "session_durable_resume", Backend: "codex"},
+		turnResult:   client.TurnStartResult{TurnID: "turn_durable_resume", JobID: "job_durable_resume", SessionID: "session_durable_resume"},
+	}
+
+	oldPrimary := saveDelegateJobMetadata
+	oldFallback := saveLaunchedJobMetadataFallback
+	primaryCalls := 0
+	saveDelegateJobMetadata = func(dir string, meta jobMetadata) error {
+		primaryCalls++
+		if primaryCalls == 1 {
+			return saveJobMetadata(dir, meta)
+		}
+		return errors.New("primary metadata unavailable after turn start")
+	}
+	saveLaunchedJobMetadataFallback = func(string, jobMetadata) error {
+		return errors.New("fallback metadata unavailable after turn start")
+	}
+	defer func() {
+		saveDelegateJobMetadata = oldPrimary
+		saveLaunchedJobMetadataFallback = oldFallback
+	}()
+
+	result, err := runDaemonSessionTask(context.Background(), fake, taskOptions{
+		Backend:         "codex",
+		Wait:            true,
+		CWD:             cwd,
+		ResumeSession:   "session_durable_resume",
+		StateDir:        stateDir,
+		Kind:            reviewKind,
+		ReviewWorkspace: workspace,
+	}, handoff.ResolvedPrompt{Prompt: "durable resumed prompt", Source: handoff.SourcePrompt}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Submitted || result.Launch == nil || result.Launch.JobID != "job_durable_resume" || result.Terminal != nil {
+		t.Fatalf("result = %#v, want real post-TurnStart launch", result)
+	}
+	if len(result.Warnings) == 0 || !strings.Contains(strings.Join(result.Warnings, "\n"), "persist launched job metadata for job_durable_resume") {
+		t.Fatalf("warnings = %#v, want metadata durability warning", result.Warnings)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code, err := writeTaskRunResult(result, &stdout, &stderr); err != nil || code != 0 {
+		t.Fatalf("writeTaskRunResult() = %d, %v", code, err)
+	}
+	var envelope LaunchEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &envelope); err != nil || envelope.JobID != "job_durable_resume" {
+		t.Fatalf("launch envelope = %#v, err=%v, raw=%q", envelope, err, stdout.String())
+	}
+
+	inputs, err := filepath.Glob(filepath.Join(stateDir, "job-input.*.prompt"))
+	if err != nil || len(inputs) != 1 {
+		t.Fatalf("job inputs = %#v, err=%v, want one", inputs, err)
+	}
+	input, ok := handoff.ParseJobInputPath(inputs[0])
+	if !ok || input.JobID != "job_durable_resume" {
+		t.Fatalf("reassociated input = %#v, ok=%v", input, ok)
+	}
+	if raw, err := os.ReadFile(inputs[0]); err != nil || string(raw) != "durable resumed prompt" {
+		t.Fatalf("durable input = %q, err=%v", raw, err)
+	}
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("review workspace was not preserved: %v", err)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(stateDir, "jobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var provisional jobMetadata
+	for _, entry := range entries {
+		jobID := strings.TrimSuffix(entry.Name(), ".json")
+		meta, found, loadErr := loadJobMetadata(stateDir, jobID)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if found && meta.Provisional {
+			provisional = meta
+			break
+		}
+	}
+	if provisional.JobID == "" || provisional.AdoptedJobID != "job_durable_resume" {
+		t.Fatalf("provisional metadata = %#v, want adopted job mapping", provisional)
+	}
+	provisional.CreatedAt = time.Now().Add(-2 * provisionalMetadataAdoptionThreshold)
+	if err := saveJobMetadata(stateDir, provisional); err != nil {
+		t.Fatal(err)
+	}
+	fake.status = client.JobStatusResult{Jobs: []client.JobStatus{{
+		JobID:     "job_durable_resume",
+		SessionID: "session_durable_resume",
+		State:     engine.StateCompleted,
+	}}}
+	if err := sweepTerminalJobInputs(context.Background(), fake, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := loadJobMetadata(stateDir, provisional.JobID); err != nil || found {
+		t.Fatalf("provisional metadata found=%v err=%v after sweep", found, err)
+	}
+	meta, found, err := loadJobMetadata(stateDir, "job_durable_resume")
+	if err != nil || !found || meta.Provisional || meta.SessionID != "session_durable_resume" {
+		t.Fatalf("adopted metadata=%#v found=%v err=%v", meta, found, err)
+	}
+	if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("adopted terminal workspace remains: %v", err)
 	}
 }
 
