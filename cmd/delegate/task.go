@@ -50,6 +50,8 @@ type taskOptions struct {
 	HandoffPromptFile string
 	Positional        []string
 	StateDir          string
+	Kind              string
+	ReviewWorkspace   string
 }
 
 type taskRunResult struct {
@@ -84,16 +86,22 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 	if err != nil {
 		return 0, err
 	}
-	ctx := context.Background()
-	var result taskRunResult
-	if opts.Embedded {
-		result, err = runEmbeddedTask(ctx, opts, resolved, turnPolicy)
-	} else {
-		result, err = runDaemonTask(ctx, opts, resolved, turnPolicy)
-	}
+	result, err := executeTask(opts, resolved, turnPolicy)
 	if err != nil {
 		return 0, err
 	}
+	return writeTaskRunResult(result, stdout, stderr)
+}
+
+func executeTask(opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy) (taskRunResult, error) {
+	ctx := context.Background()
+	if opts.Embedded {
+		return runEmbeddedTask(ctx, opts, resolved, turnPolicy)
+	}
+	return runDaemonTask(ctx, opts, resolved, turnPolicy)
+}
+
+func writeTaskRunResult(result taskRunResult, stdout, stderr io.Writer) (int, error) {
 	for _, warning := range result.Warnings {
 		if _, err := fmt.Fprintf(stderr, "warning: %s\n", warning); err != nil {
 			return 0, err
@@ -181,6 +189,7 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 		return taskOptions{}, err
 	}
 	opts.StateDir = stateDir
+	opts.Kind = taskKind
 	if opts.Resume {
 		sessionID, found, err := mostRecentDelegateSession(opts.StateDir, opts.Backend, opts.CWD)
 		if err != nil {
@@ -389,14 +398,15 @@ func persistDelegateJobInput(opts taskOptions, resolved handoff.ResolvedPrompt, 
 
 func persistDelegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) (jobMetadata, error) {
 	meta := jobMetadata{
-		Schema:       envelopeSchema,
-		JobID:        jobID,
-		Kind:         taskKind,
-		Backend:      opts.Backend,
-		CWD:          opts.CWD,
-		ContractKind: contractKind,
-		NoContract:   opts.NoContract,
-		JobInputPath: input.Path,
+		Schema:          envelopeSchema,
+		JobID:           jobID,
+		Kind:            effectiveTaskKind(opts),
+		Backend:         opts.Backend,
+		CWD:             opts.CWD,
+		ContractKind:    contractKind,
+		NoContract:      opts.NoContract,
+		JobInputPath:    input.Path,
+		ReviewWorkspace: opts.ReviewWorkspace,
 	}
 	if err := saveDelegateJobMetadata(opts.StateDir, meta); err != nil {
 		return jobMetadata{}, err
@@ -432,11 +442,18 @@ func cleanupUntrackedJobInput(input handoff.JobInput, sessionID string, state en
 }
 
 func taskTags(opts taskOptions) map[string]string {
-	tags := map[string]string{"delegate.kind": taskKind}
+	tags := map[string]string{"delegate.kind": effectiveTaskKind(opts)}
 	if opts.Origin != "" {
 		tags["delegate.origin"] = opts.Origin
 	}
 	return tags
+}
+
+func effectiveTaskKind(opts taskOptions) string {
+	if opts.Kind == "" {
+		return taskKind
+	}
+	return opts.Kind
 }
 
 func timeoutMillis(timeout time.Duration) *int64 {

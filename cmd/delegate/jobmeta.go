@@ -11,20 +11,22 @@ import (
 
 	"github.com/charlesnpx/agentbus/engine"
 	"github.com/charlesnpx/delegate/internal/handoff"
+	reviewpkg "github.com/charlesnpx/delegate/internal/review"
 )
 
 type jobMetadata struct {
-	Schema       int       `json:"schema"`
-	JobID        string    `json:"job_id"`
-	Kind         string    `json:"kind"`
-	Backend      string    `json:"backend,omitempty"`
-	CWD          string    `json:"cwd,omitempty"`
-	SessionID    string    `json:"session_id,omitempty"`
-	ContractKind string    `json:"contractKind"`
-	NoContract   bool      `json:"no_contract,omitempty"`
-	JobInputPath string    `json:"job_input_path,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	Schema          int       `json:"schema"`
+	JobID           string    `json:"job_id"`
+	Kind            string    `json:"kind"`
+	Backend         string    `json:"backend,omitempty"`
+	CWD             string    `json:"cwd,omitempty"`
+	SessionID       string    `json:"session_id,omitempty"`
+	ContractKind    string    `json:"contractKind"`
+	NoContract      bool      `json:"no_contract,omitempty"`
+	JobInputPath    string    `json:"job_input_path,omitempty"`
+	ReviewWorkspace string    `json:"review_workspace,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 func saveJobMetadata(stateDir string, meta jobMetadata) error {
@@ -97,6 +99,13 @@ func cleanupJobInput(stateDir, jobID, sessionID string, state engine.JobState) e
 			return err
 		}
 		meta.JobInputPath = ""
+		changed = true
+	}
+	if meta.ReviewWorkspace != "" && engine.IsTerminal(state) {
+		if err := reviewpkg.CleanupWorkspace(stateDir, meta.ReviewWorkspace); err != nil {
+			return err
+		}
+		meta.ReviewWorkspace = ""
 		changed = true
 	}
 	if !changed {

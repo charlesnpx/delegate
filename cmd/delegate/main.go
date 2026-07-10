@@ -32,6 +32,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "task":
 		code, err := runTask(args[1:], stdin, stdout, stderr)
 		return finishCommand(code, err, stderr)
+	case "review":
+		code, err := runReview(reviewKind, args[1:], stdout, stderr)
+		return finishCommand(code, err, stderr)
+	case "adversarial-review":
+		code, err := runReview(adversarialReviewKind, args[1:], stdout, stderr)
+		return finishCommand(code, err, stderr)
 	case "status":
 		code, err := runStatus(args[1:], stdout, stderr)
 		return finishCommand(code, err, stderr)

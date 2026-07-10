@@ -136,8 +136,8 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	if result.StopReviewGate != "not available (planned v0.2)" {
 		t.Fatalf("stop_review_gate = %q", result.StopReviewGate)
 	}
-	if len(result.Skills) != 10 {
-		t.Fatalf("skill statuses = %d, want 10: %#v", len(result.Skills), result.Skills)
+	if len(result.Skills) != 14 {
+		t.Fatalf("skill statuses = %d, want 14: %#v", len(result.Skills), result.Skills)
 	}
 	for _, skill := range result.Skills {
 		if skill.Target == "" || skill.Name == "" || skill.Path == "" {

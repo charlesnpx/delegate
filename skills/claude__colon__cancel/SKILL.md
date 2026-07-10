@@ -1,7 +1,7 @@
 ---
 name: claude:cancel
 description: Cancel a delegated job after confirming it is stalled through delegate.
-version: v0.1.0
+version: v0.1.1
 ---
 
 # claude:cancel

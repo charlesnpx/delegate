@@ -68,10 +68,11 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 	env := []string{"CODEX_HOME=" + codexHome}
 	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "codex", "--json", "--install-root", root}, env)
 	codexTarget := installed.Targets["codex"]
-	if len(codexTarget.Files) != 5 {
-		t.Fatalf("codex files = %d, want 5: %#v", len(codexTarget.Files), codexTarget.Files)
+	if len(codexTarget.Files) != 7 {
+		t.Fatalf("codex files = %d, want 7: %#v", len(codexTarget.Files), codexTarget.Files)
 	}
 	var rescuePath string
+	installedNames := map[string]bool{}
 	for _, file := range codexTarget.Files {
 		if !strings.HasPrefix(file.Path, root+string(os.PathSeparator)) {
 			t.Fatalf("installed path %q escapes install root %q", file.Path, root)
@@ -85,9 +86,15 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 		if strings.Contains(file.Path, "claude:rescue") {
 			rescuePath = file.Path
 		}
+		installedNames[filepath.Base(filepath.Dir(file.Path))] = true
 	}
 	if rescuePath == "" {
 		t.Fatalf("claude:rescue file missing from %#v", codexTarget.Files)
+	}
+	for _, name := range []string{"claude:review", "claude:adversarial-review"} {
+		if !installedNames[name] {
+			t.Fatalf("%s file missing from %#v", name, codexTarget.Files)
+		}
 	}
 	raw, err := os.ReadFile(rescuePath)
 	if err != nil {
@@ -98,7 +105,7 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 	}
 
 	uninstalled := runDelegatedInstallerScript(t, []string{"--uninstall", "--target", "codex", "--json", "--install-root", root}, env)
-	if len(uninstalled.Targets["codex"].Files) != 5 {
+	if len(uninstalled.Targets["codex"].Files) != 7 {
 		t.Fatalf("uninstall files = %#v", uninstalled.Targets["codex"].Files)
 	}
 	if _, err := os.Stat(filepath.Dir(rescuePath)); !os.IsNotExist(err) {
@@ -120,8 +127,8 @@ func TestDelegatedInstallerToolsInstallBuildsDelegate(t *testing.T) {
 	}
 
 	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "tools", "--json", "--install-root", root}, env)
-	if installed.Version != "0.1.0" {
-		t.Fatalf("installer version = %q, want 0.1.0", installed.Version)
+	if installed.Version != "0.1.1" {
+		t.Fatalf("installer version = %q, want 0.1.1", installed.Version)
 	}
 	toolsTarget := installed.Targets["tools"]
 	if len(toolsTarget.Files) != 1 {
@@ -148,7 +155,7 @@ func TestDelegatedInstallerToolsInstallBuildsDelegate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("staged delegate version failed: %v\n%s", err, out)
 	}
-	if got, want := string(out), "delegate 0.1.0\n"; got != want {
+	if got, want := string(out), "delegate 0.1.1\n"; got != want {
 		t.Fatalf("staged delegate version = %q, want %q", got, want)
 	}
 }

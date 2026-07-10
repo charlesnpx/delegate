@@ -1,6 +1,6 @@
 # delegate
 
-`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.1.0 ships `task`, rescue, and job-control workflows in both directions.
+`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.1.1 ships `task`, rescue, sanitized review, adversarial-review, and job-control workflows in both directions.
 
 agentbus owns execution, supervision, and generic policy enforcement. delegate owns the delegation-specific data and decisions it passes to agentbus: the embedded `delegate-report` contract, the delegate-contract digest, policy tiers, handoff lifecycle, skill matrix, and result envelopes.
 
@@ -40,6 +40,11 @@ delegate task --backend claude|codex [--background|--wait] [--json] [--cwd <abs>
               [--timeout <duration>] [--write] [--strict-contract|--no-contract]
               [--origin <skill>] [--embedded] [prompt source]
 
+delegate review|adversarial-review --backend claude|codex [--background|--wait] [--json] [--cwd <abs>]
+              [--base <ref>] [--scope auto|working-tree|branch] [--allow-live-repo-read]
+              [--model <model>] [--effort <effort>] [--timeout <duration>]
+              [--strict-contract] [--origin <skill>] [--embedded]
+
 delegate status [--job <id>] [--wait|--probe] [--json]
 delegate result --job <id> [--wait] [--json]
 delegate cancel --job <id> [--json]
@@ -47,7 +52,7 @@ delegate cancel --job <id> [--json]
 
 Prompt sources are mutually exclusive: `--prompt`, `--prompt-file`, `--prompt-stdin`, `--handoff-prompt-file`, or positional text. `--prompt` and positional text are visible in process arguments and shell history; use stdin, a prompt file, or a handoff file for sensitive input.
 
-Use `--resume-session <id>` to resume an explicit agentbus session. `--resume` selects the most recent session recorded in delegate job metadata for the selected backend and cwd. Before resuming, delegate verifies that the session's actual backend and cwd match the requested `--backend` and effective `--cwd`; use `--fresh` instead when they differ. In v0.1.0, both resume forms require `--wait` because background resume lands post-v0.1.0. Omitting the resume flags, or passing `--fresh` explicitly, starts a new session.
+Use `--resume-session <id>` to resume an explicit agentbus session. `--resume` selects the most recent session recorded in delegate job metadata for the selected backend and cwd. Before resuming, delegate verifies that the session's actual backend and cwd match the requested `--backend` and effective `--cwd`; use `--fresh` instead when they differ. In v0.1.x, both resume forms require `--wait` because background resume is not yet supported. Omitting the resume flags, or passing `--fresh` explicitly, starts a new session.
 
 Daemon mode is the default. It connects through `agentbus/client`, checks the protocol capabilities required by the selected policy, and returns a launch envelope unless `--wait` is set. `--embedded --wait` uses the vendored `agentbus/engine` for tests and foreground-only local execution; it intentionally cannot supervise a background job after the CLI exits.
 
@@ -68,16 +73,26 @@ delegate task --backend codex --origin codex:rescue --cwd "$PWD" \
 
 `delegate handoff create --json` creates a private `0600` handoff file in delegate state. `task` copies it to the job input, fsyncs it, and removes the handoff before launch. The job input is removed when a backend session is recorded or when a terminal job state is observed.
 
+## Review workflow and security model
+
+`review` and `adversarial-review` are always read-only. Delegate canonicalizes `--cwd`, discovers the repository from that directory, and assembles the change context before starting the backend. `--scope auto` reviews working-tree changes when present and otherwise reviews the current branch. `--scope working-tree` compares tracked changes to `HEAD` and includes untracked files. `--scope branch` compares the merge base of `HEAD` and the resolved base. Base selection follows `--base`, the current branch's upstream, then the locally recorded default remote branch; if none exists, delegate stops with setup guidance and never contacts a remote.
+
+Before collecting content, delegate applies a case-insensitive secret-path heuristic to tracked and untracked paths: `.env*`, names containing `credential`, `secret`, or `token`, common API/private/access/auth key patterns, private-key filenames, and `.key`/`.pem` files. Matching paths are represented only by path and status; their content is never included in the prompt or patch. This is path-based protection, so secrets stored in innocently named files remain in scope.
+
+Sanitized context for at most 10 files and 256 KiB is embedded in the prompt. Larger changesets are written to a private `0600` `review.patch` in a per-review `0700` delegate-state workspace. In safe mode, that workspace—not the live repository—is the backend cwd. The workspace and artifact remain available for a background job and are removed when delegate observes a terminal result, status, or cancellation.
+
+`--allow-live-repo-read` is an explicit unsafe escape hatch. It makes the live repository the backend cwd and permits self-collection. It is not secret-safe: a read-only backend can still read `.env` and other sensitive files. Delegate emits a warning whenever this flag is used. Managed review skills do not add it unless the user explicitly requests it.
+
 ## Managed skills
 
 The source directories escape `:` as `__colon__`; the installer decodes the names when it writes skills.
 
 | Installed for | Skill names | Purpose |
 | --- | --- | --- |
-| Claude Code (`~/.claude/skills`) | `codex:rescue`, `codex:status`, `codex:result`, `codex:cancel`, `delegate:setup` | Delegate rescue work to Codex and control the returned job. |
-| Codex (`${CODEX_HOME:-~/.codex}/skills`) | `claude:rescue`, `claude:status`, `claude:result`, `claude:cancel`, `delegate:setup` | Delegate rescue work to Claude Code and control the returned job. |
+| Claude Code (`~/.claude/skills`) | `codex:rescue`, `codex:review`, `codex:adversarial-review`, `codex:status`, `codex:result`, `codex:cancel`, `delegate:setup` | Delegate rescue and review work to Codex and control the returned job. |
+| Codex (`${CODEX_HOME:-~/.codex}/skills`) | `claude:rescue`, `claude:review`, `claude:adversarial-review`, `claude:status`, `claude:result`, `claude:cancel`, `delegate:setup` | Delegate rescue and review work to Claude Code and control the returned job. |
 
-Launch skills preflight shared filesystem and state access, stdin handoff, no-fork execution, agentbus capabilities, and target-backend reachability. They launch only through `delegate task`, return the launch envelope verbatim, and never add `--no-contract`. Job-control skills use the same status, result, cancellation, evidence-preservation, and no-substitute-answer discipline.
+Launch skills preflight shared filesystem and state access, no-fork execution, agentbus capabilities, and target-backend reachability. Rescue skills launch through `delegate task`; review skills launch through the sanitized `delegate review` commands. All return the launch envelope verbatim and never add `--no-contract`. Job-control skills use the same status, result, cancellation, evidence-preservation, and no-substitute-answer discipline. Review prose requires findings ordered by severity, preservation of evidence labels, and no automatic fixes after review.
 
 ## Contract tiers
 
@@ -128,7 +143,7 @@ Terminal envelopes are returned by `delegate result --job <id>` and `delegate ta
 }
 ```
 
-Possible contract statuses are `compliant`, `retried`, `noncompliant`, `skipped`, and `disabled`. A terminal `result_sha256` is mandatory. `kind` is `task` in v0.1.0; review kinds arrive with v0.1.1.
+Possible contract statuses are `compliant`, `retried`, `noncompliant`, `skipped`, and `disabled`. A terminal `result_sha256` is mandatory. `kind` is `task`, `review`, or `adversarial_review`.
 
 ## Setup and stall monitoring
 
@@ -153,16 +168,12 @@ While a job is outstanding, poll `delegate status --job <id>` every 2–5 minute
 GOCACHE=/private/tmp/delegate-gocache go test -race ./...
 GOCACHE=/private/tmp/delegate-gocache go vet ./...
 bash -n install-skill.sh scripts/*.sh
-scripts/release-check.sh v0.1.0
+scripts/release-check.sh v0.1.1
 ```
 
 The release check requires a clean worktree, including no modified tracked files and no untracked files outside ignored paths. Manually inspect the same gate with `git status --short --untracked-files=all`. It also requires the requested tag to point exactly at `HEAD`, requires `VERSION` to match `v<version>`, JSON-decodes installer and CLI output, verifies every staged binary/skill hash, and confirms the staged binary reports the release version. `--allow-dirty` is an unsafe escape hatch and always prints a loud warning when used.
 
 ## Roadmap
-
-### v0.1.1
-
-- `delegate review` and `delegate adversarial-review`, including sanitized review-artifact assembly and their Claude/Codex skill pairs: `codex:review`, `codex:adversarial-review`, `claude:review`, and `claude:adversarial-review`.
 
 ### v0.2
 
