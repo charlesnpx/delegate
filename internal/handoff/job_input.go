@@ -84,7 +84,11 @@ func PersistJobInput(opts JobInputOptions) (JobInput, error) {
 		return JobInput{}, err
 	}
 	if opts.Prompt.Source == SourceHandoffPromptFile && opts.Prompt.HandoffPath != "" {
-		if _, err := removeFile(opts.Prompt.HandoffPath, opts.Hooks); err != nil {
+		handoffPath, err := validateHandoffPromptFile(opts.Prompt.HandoffPath, stateDir)
+		if err != nil {
+			return JobInput{}, err
+		}
+		if _, err := removeFile(handoffPath, opts.Hooks); err != nil {
 			return JobInput{}, err
 		}
 	}
@@ -98,7 +102,10 @@ func DeleteJobInputOnSessionRecorded(input JobInput, hooks Hooks) (bool, error) 
 }
 
 // DeleteJobInputOnPreLaunchTerminal removes the job-input file for terminal pre-launch failures.
-func DeleteJobInputOnPreLaunchTerminal(input JobInput, hooks Hooks) (bool, error) {
+func DeleteJobInputOnPreLaunchTerminal(input JobInput, state engine.JobState, hooks Hooks) (bool, error) {
+	if !engine.IsTerminal(state) {
+		return false, nil
+	}
 	return removeFile(input.Path, hooks)
 }
 

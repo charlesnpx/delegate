@@ -33,9 +33,9 @@ func TestPromptSourceUsageDocumentsARGVVisibility(t *testing.T) {
 }
 
 func TestResolvePromptSources(t *testing.T) {
-	dir := t.TempDir()
+	dir := canonicalTempDir(t)
 	promptFile := filepath.Join(dir, "prompt.txt")
-	handoffFile := filepath.Join(dir, "handoff.txt")
+	handoffFile := filepath.Join(dir, "handoff-test.prompt")
 	if err := os.WriteFile(promptFile, []byte("from file"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestResolvePromptSources(t *testing.T) {
 		},
 		{
 			name: "handoff file",
-			src:  PromptSources{HandoffPromptFile: handoffFile},
+			src:  PromptSources{HandoffPromptFile: handoffFile, StateDir: dir},
 			want: ResolvedPrompt{Prompt: "from handoff", Source: SourceHandoffPromptFile, HandoffPath: handoffFile},
 		},
 		{
@@ -92,9 +92,9 @@ func TestResolvePromptSources(t *testing.T) {
 }
 
 func TestResolvePromptSourceExclusivityMatrix(t *testing.T) {
-	dir := t.TempDir()
+	dir := canonicalTempDir(t)
 	promptFile := filepath.Join(dir, "prompt.txt")
-	handoffFile := filepath.Join(dir, "handoff.txt")
+	handoffFile := filepath.Join(dir, "handoff-test.prompt")
 	if err := os.WriteFile(promptFile, []byte("from file"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestResolvePromptSourceExclusivityMatrix(t *testing.T) {
 		{name: "--prompt", apply: func(s *PromptSources) { s.PromptSet = true; s.Prompt = "inline" }},
 		{name: "--prompt-file", apply: func(s *PromptSources) { s.PromptFile = promptFile }},
 		{name: "--prompt-stdin", apply: func(s *PromptSources) { s.PromptStdin = true; s.Stdin = strings.NewReader("stdin") }},
-		{name: "--handoff-prompt-file", apply: func(s *PromptSources) { s.HandoffPromptFile = handoffFile }},
+		{name: "--handoff-prompt-file", apply: func(s *PromptSources) { s.HandoffPromptFile = handoffFile; s.StateDir = dir }},
 		{name: "positional", apply: func(s *PromptSources) { s.Positional = []string{"positional"} }},
 	}
 	for i := range sources {
@@ -136,8 +136,150 @@ func TestResolvePromptRequiresSource(t *testing.T) {
 	}
 }
 
+func TestResolvePromptRejectsInvalidHandoffPromptFile(t *testing.T) {
+	stateDir := canonicalTempDir(t)
+	outside := writeTestHandoffFile(t, canonicalTempDir(t), "handoff-outside.prompt", 0o600, "outside")
+	wrongMode := writeTestHandoffFile(t, stateDir, "handoff-wrong-mode.prompt", 0o600, "wrong mode")
+	if err := os.Chmod(wrongMode, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wrongName := writeTestHandoffFile(t, stateDir, "handoff.txt", 0o600, "wrong name")
+	real := writeTestHandoffFile(t, stateDir, "handoff-real.prompt", 0o600, "real")
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "outside state dir", path: outside},
+		{name: "wrong mode", path: wrongMode},
+		{name: "wrong name", path: wrongName},
+	}
+	symlink := filepath.Join(stateDir, "handoff-link.prompt")
+	if err := os.Symlink(real, symlink); err == nil {
+		tests = append(tests, struct {
+			name string
+			path string
+		}{name: "symlink", path: symlink})
+	} else {
+		t.Logf("skipping symlink case: %v", err)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ResolvePrompt(PromptSources{HandoffPromptFile: tt.path, StateDir: stateDir})
+			if err == nil {
+				t.Fatal("ResolvePrompt() error = nil, want rejection")
+			}
+		})
+	}
+}
+
+func TestResolveStateDirHardeningRejectsConfiguredPaths(t *testing.T) {
+	root := canonicalTempDir(t)
+	traversing := root + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "delegate"
+	tests := []struct {
+		name string
+		cfg  StateConfig
+	}{
+		{
+			name: "relative explicit state dir",
+			cfg:  StateConfig{StateDir: "relative/delegate"},
+		},
+		{
+			name: "traversing explicit state dir",
+			cfg:  StateConfig{StateDir: traversing},
+		},
+		{
+			name: "relative XDG state home",
+			cfg: StateConfig{
+				Env: func(key string) string {
+					if key == "XDG_STATE_HOME" {
+						return "relative-xdg"
+					}
+					return ""
+				},
+			},
+		},
+		{
+			name: "traversing XDG state home",
+			cfg: StateConfig{
+				Env: func(key string) string {
+					if key == "XDG_STATE_HOME" {
+						return traversing
+					}
+					return ""
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ResolveStateDir(tt.cfg)
+			if err == nil {
+				t.Fatal("ResolveStateDir() error = nil, want rejection")
+			}
+		})
+	}
+}
+
+func TestResolveStateDirReturnsCanonicalAbsolutePath(t *testing.T) {
+	root := canonicalTempDir(t)
+	realBase := filepath.Join(root, "real")
+	if err := os.Mkdir(realBase, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkBase := filepath.Join(root, "link")
+	if err := os.Symlink(realBase, linkBase); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	got, err := ResolveStateDir(StateConfig{StateDir: filepath.Join(linkBase, "delegate")})
+	if err != nil {
+		t.Fatalf("ResolveStateDir() error = %v", err)
+	}
+	want := filepath.Join(realBase, "delegate")
+	if got != want {
+		t.Fatalf("ResolveStateDir() = %q, want %q", got, want)
+	}
+	if !filepath.IsAbs(got) {
+		t.Fatalf("ResolveStateDir() = %q, want absolute path", got)
+	}
+}
+
+func TestEnsureStateDirRejectsPreExistingSymlink(t *testing.T) {
+	root := canonicalTempDir(t)
+	realDir := filepath.Join(root, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(root, "delegate")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := ResolveStateDir(StateConfig{StateDir: linkDir}); err == nil {
+		t.Fatal("ResolveStateDir() error = nil, want symlink rejection")
+	}
+	if err := EnsureStateDir(linkDir); err == nil {
+		t.Fatal("EnsureStateDir() error = nil, want symlink rejection")
+	}
+}
+
+func TestEnsureStateDirRejectsWrongModeWithoutChmod(t *testing.T) {
+	stateDir := filepath.Join(canonicalTempDir(t), "delegate")
+	if err := os.Mkdir(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureStateDir(stateDir); err == nil {
+		t.Fatal("EnsureStateDir() error = nil, want mode rejection")
+	}
+	assertMode(t, stateDir, 0o755)
+}
+
 func TestCreateHandoffUsesPrivateModes(t *testing.T) {
-	stateDir := filepath.Join(t.TempDir(), "state", "delegate")
+	stateDir := filepath.Join(canonicalTempDir(t), "state", "delegate")
 	result, err := Create(CreateOptions{
 		StateDir: stateDir,
 		Reader:   strings.NewReader("secret prompt"),
@@ -160,7 +302,7 @@ func TestCreateHandoffUsesPrivateModes(t *testing.T) {
 }
 
 func TestPersistJobInputUsesPrivateModeAndUnlinksHandoffAfterDurableWrite(t *testing.T) {
-	stateDir := t.TempDir()
+	stateDir := newTestStateDir(t)
 	handoffResult, err := Create(CreateOptions{
 		StateDir: stateDir,
 		Reader:   strings.NewReader("durable prompt"),
@@ -168,7 +310,7 @@ func TestPersistJobInputUsesPrivateModeAndUnlinksHandoffAfterDurableWrite(t *tes
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	prompt, err := ResolvePrompt(PromptSources{HandoffPromptFile: handoffResult.HandoffPath})
+	prompt, err := ResolvePrompt(PromptSources{HandoffPromptFile: handoffResult.HandoffPath, StateDir: stateDir})
 	if err != nil {
 		t.Fatalf("ResolvePrompt() error = %v", err)
 	}
@@ -214,6 +356,32 @@ func TestPersistJobInputUsesPrivateModeAndUnlinksHandoffAfterDurableWrite(t *tes
 	}
 }
 
+func TestPersistJobInputRejectsInvalidHandoffPromptPathBeforeUnlink(t *testing.T) {
+	stateDir := newTestStateDir(t)
+	outside := writeTestHandoffFile(t, canonicalTempDir(t), "handoff-outside.prompt", 0o600, "outside")
+	_, err := PersistJobInput(JobInputOptions{
+		StateDir: stateDir,
+		JobID:    "job-invalid-handoff",
+		Prompt: ResolvedPrompt{
+			Prompt:      "durable prompt",
+			Source:      SourceHandoffPromptFile,
+			HandoffPath: outside,
+		},
+	})
+	if err == nil {
+		t.Fatal("PersistJobInput() error = nil, want handoff path rejection")
+	}
+	assertExists(t, outside)
+
+	matches, err := filepath.Glob(filepath.Join(stateDir, jobInputPrefix+"*"+jobInputSuffix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("job input cleanup left files: %#v", matches)
+	}
+}
+
 func TestDeleteJobInputHooks(t *testing.T) {
 	t.Run("session recorded", func(t *testing.T) {
 		input := persistTestJobInput(t, "session-job", engine.StateRunning)
@@ -227,8 +395,8 @@ func TestDeleteJobInputHooks(t *testing.T) {
 		assertMissing(t, input.Path)
 	})
 	t.Run("terminal pre-launch failure", func(t *testing.T) {
-		input := persistTestJobInput(t, "prelaunch-job", engine.StateStarting)
-		deleted, err := DeleteJobInputOnPreLaunchTerminal(input, Hooks{})
+		input := persistTestJobInput(t, "prelaunch-job", engine.StateFailed)
+		deleted, err := DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, Hooks{})
 		if err != nil {
 			t.Fatalf("DeleteJobInputOnPreLaunchTerminal() error = %v", err)
 		}
@@ -236,6 +404,17 @@ func TestDeleteJobInputHooks(t *testing.T) {
 			t.Fatal("DeleteJobInputOnPreLaunchTerminal() deleted = false, want true")
 		}
 		assertMissing(t, input.Path)
+	})
+	t.Run("non-terminal pre-launch keeps file", func(t *testing.T) {
+		input := persistTestJobInput(t, "prelaunch-running-job", engine.StateStarting)
+		deleted, err := DeleteJobInputOnPreLaunchTerminal(input, engine.StateStarting, Hooks{})
+		if err != nil {
+			t.Fatalf("DeleteJobInputOnPreLaunchTerminal() error = %v", err)
+		}
+		if deleted {
+			t.Fatal("DeleteJobInputOnPreLaunchTerminal() deleted starting job")
+		}
+		assertExists(t, input.Path)
 	})
 	t.Run("non-terminal state keeps file", func(t *testing.T) {
 		input := persistTestJobInput(t, "running-job", engine.StateRunning)
@@ -273,7 +452,7 @@ func TestDeleteJobInputHooks(t *testing.T) {
 }
 
 func TestSweepTerminalJobInputs(t *testing.T) {
-	stateDir := t.TempDir()
+	stateDir := newTestStateDir(t)
 	completed := persistTestJobInputInDir(t, stateDir, "job-completed")
 	running := persistTestJobInputInDir(t, stateDir, "job-running")
 	unknown := persistTestJobInputInDir(t, stateDir, "job-unknown")
@@ -309,7 +488,7 @@ func TestMarshalCreateResult(t *testing.T) {
 
 func persistTestJobInput(t *testing.T, jobID string, _ engine.JobState) JobInput {
 	t.Helper()
-	return persistTestJobInputInDir(t, t.TempDir(), jobID)
+	return persistTestJobInputInDir(t, newTestStateDir(t), jobID)
 }
 
 func persistTestJobInputInDir(t *testing.T, stateDir, jobID string) JobInput {
@@ -326,6 +505,32 @@ func persistTestJobInputInDir(t *testing.T, stateDir, jobID string) JobInput {
 		t.Fatalf("PersistJobInput() error = %v", err)
 	}
 	return input
+}
+
+func writeTestHandoffFile(t *testing.T, dir, name string, mode os.FileMode, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func newTestStateDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(canonicalTempDir(t), "state", "delegate")
 }
 
 func assertMode(t *testing.T, path string, want os.FileMode) {

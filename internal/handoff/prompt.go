@@ -33,6 +33,7 @@ type PromptSources struct {
 	PromptFile        string
 	PromptStdin       bool
 	HandoffPromptFile string
+	StateDir          string
 	Positional        []string
 	Stdin             io.Reader
 }
@@ -96,11 +97,11 @@ func ResolvePrompt(s PromptSources) (ResolvedPrompt, error) {
 		return ResolvedPrompt{Prompt: string(raw), Source: SourcePromptStdin}, nil
 	}
 	if s.HandoffPromptFile != "" {
-		raw, err := os.ReadFile(s.HandoffPromptFile)
+		raw, handoffPath, err := readHandoffPromptFile(s.HandoffPromptFile, s.StateDir)
 		if err != nil {
 			return ResolvedPrompt{}, err
 		}
-		return ResolvedPrompt{Prompt: string(raw), Source: SourceHandoffPromptFile, HandoffPath: s.HandoffPromptFile}, nil
+		return ResolvedPrompt{Prompt: string(raw), Source: SourceHandoffPromptFile, HandoffPath: handoffPath}, nil
 	}
 	return ResolvedPrompt{Prompt: strings.Join(s.Positional, " "), Source: SourcePositional}, nil
 }
