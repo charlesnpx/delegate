@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,9 +19,11 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] == "version" {
-		writeVersion(stdout)
-		return 0
+	if len(args) == 0 {
+		return finishCommand(runVersion(nil, stdout, stderr), nil, stderr)
+	}
+	if args[0] == "version" {
+		return finishCommand(runVersion(args[1:], stdout, stderr), nil, stderr)
 	}
 	switch args[0] {
 	case "setup":
@@ -92,4 +95,35 @@ func writeVersion(w io.Writer) {
 
 func versionLine() string {
 	return "delegate " + Version
+}
+
+func runVersion(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("delegate version", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "delegate version does not accept positional arguments")
+		return 2
+	}
+	if *jsonOut {
+		raw, err := json.Marshal(struct {
+			Version string `json:"version"`
+		}{Version: Version})
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+		_, err = fmt.Fprintln(stdout, string(raw))
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+		return 0
+	}
+	writeVersion(stdout)
+	return 0
 }

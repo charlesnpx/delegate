@@ -70,6 +70,11 @@ func TestEnvelopeSchemasAndHashes(t *testing.T) {
 	if terminal.SHA256 == "" || terminal.SHA256 == strings.Repeat("a", 64) {
 		t.Fatalf("terminal envelope sha256 = %q, want distinct envelope hash", terminal.SHA256)
 	}
+	canonicalTerminal := `{"contract":{"attempts":1,"missing":[],"reason":"","retryUsed":false,"status":"compliant","validatedAt":"1970-01-01T00:00:01Z"},"contractKind":"shape","job_id":"job_envelope","kind":"task","result_sha256":"` + strings.Repeat("a", 64) + `","schema":1,"status":"completed"}`
+	wantTerminalHash := sha256.Sum256([]byte(canonicalTerminal))
+	if terminal.SHA256 != hex.EncodeToString(wantTerminalHash[:]) {
+		t.Fatalf("terminal sha256 = %q, want independent canonical JSON digest %q", terminal.SHA256, hex.EncodeToString(wantTerminalHash[:]))
+	}
 }
 
 func TestSetupCapabilityGateReportsStaleAgentbus(t *testing.T) {
@@ -103,6 +108,44 @@ func TestSetupOutputIncludesStopReviewGateLine(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), stopReviewGateLine) {
 		t.Fatalf("setup stdout = %q, want %q", stdout.String(), stopReviewGateLine)
+	}
+}
+
+func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, "codex-home"))
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	var result setupJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw = %q", err, stdout.String())
+	}
+	if !result.Agentbus.Found || result.Agentbus.Path != "/tmp/agentbus" {
+		t.Fatalf("agentbus discovery = %#v, want found /tmp/agentbus", result.Agentbus)
+	}
+	if !result.Agentbus.CapabilitiesOK || !result.Agentbus.Capabilities["policy.shape"] || !result.Agentbus.Capabilities["policy.retry"] {
+		t.Fatalf("agentbus capabilities = %#v, want required capabilities passing", result.Agentbus)
+	}
+	if result.StopReviewGate != "not available (planned v0.2)" {
+		t.Fatalf("stop_review_gate = %q", result.StopReviewGate)
+	}
+	if len(result.Skills) != 10 {
+		t.Fatalf("skill statuses = %d, want 10: %#v", len(result.Skills), result.Skills)
+	}
+	for _, skill := range result.Skills {
+		if skill.Target == "" || skill.Name == "" || skill.Path == "" {
+			t.Fatalf("incomplete skill status: %#v", skill)
+		}
+		if skill.Status != "missing" {
+			t.Fatalf("skill status = %#v, want missing in fresh HOME", skill)
+		}
 	}
 }
 
@@ -309,7 +352,323 @@ func TestTaskMetadataPersistFailureStillLaunchesWithWarning(t *testing.T) {
 	}
 }
 
+func TestBackgroundJobInputIsReassociatedAndSweptByNextStatus(t *testing.T) {
+	fake := &fakeAgentbusClient{
+		hello: helloWithCapabilities(),
+		result: client.JobResult{
+			JobID: "job_background_reap",
+			State: engine.StateCompleted,
+		},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	oldSave := saveDelegateJobMetadata
+	saveDelegateJobMetadata = func(string, jobMetadata) error {
+		return errors.New("metadata unavailable")
+	}
+	defer func() { saveDelegateJobMetadata = oldSave }()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var taskOut, taskErr bytes.Buffer
+	if code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "background prompt", "--background"}, nil, &taskOut, &taskErr); code != 0 {
+		t.Fatalf("task code = %d, stderr = %q", code, taskErr.String())
+	}
+	matches, err := filepath.Glob(filepath.Join(stateDir, "job-input.*.prompt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("job inputs after CLI exit = %#v, want one", matches)
+	}
+	input, ok := handoff.ParseJobInputPath(matches[0])
+	if !ok || input.JobID != "job_background_reap" {
+		t.Fatalf("reassociated job input = %#v, %v; want job_background_reap", input, ok)
+	}
+
+	var statusOut, statusErr bytes.Buffer
+	if code := run([]string{"status", "--job", "job_background_reap"}, nil, &statusOut, &statusErr); code != 0 {
+		t.Fatalf("status code = %d, stderr = %q", code, statusErr.String())
+	}
+	if _, err := os.Stat(matches[0]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("job input remains after terminal status sweep: %v", err)
+	}
+	if len(fake.statuses) < 2 {
+		t.Fatalf("JobStatus calls = %d, want primary lookup plus sweep lookup", len(fake.statuses))
+	}
+}
+
+func TestBackgroundJobInputIsSweptByNextResult(t *testing.T) {
+	fake := &fakeAgentbusClient{
+		hello: helloWithCapabilities(),
+		result: client.JobResult{
+			JobID: "job_result_reap",
+			State: engine.StateCompleted,
+			Result: &engine.ResultInfo{
+				SHA256: strings.Repeat("b", 64),
+			},
+		},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	oldSave := saveDelegateJobMetadata
+	saveDelegateJobMetadata = func(string, jobMetadata) error {
+		return errors.New("metadata unavailable")
+	}
+	defer func() { saveDelegateJobMetadata = oldSave }()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var taskOut, taskErr bytes.Buffer
+	if code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "background prompt", "--background"}, nil, &taskOut, &taskErr); code != 0 {
+		t.Fatalf("task code = %d, stderr = %q", code, taskErr.String())
+	}
+	matches, err := filepath.Glob(filepath.Join(stateDir, "job-input.*.prompt"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("job input glob = %#v, %v; want one", matches, err)
+	}
+
+	var resultOut, resultErr bytes.Buffer
+	if code := run([]string{"result", "--job", "job_result_reap"}, nil, &resultOut, &resultErr); code != 0 {
+		t.Fatalf("result code = %d, stderr = %q", code, resultErr.String())
+	}
+	if _, err := os.Stat(matches[0]); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("job input remains after terminal result sweep: %v", err)
+	}
+	if len(fake.statuses) == 0 {
+		t.Fatal("result did not perform terminal job-input status lookup")
+	}
+}
+
+func TestTaskResumeSessionUsesResumeAndTurnStart(t *testing.T) {
+	cwd := t.TempDir()
+	fake := &fakeAgentbusClient{
+		hello:        helloWithCapabilities(),
+		sessions:     []client.SessionInfo{{SessionID: "session_explicit", Backend: "codex", CWD: cwd}},
+		resumeResult: client.SessionStartResult{SessionID: "session_explicit", Backend: "codex"},
+		turnResult:   client.TurnStartResult{TurnID: "turn_explicit", JobID: "job_explicit_resume", SessionID: "session_explicit"},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"task", "--backend", "codex", "--cwd", cwd, "--resume-session", "session_explicit", "--prompt", "continue", "--wait"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+	}
+	if len(fake.resumes) != 1 || fake.resumes[0].SessionID != "session_explicit" {
+		t.Fatalf("SessionResume calls = %#v", fake.resumes)
+	}
+	if len(fake.turns) != 1 || fake.turns[0].SessionID != "session_explicit" || fake.turns[0].Prompt != "continue" {
+		t.Fatalf("TurnStart calls = %#v", fake.turns)
+	}
+	if len(fake.submits) != 0 {
+		t.Fatalf("JobSubmit calls = %d, want 0", len(fake.submits))
+	}
+	meta, found, err := loadJobMetadata("", "job_explicit_resume")
+	if err != nil || !found {
+		t.Fatalf("loadJobMetadata() = %#v, %v, %v", meta, found, err)
+	}
+	if meta.Backend != "codex" || meta.CWD != cwd || meta.SessionID != "session_explicit" {
+		t.Fatalf("resume metadata = %#v", meta)
+	}
+}
+
+func TestTaskResumeSelectsMostRecentSessionForBackendAndCWD(t *testing.T) {
+	fake := &fakeAgentbusClient{
+		hello:        helloWithCapabilities(),
+		resumeResult: client.SessionStartResult{SessionID: "session_new", Backend: "codex"},
+		turnResult:   client.TurnStartResult{TurnID: "turn_latest", JobID: "job_latest_resume", SessionID: "session_new"},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cwd := t.TempDir()
+	for _, meta := range []jobMetadata{
+		{JobID: "job_old_session", Kind: taskKind, Backend: "codex", CWD: cwd, SessionID: "session_old", CreatedAt: time.Unix(1, 0).UTC()},
+		{JobID: "job_new_session", Kind: taskKind, Backend: "codex", CWD: cwd, SessionID: "session_new", CreatedAt: time.Unix(2, 0).UTC()},
+		{JobID: "job_other_backend", Kind: taskKind, Backend: "claude", CWD: cwd, SessionID: "session_other", CreatedAt: time.Unix(3, 0).UTC()},
+		{JobID: "job_other_cwd", Kind: taskKind, Backend: "codex", CWD: t.TempDir(), SessionID: "session_elsewhere", CreatedAt: time.Unix(4, 0).UTC()},
+	} {
+		if err := saveJobMetadata("", meta); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"task", "--backend", "codex", "--cwd", cwd, "--resume", "--prompt", "continue latest", "--wait"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+	}
+	if len(fake.resumes) != 1 || fake.resumes[0].SessionID != "session_new" {
+		t.Fatalf("SessionResume calls = %#v, want session_new", fake.resumes)
+	}
+	if len(fake.turns) != 1 || fake.turns[0].SessionID != "session_new" {
+		t.Fatalf("TurnStart calls = %#v, want session_new", fake.turns)
+	}
+}
+
+func TestTaskResumeWithoutRecordedSessionHasGuidance(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--resume", "--prompt", "continue", "--wait"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("task succeeded, stdout = %q", stdout.String())
+	}
+	for _, guidance := range []string{"no resumable delegate session", "run a fresh task first", "--resume-session <id>"} {
+		if !strings.Contains(stderr.String(), guidance) {
+			t.Fatalf("stderr = %q, want guidance %q", stderr.String(), guidance)
+		}
+	}
+	if len(fake.resumes) != 0 || len(fake.submits) != 0 {
+		t.Fatalf("daemon calls on missing resume metadata: resumes=%#v submits=%#v", fake.resumes, fake.submits)
+	}
+}
+
+func TestTaskResumeRequiresWaitInV010(t *testing.T) {
+	for _, resumeArgs := range [][]string{{"--resume"}, {"--resume-session", "session_background"}} {
+		t.Run(strings.Join(resumeArgs, "_"), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			args := []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "continue"}
+			args = append(args, resumeArgs...)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, nil, &stdout, &stderr); code == 0 {
+				t.Fatalf("task succeeded, stdout = %q", stdout.String())
+			}
+			if want := "background resume lands post-v0.1.0"; !strings.Contains(stderr.String(), want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+			}
+		})
+	}
+}
+
+func TestTaskResumeRejectsSessionBackendOrCWDMismatch(t *testing.T) {
+	requestedCWD := t.TempDir()
+	otherCWD := t.TempDir()
+	for _, tc := range []struct {
+		name          string
+		actualBackend string
+		actualCWD     string
+	}{
+		{name: "backend", actualBackend: "claude", actualCWD: requestedCWD},
+		{name: "cwd", actualBackend: "codex", actualCWD: otherCWD},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{
+				hello:    helloWithCapabilities(),
+				sessions: []client.SessionInfo{{SessionID: "session_mismatch", Backend: tc.actualBackend, CWD: tc.actualCWD}},
+			}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"task", "--backend", "codex", "--cwd", requestedCWD, "--resume-session", "session_mismatch", "--prompt", "continue", "--wait"}, nil, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("task succeeded, stdout = %q", stdout.String())
+			}
+			for _, want := range []string{tc.actualBackend, filepath.Clean(tc.actualCWD), "--fresh"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want actual session detail %q", stderr.String(), want)
+				}
+			}
+			if len(fake.resumes) != 0 || len(fake.turns) != 0 {
+				t.Fatalf("mismatched session was resumed: resumes=%#v turns=%#v", fake.resumes, fake.turns)
+			}
+		})
+	}
+}
+
+func TestEmbeddedTaskResumeRejectsSessionBackendOrCWDMismatch(t *testing.T) {
+	requestedCWD := t.TempDir()
+	otherCWD := t.TempDir()
+	for _, tc := range []struct {
+		name          string
+		actualBackend string
+		actualCWD     string
+	}{
+		{name: "backend", actualBackend: "claude", actualCWD: requestedCWD},
+		{name: "cwd", actualBackend: "codex", actualCWD: otherCWD},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			if err := saveJobMetadata("", jobMetadata{
+				JobID:     "job_embedded_resume_source",
+				Kind:      taskKind,
+				Backend:   tc.actualBackend,
+				CWD:       tc.actualCWD,
+				SessionID: "session_mismatch",
+				CreatedAt: time.Unix(1, 0).UTC(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			backend := &recordingBackend{name: "codex", sessionID: "session_mismatch", reports: []string{compliantReport()}}
+			restore := stubEmbeddedGlobals(t, "job_embedded_resume_attempt", backend)
+			defer restore()
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"task", "--backend", "codex", "--cwd", requestedCWD, "--resume-session", "session_mismatch", "--prompt", "continue", "--embedded", "--wait"}, nil, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("task succeeded, stdout = %q", stdout.String())
+			}
+			for _, want := range []string{tc.actualBackend, filepath.Clean(tc.actualCWD), "--fresh"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want actual session detail %q", stderr.String(), want)
+				}
+			}
+			if len(backend.starts) != 0 {
+				t.Fatalf("mismatched embedded session was resumed: starts=%#v", backend.starts)
+			}
+		})
+	}
+}
+
+func TestTaskHelpDocumentsResumeWaitRequirement(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"task", "--help"}, nil, &stdout, &stderr); code == 0 {
+		t.Fatalf("task --help code = 0, want flag package help exit")
+	}
+	if want := "required with resume flags in v0.1.0"; !strings.Contains(stderr.String(), want) {
+		t.Fatalf("task --help stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+func TestTaskFreshIsDefaultAndExplicit(t *testing.T) {
+	for _, flags := range [][]string{nil, {"--fresh"}} {
+		t.Run(strings.Join(flags, "_"), func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			args := []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "fresh task"}
+			args = append(args, flags...)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+			}
+			if len(fake.submits) != 1 || len(fake.resumes) != 0 || len(fake.turns) != 0 {
+				t.Fatalf("fresh calls: submits=%d resumes=%d turns=%d", len(fake.submits), len(fake.resumes), len(fake.turns))
+			}
+		})
+	}
+}
+
 func stubAgentbusGlobals(t *testing.T, fake *fakeAgentbusClient) func() {
+	return stubAgentbusClientGlobals(t, fake)
+}
+
+func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 	t.Helper()
 	oldConnect := connectAgentbus
 	oldLookPath := lookPath
@@ -364,13 +723,22 @@ func helloWithCapabilities() client.HelloResult {
 }
 
 type fakeAgentbusClient struct {
-	hello     client.HelloResult
-	submits   []client.JobSubmitParams
-	submitErr error
-	status    client.JobStatusResult
-	result    client.JobResult
-	cancel    client.JobCancelResult
-	cancelErr error
+	hello        client.HelloResult
+	sessions     []client.SessionInfo
+	sessionLists []client.SessionListParams
+	resumes      []client.SessionResumeParams
+	resumeResult client.SessionStartResult
+	resumeErr    error
+	turns        []client.TurnStartParams
+	turnResult   client.TurnStartResult
+	turnErr      error
+	submits      []client.JobSubmitParams
+	submitErr    error
+	statuses     []client.JobStatusParams
+	status       client.JobStatusResult
+	result       client.JobResult
+	cancel       client.JobCancelResult
+	cancelErr    error
 }
 
 func (f *fakeAgentbusClient) Close() error { return nil }
@@ -385,12 +753,40 @@ func (f *fakeAgentbusClient) SessionStart(context.Context, client.SessionStartPa
 	return client.SessionStartResult{}, errors.New("unexpected SessionStart")
 }
 
-func (f *fakeAgentbusClient) SessionResume(context.Context, client.SessionResumeParams) (client.SessionStartResult, error) {
-	return client.SessionStartResult{}, errors.New("unexpected SessionResume")
+func (f *fakeAgentbusClient) SessionResume(_ context.Context, params client.SessionResumeParams) (client.SessionStartResult, error) {
+	f.resumes = append(f.resumes, params)
+	if f.resumeErr != nil {
+		return client.SessionStartResult{}, f.resumeErr
+	}
+	if f.resumeResult.SessionID == "" {
+		return client.SessionStartResult{}, errors.New("unexpected SessionResume")
+	}
+	return f.resumeResult, nil
 }
 
-func (f *fakeAgentbusClient) TurnStart(context.Context, client.TurnStartParams) (client.TurnStartResult, <-chan client.TurnNotification, error) {
-	return client.TurnStartResult{}, nil, errors.New("unexpected TurnStart")
+func (f *fakeAgentbusClient) SessionList(_ context.Context, params client.SessionListParams) (client.SessionListResult, error) {
+	f.sessionLists = append(f.sessionLists, params)
+	return client.SessionListResult{Sessions: f.sessions}, nil
+}
+
+func (f *fakeAgentbusClient) TurnStart(_ context.Context, params client.TurnStartParams) (client.TurnStartResult, <-chan client.TurnNotification, error) {
+	f.turns = append(f.turns, params)
+	if f.turnErr != nil {
+		return client.TurnStartResult{}, nil, f.turnErr
+	}
+	if f.turnResult.JobID == "" {
+		return client.TurnStartResult{}, nil, errors.New("unexpected TurnStart")
+	}
+	notifications := make(chan client.TurnNotification, 1)
+	notifications <- client.TurnNotification{Result: &client.TurnResultParams{
+		SessionID: f.turnResult.SessionID,
+		TurnID:    f.turnResult.TurnID,
+		JobID:     f.turnResult.JobID,
+		State:     engine.StateCompleted,
+		Result:    &engine.ResultInfo{SHA256: strings.Repeat("d", 64)},
+	}}
+	close(notifications)
+	return f.turnResult, notifications, nil
 }
 
 func (f *fakeAgentbusClient) JobSubmit(_ context.Context, params client.JobSubmitParams) (client.JobSubmitResult, error) {
@@ -405,7 +801,8 @@ func (f *fakeAgentbusClient) JobSubmit(_ context.Context, params client.JobSubmi
 	return client.JobSubmitResult{JobID: jobID, State: engine.StateQueued}, nil
 }
 
-func (f *fakeAgentbusClient) JobStatus(context.Context, client.JobStatusParams) (client.JobStatusResult, error) {
+func (f *fakeAgentbusClient) JobStatus(_ context.Context, params client.JobStatusParams) (client.JobStatusResult, error) {
+	f.statuses = append(f.statuses, params)
 	if len(f.status.Jobs) > 0 {
 		return f.status, nil
 	}

@@ -121,11 +121,11 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	var background bool
 	fs.StringVar(&opts.Backend, "backend", "", "backend name")
 	fs.BoolVar(&background, "background", false, "return after launch")
-	fs.BoolVar(&opts.Wait, "wait", false, "wait for terminal result")
+	fs.BoolVar(&opts.Wait, "wait", false, "wait for terminal result (required with resume flags in v0.1.0)")
 	fs.BoolVar(&opts.JSON, "json", false, "emit JSON")
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute working directory")
-	fs.BoolVar(&opts.Resume, "resume", false, "resume the last session")
-	fs.StringVar(&opts.ResumeSession, "resume-session", "", "resume a session id")
+	fs.BoolVar(&opts.Resume, "resume", false, "resume the last session (requires --wait in v0.1.0)")
+	fs.StringVar(&opts.ResumeSession, "resume-session", "", "resume a session id (requires --wait in v0.1.0)")
 	fs.BoolVar(&opts.Fresh, "fresh", false, "start a fresh session")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
@@ -158,8 +158,8 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	if opts.Resume && opts.Fresh || opts.ResumeSession != "" && opts.Fresh {
 		return taskOptions{}, fmt.Errorf("use only one of resume flags or --fresh")
 	}
-	if opts.Resume {
-		return taskOptions{}, fmt.Errorf("--resume without --resume-session is not supported by agentbus v0.1.0")
+	if (opts.Resume || opts.ResumeSession != "") && !opts.Wait {
+		return taskOptions{}, fmt.Errorf("--resume and --resume-session require --wait in v0.1.0; background resume lands post-v0.1.0")
 	}
 	if opts.Embedded && !opts.Wait {
 		return taskOptions{}, fmt.Errorf("--embedded requires --wait; background supervision is daemon-only")
@@ -181,6 +181,16 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 		return taskOptions{}, err
 	}
 	opts.StateDir = stateDir
+	if opts.Resume {
+		sessionID, found, err := mostRecentDelegateSession(opts.StateDir, opts.Backend, opts.CWD)
+		if err != nil {
+			return taskOptions{}, err
+		}
+		if !found {
+			return taskOptions{}, fmt.Errorf("no resumable delegate session for backend %q in cwd %q; run a fresh task first or pass --resume-session <id>", opts.Backend, opts.CWD)
+		}
+		opts.ResumeSession = sessionID
+	}
 	if stdin == nil {
 		stdin = os.Stdin
 	}
@@ -217,6 +227,7 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 		return taskRunResult{}, err
 	}
 	var warnings []string
+	input, warnings = reassociateSubmittedJobInput(input, submitted.JobID, warnings)
 	metadataSaved := true
 	if _, err := persistDelegateJobMetadata(opts, input, submitted.JobID, contractKindForPolicy(turnPolicy, opts.NoContract)); err != nil {
 		metadataSaved = false
@@ -254,6 +265,13 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 }
 
 func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy) (taskRunResult, error) {
+	target, err := resumableSessionInfo(ctx, c, opts.StateDir, opts.ResumeSession)
+	if err != nil {
+		return taskRunResult{}, err
+	}
+	if err := validateResumeTarget(opts, target); err != nil {
+		return taskRunResult{}, err
+	}
 	session, err := c.SessionResume(ctx, client.SessionResumeParams{SessionID: opts.ResumeSession})
 	if err != nil {
 		return taskRunResult{}, err
@@ -275,6 +293,7 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 		return taskRunResult{}, err
 	}
 	var warnings []string
+	input, warnings = reassociateSubmittedJobInput(input, started.JobID, warnings)
 	metadataSaved := true
 	if _, err := persistDelegateJobMetadata(opts, input, started.JobID, contractKindForPolicy(turnPolicy, opts.NoContract)); err != nil {
 		metadataSaved = false
@@ -304,6 +323,37 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 		return taskRunResult{}, err
 	}
 	return taskRunResult{Launch: &env, Warnings: warnings}, nil
+}
+
+func validateResumeTarget(opts taskOptions, target client.SessionInfo) error {
+	actualCWD := filepath.Clean(target.CWD)
+	requestedCWD := filepath.Clean(opts.CWD)
+	if target.Backend != opts.Backend || actualCWD != requestedCWD {
+		return fmt.Errorf("session %q has backend %q and cwd %q, which do not match requested --backend %q and effective --cwd %q; use --fresh to start a new session", opts.ResumeSession, target.Backend, actualCWD, opts.Backend, requestedCWD)
+	}
+	return nil
+}
+
+func resumableSessionInfo(ctx context.Context, c agentbusClient, stateDir, sessionID string) (client.SessionInfo, error) {
+	listed, listErr := c.SessionList(ctx, client.SessionListParams{})
+	if listErr == nil {
+		for _, session := range listed.Sessions {
+			if session.SessionID == sessionID && session.Backend != "" && session.CWD != "" {
+				return session, nil
+			}
+		}
+	}
+	meta, found, err := delegateSessionMetadata(stateDir, sessionID)
+	if err != nil {
+		return client.SessionInfo{}, err
+	}
+	if found && meta.Backend != "" && meta.CWD != "" {
+		return client.SessionInfo{SessionID: sessionID, Backend: meta.Backend, CWD: meta.CWD}, nil
+	}
+	if listErr != nil {
+		return client.SessionInfo{}, fmt.Errorf("inspect session %q before resume: %w; use --fresh to start a new session", sessionID, listErr)
+	}
+	return client.SessionInfo{}, fmt.Errorf("cannot verify backend and cwd for session %q before resume; use --fresh to start a new session", sessionID)
 }
 
 var saveDelegateJobMetadata = saveJobMetadata
@@ -342,6 +392,8 @@ func persistDelegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID,
 		Schema:       envelopeSchema,
 		JobID:        jobID,
 		Kind:         taskKind,
+		Backend:      opts.Backend,
+		CWD:          opts.CWD,
 		ContractKind: contractKind,
 		NoContract:   opts.NoContract,
 		JobInputPath: input.Path,
@@ -354,6 +406,17 @@ func persistDelegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID,
 
 func metadataPersistWarning(jobID string, err error) string {
 	return fmt.Sprintf("delegate job metadata for %s was not persisted: %v", jobID, err)
+}
+
+func reassociateSubmittedJobInput(input handoff.JobInput, jobID string, warnings []string) (handoff.JobInput, []string) {
+	reassociated, err := handoff.ReassociateJobInput(input, jobID, handoff.Hooks{})
+	if reassociated.Path != "" {
+		input = reassociated
+	}
+	if err != nil {
+		warnings = append(warnings, fmt.Sprintf("job input for %s could not be re-associated: %v", jobID, err))
+	}
+	return input, warnings
 }
 
 func cleanupUntrackedJobInput(input handoff.JobInput, sessionID string, state engine.JobState) error {

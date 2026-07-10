@@ -94,6 +94,23 @@ func TestRunVersion(t *testing.T) {
 	}
 }
 
+func TestRunVersionJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"version", "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var result struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("version JSON invalid: %v; raw = %q", err, stdout.String())
+	}
+	if result.Version != Version {
+		t.Fatalf("version = %q, want %q", result.Version, Version)
+	}
+}
+
 func TestRunFlagParseError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"handoff", "create", "--bad"}, nil, &stdout, &stderr)

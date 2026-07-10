@@ -93,6 +93,42 @@ func PersistJobInput(opts JobInputOptions) (JobInput, error) {
 	return input, nil
 }
 
+// ReassociateJobInput renames a durable job-input file to carry the job id
+// assigned by the execution service after submission.
+func ReassociateJobInput(input JobInput, jobID string, hooks Hooks) (JobInput, error) {
+	if jobID == "" {
+		return input, errors.New("job id is required")
+	}
+	parsed, ok := ParseJobInputPath(input.Path)
+	if !ok || parsed.JobID != input.JobID {
+		return input, fmt.Errorf("invalid job-input path %q for job %q", input.Path, input.JobID)
+	}
+	if input.JobID == jobID {
+		return input, nil
+	}
+
+	name := filepath.Base(input.Path)
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(name, jobInputPrefix), jobInputSuffix)
+	dot := strings.IndexByte(trimmed, '.')
+	if dot < 0 || dot == len(trimmed)-1 {
+		return input, fmt.Errorf("invalid job-input path %q", input.Path)
+	}
+	target := filepath.Join(filepath.Dir(input.Path), jobInputPrefix+encodeJobID(jobID)+trimmed[dot:]+jobInputSuffix)
+	if _, err := os.Lstat(target); err == nil {
+		return input, fmt.Errorf("job-input target already exists: %q", target)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return input, err
+	}
+	if err := os.Rename(input.Path, target); err != nil {
+		return input, err
+	}
+	reassociated := JobInput{JobID: jobID, Path: target}
+	if err := syncDir(filepath.Dir(target), hooks); err != nil {
+		return reassociated, err
+	}
+	return reassociated, nil
+}
+
 // DeleteJobInputOnSessionRecorded removes the job-input file once the backend session id is durable.
 func DeleteJobInputOnSessionRecorded(input JobInput, hooks Hooks) (bool, error) {
 	return removeFile(input.Path, hooks)
