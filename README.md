@@ -30,6 +30,19 @@ never as engine code:
 delegate imports `agentbus/client` and `agentbus/engine` as pinned Go
 modules; the dependency direction is one-way (delegate → agentbus).
 
+## Task execution modes
+
+`delegate task` uses daemon mode by default. It connects through
+`agentbus/client`, lets the client autostart the local daemon when needed, gates
+on `protocol.hello` capabilities, submits the task with the CLI-resolved
+`TurnPolicy`, and returns the launch envelope unless `--wait` is set.
+
+`delegate task --embedded --wait` runs the same policy/envelope pipeline through
+the vendored `agentbus/engine` store and backend interface. The v0.1.0 vendored
+engine does not include real Claude/Codex adapter constructors or a daemon to
+supervise work after the CLI exits, so embedded background mode is intentionally
+rejected; use daemon mode for background jobs.
+
 This repo is currently private and pre-release. See
 `~/tmp/agent-server-delegate-plan.md` (or the equivalent planning doc) for the
 full design and delivery plan.

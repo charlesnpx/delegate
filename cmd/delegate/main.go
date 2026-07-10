@@ -22,6 +22,23 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		writeVersion(stdout)
 		return 0
 	}
+	switch args[0] {
+	case "setup":
+		code, err := runSetup(args[1:], stdout, stderr)
+		return finishCommand(code, err, stderr)
+	case "task":
+		code, err := runTask(args[1:], stdin, stdout, stderr)
+		return finishCommand(code, err, stderr)
+	case "status":
+		code, err := runStatus(args[1:], stdout, stderr)
+		return finishCommand(code, err, stderr)
+	case "result":
+		code, err := runResult(args[1:], stdout, stderr)
+		return finishCommand(code, err, stderr)
+	case "cancel":
+		code, err := runCancel(args[1:], stdout, stderr)
+		return finishCommand(code, err, stderr)
+	}
 	if len(args) >= 2 && args[0] == "handoff" && args[1] == "create" {
 		if err := runHandoffCreate(args[2:], stdin, stdout, stderr); err != nil {
 			fmt.Fprintln(stderr, err)
@@ -31,6 +48,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stderr, "unknown command %q\n", args[0])
 	return 2
+}
+
+func finishCommand(code int, err error, stderr io.Writer) int {
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	return code
 }
 
 func runHandoffCreate(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
