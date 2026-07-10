@@ -21,6 +21,11 @@ never as engine code:
 - **Envelopes** — a launch-time envelope and a richer terminal-result
   envelope (with contract stamp and result hash), returned by `delegate task`,
   `delegate review`, and `delegate adversarial-review`.
+- **Prompt handoff** — `--prompt`, `--prompt-file`, `--prompt-stdin`,
+  `--handoff-prompt-file`, and positional prompts are mutually exclusive.
+  `--prompt` and positional prompt text are visible in process argv and may be
+  stored in shell history; use file, stdin, or handoff sources for sensitive
+  prompts.
 
 delegate imports `agentbus/client` and `agentbus/engine` as pinned Go
 modules; the dependency direction is one-way (delegate → agentbus).
