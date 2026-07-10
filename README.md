@@ -8,7 +8,9 @@ delegate owns all the delegation opinions as data it passes to agentbus,
 never as engine code:
 
 - The **delegate-report shape spec** (declarative, `go:embed`-ed) and the
-  **digest text** synced from mise-en-place's `delegate-contract` skill.
+  **digest text** synced from mise-en-place's `delegate-contract` skill. The
+  digest source of truth stays in the mise-en-place checkout; run
+  `scripts/sync-digest.sh` to refresh delegate's embedded copy.
 - **Tiered policy resolution** — CLI flags (`--write`, `--strict-contract`,
   `--no-contract`) resolved to a `TurnPolicy` attached CLI-side, so skills
   stay simple one-liners and agents never see or pass the shape/digest
