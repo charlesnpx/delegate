@@ -15,9 +15,11 @@ Before launching, check the subagent context and stop with a clear setup error i
 - no-fork support: the job must run through "delegate review"/agentbus supervision, not an unmanaged background shell or a local substitute review.
 - shared fs: Codex, "delegate", agentbus, and Claude Code can see the delegate state path. Using the private workspace as backend cwd is not OS isolation; a same-user backend can still read repository or other filesystem files when process permissions allow it.
 - exec: "delegate", "agentbus", "git", and the claude backend executable are runnable.
-- repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate guarantees only that it never includes content from paths matched by its secret heuristic in the context it assembles.
+- repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate applies path/history redaction and a final content scan to every assembled inline or spilled diff payload.
 - cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
 - backend reachability: "delegate setup --json" shows agentbus capabilities and claude backend availability.
+
+Threat model: v0.1 is accident prevention, not a security boundary against an adversarial repository or history. Deliberate history shuffles such as delete-and-recreate sequences intended to evade the heuristics are out of scope. v0.2 OS isolation is the boundary fix for that class.
 
 Do not add "--allow-live-repo-read" unless the user explicitly requests live-repository access after being told that using the repository as backend cwd makes backend file reads easier. It does not change OS filesystem permissions. A container/sandbox profile for OS-level isolation is planned for v0.2.
 

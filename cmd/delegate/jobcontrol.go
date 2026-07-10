@@ -280,7 +280,9 @@ func adoptProvisionalJobMetadata(ctx context.Context, c agentbusClient, stateDir
 		return fmt.Errorf("list jobs for provisional metadata adoption: %w", err)
 	}
 	jobsByProvisionalID := make(map[string]client.JobStatus, len(status.Jobs))
+	jobsByID := make(map[string]client.JobStatus, len(status.Jobs))
 	for _, job := range status.Jobs {
+		jobsByID[job.JobID] = job
 		if provisionalID := job.Tags[provisionalJobIDTag]; provisionalID != "" {
 			jobsByProvisionalID[provisionalID] = job
 		}
@@ -288,6 +290,9 @@ func adoptProvisionalJobMetadata(ctx context.Context, c agentbusClient, stateDir
 	var joined error
 	for _, meta := range provisional {
 		job, ok := jobsByProvisionalID[meta.JobID]
+		if !ok && meta.AdoptedJobID != "" {
+			job, ok = jobsByID[meta.AdoptedJobID]
+		}
 		if !ok {
 			continue
 		}
@@ -312,6 +317,7 @@ func adoptOneProvisionalJobMetadata(stateDir string, provisional jobMetadata, jo
 		meta.JobID = job.JobID
 		meta.Provisional = false
 	}
+	meta.AdoptedJobID = ""
 	if inputPath != "" {
 		meta.JobInputPath = inputPath
 	}

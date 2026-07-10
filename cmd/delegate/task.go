@@ -321,6 +321,9 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 		return taskRunResult{}, err
 	}
 	var warnings []string
+	if err := persistProvisionalJobAdoption(opts.StateDir, pendingJobID, started.JobID); err != nil {
+		warnings = append(warnings, fmt.Sprintf("provisional metadata for %s could not record adopted job %s: %v", pendingJobID, started.JobID, err))
+	}
 	input, warnings = reassociateSubmittedJobInput(input, started.JobID, warnings)
 	if warning, err := persistLaunchedJobMetadata(opts, input, started.JobID, contractKind); err != nil {
 		warnings = append(warnings, err.Error())
@@ -437,6 +440,18 @@ func persistProvisionalJobMetadata(opts taskOptions, input handoff.JobInput, job
 		return jobMetadata{}, err
 	}
 	return meta, nil
+}
+
+func persistProvisionalJobAdoption(stateDir, provisionalID, jobID string) error {
+	meta, found, err := loadJobMetadata(stateDir, provisionalID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("provisional metadata not found")
+	}
+	meta.AdoptedJobID = jobID
+	return saveJobMetadata(stateDir, meta)
 }
 
 func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) jobMetadata {

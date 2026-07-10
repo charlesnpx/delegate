@@ -13,7 +13,7 @@ import (
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
 )
 
-const liveRepoReadWarning = "--allow-live-repo-read makes backend filesystem reads easier by using the live repository as cwd; delegate only excludes secret content from the context it assembles"
+const liveRepoReadWarning = "--allow-live-repo-read makes backend filesystem reads easier by using the live repository as cwd; delegate's path/history redaction and final content scan apply only to the context it assembles"
 
 type reviewOptions struct {
 	Backend           string
@@ -105,7 +105,7 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(fs.Output(), "Usage of %s:\n", command)
-		_, _ = fmt.Fprintln(fs.Output(), "  Delegate never includes content from paths matched by its secret heuristic in the review context it assembles.")
+		_, _ = fmt.Fprintln(fs.Output(), "  Delegate redacts secret-matched paths and secret-like diff hunks from the review context it assembles.")
 		_, _ = fmt.Fprintln(fs.Output(), "  This does not prevent a same-user backend from reading repository or other filesystem files itself.")
 		_, _ = fmt.Fprintln(fs.Output(), "  --allow-live-repo-read makes those reads easier by using the repository as cwd.")
 		_, _ = fmt.Fprintln(fs.Output(), "  OS-level isolation requires a container/sandbox profile and is a named v0.2 roadmap item.")

@@ -150,6 +150,10 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 		}
 	}
 
+	// This is the final content gate: every diff has been assembled, and the
+	// same redacted payload is subsequently used for both inline and spilled
+	// delivery. Nothing adds diff or artifact content after this scan.
+	redactSecretLikeContent(changed)
 	payload := renderSanitizedContext(scope, base, changed)
 	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{StateDir: opts.StateDir})
 	if err != nil {
@@ -313,9 +317,9 @@ func ComposePrompt(kind string, assembled Context) (string, error) {
 		prompt.WriteString("Resolved base: " + strconv.Quote(assembled.Base.Ref) + " (" + assembled.Base.Source + ").\n")
 	}
 	if assembled.AllowLiveRepoRead {
-		prompt.WriteString("LIVE-REPOSITORY MODE was explicitly enabled. Delegate still excludes content from secret-matched paths only in the context it assembles; this flag makes backend file reads easier by using the live repository as its working directory. You may inspect the current repository to validate and self-collect context, but remain read-only and do not expose secret-looking file contents in the response.\n")
+		prompt.WriteString("LIVE-REPOSITORY MODE was explicitly enabled. Delegate still applies its path/history redaction and final content scan to the context it assembles; this flag makes backend file reads easier by using the live repository as its working directory. You may inspect the current repository to validate and self-collect context, but remain read-only and do not expose secret-looking file contents in the response.\n")
 	} else {
-		prompt.WriteString("Delegate has provided only its assembled context in this workspace, with secret-looking paths represented as path/status only. This does not prevent a same-user backend from reading repository or other filesystem files itself; review only this context and do not try to inspect or reconstruct redacted content. OS-level isolation requires a container or sandbox profile and is planned for v0.2.\n")
+		prompt.WriteString("Delegate has provided only its assembled context in this workspace, with secret-looking paths represented as path/status only and secret-like diff hunks replaced by a redaction marker. This does not prevent a same-user backend from reading repository or other filesystem files itself; review only this context and do not try to inspect or reconstruct redacted content. OS-level isolation requires a container or sandbox profile and is planned for v0.2.\n")
 	}
 	if assembled.ArtifactPath != "" {
 		path := artifactFilename

@@ -551,6 +551,11 @@ func TestTaskResumeMetadataFailureAfterTurnStartEmitsLaunchAndPreservesInput(t *
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	var err error
+	stateDir, err = handoff.ResolveStateDir(handoff.StateConfig{StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
 	workspace, err := os.MkdirTemp(stateDir, "review-")
 	if err != nil {
 		t.Fatal(err)
@@ -621,6 +626,48 @@ func TestTaskResumeMetadataFailureAfterTurnStartEmitsLaunchAndPreservesInput(t *
 	}
 	if _, err := os.Stat(workspace); err != nil {
 		t.Fatalf("review workspace was not preserved: %v", err)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(stateDir, "jobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var provisional jobMetadata
+	for _, entry := range entries {
+		jobID := strings.TrimSuffix(entry.Name(), ".json")
+		meta, found, loadErr := loadJobMetadata(stateDir, jobID)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if found && meta.Provisional {
+			provisional = meta
+			break
+		}
+	}
+	if provisional.JobID == "" || provisional.AdoptedJobID != "job_durable_resume" {
+		t.Fatalf("provisional metadata = %#v, want adopted job mapping", provisional)
+	}
+	provisional.CreatedAt = time.Now().Add(-2 * provisionalMetadataAdoptionThreshold)
+	if err := saveJobMetadata(stateDir, provisional); err != nil {
+		t.Fatal(err)
+	}
+	fake.status = client.JobStatusResult{Jobs: []client.JobStatus{{
+		JobID:     "job_durable_resume",
+		SessionID: "session_durable_resume",
+		State:     engine.StateCompleted,
+	}}}
+	if err := sweepTerminalJobInputs(context.Background(), fake, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := loadJobMetadata(stateDir, provisional.JobID); err != nil || found {
+		t.Fatalf("provisional metadata found=%v err=%v after sweep", found, err)
+	}
+	meta, found, err := loadJobMetadata(stateDir, "job_durable_resume")
+	if err != nil || !found || meta.Provisional || meta.SessionID != "session_durable_resume" {
+		t.Fatalf("adopted metadata=%#v found=%v err=%v", meta, found, err)
+	}
+	if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("adopted terminal workspace remains: %v", err)
 	}
 }
 

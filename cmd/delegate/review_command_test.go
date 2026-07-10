@@ -335,7 +335,7 @@ func TestReviewHelpStatesContextBoundaryAndFilesystemLimits(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	_ = run([]string{"review", "--help"}, nil, &stdout, &stderr)
 	for _, want := range []string{
-		"never includes content from paths matched by its secret heuristic",
+		"redacts secret-matched paths and secret-like diff hunks",
 		"does not prevent a same-user backend from reading",
 		"--allow-live-repo-read makes those reads easier",
 		"v0.2 roadmap item",

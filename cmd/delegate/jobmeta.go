@@ -26,6 +26,7 @@ type jobMetadata struct {
 	JobInputPath    string    `json:"job_input_path,omitempty"`
 	ReviewWorkspace string    `json:"review_workspace,omitempty"`
 	Provisional     bool      `json:"provisional,omitempty"`
+	AdoptedJobID    string    `json:"adopted_job_id,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }

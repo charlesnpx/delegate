@@ -74,6 +74,9 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"ordered by severity",
 				"Preserve the delegated review's file paths, line numbers, evidence labels",
 				"Never auto-fix",
+				"accident prevention",
+				"delete-and-recreate",
+				"v0.2 OS isolation is the boundary fix",
 			})
 			if !strings.Contains(skill.Content, "delegate "+strings.TrimPrefix(skill.Name, strings.Split(skill.Name, ":")[0]+":")+" --backend") {
 				t.Fatalf("%s missing review command", skill.Name)

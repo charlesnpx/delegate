@@ -609,6 +609,118 @@ func TestComposeAdversarialPromptIsRefuteFirst(t *testing.T) {
 	}
 }
 
+func TestSecretContentPatternClasses(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		content string
+	}{
+		{name: "AWS access key", pattern: "aws-access-key", content: `+aws_access_key_id = "AKIAIOSFODNN7EXAMPLE"`},
+		{name: "generic api key assignment", pattern: "generic-secret-assignment", content: `+api_key = "mF9xQ2vL7pR4sT8wY1zC6nK3"`},
+		{name: "generic token assignment", pattern: "generic-secret-assignment", content: `+token: pR8vN2kL6xQ4sT9mW3yF7cH1`},
+		{name: "generic secret assignment", pattern: "generic-secret-assignment", content: `+secret = zK7pQ2vM9xR4tW8nL3cF6hJ1`},
+		{name: "PEM private key", pattern: "private-key-header", content: "+-----BEGIN RSA PRIVATE KEY-----"},
+		{name: "JWT", pattern: "jwt", content: `+jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlMTIzNDU2"`},
+		{name: "GitHub ghp token", pattern: "github-token", content: "+ghp_abcdefghijklmnopqrstuvwxyz1234567890"},
+		{name: "GitHub gho token", pattern: "github-token", content: "+gho_abcdefghijklmnopqrstuvwxyz1234567890"},
+		{name: "GitHub ghs token", pattern: "github-token", content: "+ghs_abcdefghijklmnopqrstuvwxyz1234567890"},
+		{name: "Slack token", pattern: "slack-token", content: "+xoxb-123456789012-abcdefghijklmnopqrstuv"},
+		{name: "URI connection string", pattern: "connection-string-uri-password", content: `+DATABASE_URL="postgres://delegate:supersensitivepassword@db.example/app"`},
+		{name: "keyword connection string", pattern: "connection-string-password", content: `+CONNECTION="Server=db.example;Database=app;User Id=sa;Password=hunter2"`},
+		{name: "password-first connection string", pattern: "connection-string-password-first", content: `+CONNECTION="Password=hunter2;Server=db.example;Database=app"`},
+		{name: "high entropy hex assignment", pattern: "hex-assignment", content: `+digest = "9f4a7c1d8e2b6a03d5f9c7e1b4a8620df3c9157e"`},
+		{name: "high entropy base64 assignment", pattern: "base64-assignment", content: `+blob = "QWxhZGRpbjpPcGVuU2VzYW1lU2VjcmV0VmFsdWUxMjM0NTY="`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, pattern := range secretContentPatterns {
+				if pattern.name == test.pattern && secretPatternMatches(pattern, []byte(test.content)) {
+					return
+				}
+			}
+			t.Fatalf("secret pattern %q did not match %q", test.pattern, test.content)
+		})
+	}
+}
+
+func TestSecretContentScanCleanDiffSmoke(t *testing.T) {
+	clean := []byte(`diff --git a/config.go b/config.go
+index 0123456789abcdef0123456789abcdef01234567..89abcdef0123456789abcdef0123456789abcdef 100644
+--- a/config.go
++++ b/config.go
+@@ -1,3 +1,6 @@
+ package config
++const tokenCount = 12
++const apiKeyName = "primary"
++const checksumAlgorithm = "sha256"
+`)
+	if containsSecretLikeContent(clean) {
+		t.Fatalf("clean diff was classified as secret-like: %q", clean)
+	}
+	if got := redactSecretLikeHunks(clean); string(got) != string(clean) {
+		t.Fatalf("clean diff changed by final scan:\n%s", got)
+	}
+}
+
+func TestAssembleFinalSecretGateRedactsMatchingHunksInlineAndSpilled(t *testing.T) {
+	t.Run("inline preserves clean hunk", func(t *testing.T) {
+		repo := newGitFixture(t)
+		lines := make([]string, 60)
+		for i := range lines {
+			lines[i] = "unchanged line " + strconv.Itoa(i)
+		}
+		writeFixtureFile(t, repo, "app.txt", strings.Join(lines, "\n")+"\n")
+		gitFixture(t, repo, "add", "app.txt")
+		gitFixture(t, repo, "commit", "-m", "add app fixture")
+		lines[1] = `aws_access_key_id = "AKIAIOSFODNN7EXAMPLE"`
+		lines[50] = "CLEAN_SECOND_HUNK_REMAINS"
+		writeFixtureFile(t, repo, "app.txt", strings.Join(lines, "\n")+"\n")
+
+		assembled, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeWorkingTree, StateDir: filepath.Join(t.TempDir(), "state")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer Cleanup(assembled)
+		for _, want := range []string{"FILE\tM\t\"app.txt\"", secretRedactionMarker, "CLEAN_SECOND_HUNK_REMAINS"} {
+			if !strings.Contains(assembled.Inline, want) {
+				t.Fatalf("inline context missing %q:\n%s", want, assembled.Inline)
+			}
+		}
+		if strings.Contains(assembled.Inline, "AKIAIOSFODNN7EXAMPLE") {
+			t.Fatalf("inline context leaked secret:\n%s", assembled.Inline)
+		}
+	})
+
+	t.Run("spilled artifact", func(t *testing.T) {
+		repo := newGitFixture(t)
+		writeFixtureFile(t, repo, "file-a.txt", "AKIAIOSFODNN7EXAMPLE\n")
+		for i := 1; i < MaxInlineFiles+1; i++ {
+			writeFixtureFile(t, repo, "file-"+strconv.Itoa(i)+".txt", "clean change\n")
+		}
+		assembled, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeWorkingTree, StateDir: filepath.Join(t.TempDir(), "state")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer Cleanup(assembled)
+		if assembled.ArtifactPath == "" || assembled.Inline != "" {
+			t.Fatalf("artifact=%q inline=%d, want spilled output", assembled.ArtifactPath, len(assembled.Inline))
+		}
+		raw, err := os.ReadFile(assembled.ArtifactPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifact := string(raw)
+		for _, want := range []string{"FILE\t??\t\"file-a.txt\"", secretRedactionMarker, "clean change"} {
+			if !strings.Contains(artifact, want) {
+				t.Fatalf("spilled artifact missing %q:\n%s", want, artifact)
+			}
+		}
+		if strings.Contains(artifact, "AKIAIOSFODNN7EXAMPLE") {
+			t.Fatalf("spilled artifact leaked secret:\n%s", artifact)
+		}
+	})
+}
+
 func TestIsSecretPath(t *testing.T) {
 	for _, path := range []string{
 		".ENV", "config/.env.local", "config/PROD.ENV", ".NETRC", ".NPMRC",
