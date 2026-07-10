@@ -1,5 +1,5 @@
-github.com/charlesnpx/agentbus v0.0.7 h1:oYLSXUfABxpzfPZJ8VJ4urfSU3n6AYaWecTSxkADqZc=
-github.com/charlesnpx/agentbus v0.0.7/go.mod h1:AmmD2AkRmT+nqT3mHzacZYVfeTQKa8O9oQWsJMLRGhc=
+github.com/charlesnpx/agentbus v0.1.0 h1:nNhO+M7U7MRmgBFLiJzMevpR5xxqf3T1z9yVryv3A6U=
+github.com/charlesnpx/agentbus v0.1.0/go.mod h1:AmmD2AkRmT+nqT3mHzacZYVfeTQKa8O9oQWsJMLRGhc=
 github.com/dlclark/regexp2 v1.11.0 h1:G/nrcoOa7ZXlpoa/91N3X7mM3r8eIlMBBJZvsz/mxKI=
 github.com/dlclark/regexp2 v1.11.0/go.mod h1:DHkYz0B9wPfa6wondMfaivmHpzrQ3v9q8cnmRbL6yW8=
 github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 h1:KRzFb2m7YtdldCEkzs6KqmJw4nqEVZGK7IN2kJkjTuQ=
