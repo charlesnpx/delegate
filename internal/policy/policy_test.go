@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -118,7 +120,7 @@ func TestDelegateReportSpecAndRegistryImmutability(t *testing.T) {
 	if resolvedHash != hash {
 		t.Fatalf("resolved hash = %q, want %q", resolvedHash, hash)
 	}
-	if !reflect.DeepEqual(resolved, spec) {
+	if !equalContractSpec(resolved, spec) {
 		t.Fatalf("resolved spec = %#v, want %#v", resolved, spec)
 	}
 
@@ -131,6 +133,27 @@ func TestDelegateReportSpecAndRegistryImmutability(t *testing.T) {
 	}
 }
 
+func equalContractSpec(got, want engine.ContractSpec) bool {
+	normalize := func(spec engine.ContractSpec) engine.ContractSpec {
+		if spec.Shape == nil {
+			return spec
+		}
+		shape := *spec.Shape
+		if len(shape.FirstLineEnum) == 0 {
+			shape.FirstLineEnum = nil
+		}
+		if len(shape.RequiredSections) == 0 {
+			shape.RequiredSections = nil
+		}
+		if len(shape.RequiredAttestations) == 0 {
+			shape.RequiredAttestations = nil
+		}
+		spec.Shape = &shape
+		return spec
+	}
+	return reflect.DeepEqual(normalize(got), normalize(want))
+}
+
 func TestDelegateReportSpecShape(t *testing.T) {
 	spec, err := DelegateReportSpec()
 	if err != nil {
@@ -141,8 +164,8 @@ func TestDelegateReportSpecShape(t *testing.T) {
 	}
 	want := engine.ShapeSpec{
 		FirstLineEnum:        []string{"complete", "partial", "blocked"},
-		RequiredSections:     []string{"Divergence", "Criteria scored", "Receipts", "Verification", "Scope boundary"},
-		RequiredAttestations: []string{"observed", "inferred", "assumed"},
+		RequiredSections:     []string{"Criteria scored", "Receipts", "Verification", "Scope boundary"},
+		RequiredAttestations: []string{},
 		EvidenceHeuristic:    true,
 	}
 	if !reflect.DeepEqual(*spec.Shape, want) {
@@ -164,6 +187,72 @@ func TestDigestEmbeddedEqualsFile(t *testing.T) {
 	}
 }
 
+func TestSyncDigestScriptCopiesAndFailsWhenMissing(t *testing.T) {
+	digestPath := filepath.Join("digest", "delegate-contract.md")
+	original, err := os.ReadFile(digestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(digestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.WriteFile(digestPath, original, info.Mode().Perm()); err != nil {
+			t.Errorf("restore digest file: %v", err)
+		}
+	})
+
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(repoRoot, "scripts", "sync-digest.sh")
+	miseDir := t.TempDir()
+	sourceDir := filepath.Join(miseDir, "skills", "delegate-contract", "codex")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(sourceDir, "SKILL.md")
+	fixtureDigest := []byte("fixture delegate contract\n")
+	if err := os.WriteFile(sourcePath, fixtureDigest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(script)
+	cmd.Env = append(os.Environ(), "MISE_EN_PLACE_DIR="+miseDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("sync-digest copy failed: %v\n%s", err, out)
+	}
+	got, err := os.ReadFile(digestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(fixtureDigest) {
+		t.Fatalf("synced digest = %q, want %q", got, fixtureDigest)
+	}
+
+	if err := os.Remove(sourcePath); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command(script)
+	cmd.Env = append(os.Environ(), "MISE_EN_PLACE_DIR="+miseDir)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("sync-digest missing source succeeded, want failure\n%s", out)
+	}
+	if !strings.Contains(string(out), "missing delegate-contract source:") {
+		t.Fatalf("missing-source output = %q, want missing source message", out)
+	}
+	got, err = os.ReadFile(digestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(fixtureDigest) {
+		t.Fatalf("digest changed after missing source = %q, want previous fixture digest", got)
+	}
+}
+
 func TestRetryTemplateAndPolicyValidateWithEngine(t *testing.T) {
 	policy, err := ResolveTurnPolicy(Flags{Write: true})
 	if err != nil {
@@ -171,23 +260,21 @@ func TestRetryTemplateAndPolicyValidateWithEngine(t *testing.T) {
 	}
 	compliant := `complete
 
-Divergence:
-- observed: none.
-
 Criteria scored:
-- observed: all requested policy-layer criteria are met at internal/policy/policy.go:1.
+- observed: fixture criteria are satisfied at example/thing.go:12.
 
 Receipts:
-- observed: go test ./... exit code 0.
-- inferred: the embedded shape is passed inline because the policy contract equals the embedded data.
-- assumed: no additional envelope work is in scope for this merge unit.
+- observed: fixture command "example-check --fixture" exit 0.
 
 Verification:
-- observed: go test -race ./... exit code 0.
+- observed: fixture command "example-verify --fixture" exit 0.
 
 Scope boundary:
-- observed: review context assembly was not examined.
+- observed: fixture validation is limited to the delegate report shape at example/scope.md:3.
 `
+	if strings.Contains(compliant, "inferred:") || strings.Contains(compliant, "assumed:") {
+		t.Fatal("compliant fixture must exercise all-observed attestations")
+	}
 	validation, err := engine.ValidatePolicyText(compliant, policy, engine.NewPolicyRegistry(), time.Unix(0, 0))
 	if err != nil {
 		t.Fatalf("ValidatePolicyText(compliant) error = %v", err)

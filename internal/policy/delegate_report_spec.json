@@ -6,17 +6,12 @@
       "blocked"
     ],
     "requiredSections": [
-      "Divergence",
       "Criteria scored",
       "Receipts",
       "Verification",
       "Scope boundary"
     ],
-    "requiredAttestations": [
-      "observed",
-      "inferred",
-      "assumed"
-    ],
+    "requiredAttestations": [],
     "evidenceHeuristic": true
   }
 }
