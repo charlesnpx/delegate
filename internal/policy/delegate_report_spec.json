@@ -1,0 +1,17 @@
+{
+  "shape": {
+    "firstLineEnum": [
+      "complete",
+      "partial",
+      "blocked"
+    ],
+    "requiredSections": [
+      "Criteria scored",
+      "Receipts",
+      "Verification",
+      "Scope boundary"
+    ],
+    "requiredAttestations": [],
+    "evidenceHeuristic": true
+  }
+}
