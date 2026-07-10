@@ -176,6 +176,19 @@ func allGeneratedSkills(t *testing.T) []GeneratedSkill {
 	return all
 }
 
+func TestReviewAndRescueSkillsKeepEscapeHatchAndStallDiscipline(t *testing.T) {
+	for _, skill := range allGeneratedSkills(t) {
+		if skill.Kind != KindReview && !strings.HasSuffix(skill.Name, ":rescue") {
+			continue
+		}
+		requireFragments(t, skill, []string{"Superseding escape hatch", "explicitly asks", "delegate is unavailable", "supersedes this skill's delegation trigger"})
+		requireStallGuidance(t, skill)
+		if strings.Contains(skill.Content, "--no-contract") {
+			t.Fatalf("%s contains forbidden --no-contract", skill.Name)
+		}
+	}
+}
+
 func requireFragments(t *testing.T, skill GeneratedSkill, fragments []string) {
 	t.Helper()
 	for _, fragment := range fragments {

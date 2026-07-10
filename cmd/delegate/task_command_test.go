@@ -50,7 +50,7 @@ func TestEnvelopeSchemasAndHashes(t *testing.T) {
 		Attempts:    1,
 		ValidatedAt: time.Unix(1, 0).UTC(),
 	}
-	terminal, err := newTerminalEnvelope("job_envelope", engine.StateCompleted, taskKind, contractKindShape, stamp, strings.Repeat("a", 64))
+	terminal, err := newTerminalEnvelope("job_envelope", engine.StateCompleted, taskKind, contractKindShape, stamp, strings.Repeat("a", 64), "")
 	if err != nil {
 		t.Fatal(err)
 	}

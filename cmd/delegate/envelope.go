@@ -34,36 +34,42 @@ type LaunchEnvelope struct {
 
 // TerminalEnvelope is the schema returned by delegate result and task --wait.
 type TerminalEnvelope struct {
-	Schema       int                  `json:"schema"`
-	JobID        string               `json:"job_id"`
-	Status       engine.JobState      `json:"status"`
-	Kind         string               `json:"kind"`
-	ContractKind string               `json:"contractKind"`
-	Contract     engine.ContractStamp `json:"contract"`
-	ResultSHA256 string               `json:"result_sha256"`
-	SHA256       string               `json:"sha256"`
+	Schema                  int                  `json:"schema"`
+	JobID                   string               `json:"job_id"`
+	Status                  engine.JobState      `json:"status"`
+	Kind                    string               `json:"kind"`
+	ContractKind            string               `json:"contractKind"`
+	Contract                engine.ContractStamp `json:"contract"`
+	ResultSHA256            *string              `json:"result_sha256"`
+	ResultUnavailableReason string               `json:"result_unavailable_reason,omitempty"`
+	BackendError            string               `json:"backend_error,omitempty"`
+	SHA256                  string               `json:"sha256"`
 }
 
 func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 	type terminalEnvelopeJSON struct {
-		Schema       int             `json:"schema"`
-		JobID        string          `json:"job_id"`
-		Status       engine.JobState `json:"status"`
-		Kind         string          `json:"kind"`
-		ContractKind string          `json:"contractKind"`
-		Contract     map[string]any  `json:"contract"`
-		ResultSHA256 string          `json:"result_sha256"`
-		SHA256       string          `json:"sha256"`
+		Schema                  int             `json:"schema"`
+		JobID                   string          `json:"job_id"`
+		Status                  engine.JobState `json:"status"`
+		Kind                    string          `json:"kind"`
+		ContractKind            string          `json:"contractKind"`
+		Contract                map[string]any  `json:"contract"`
+		ResultSHA256            *string         `json:"result_sha256"`
+		ResultUnavailableReason string          `json:"result_unavailable_reason,omitempty"`
+		BackendError            string          `json:"backend_error,omitempty"`
+		SHA256                  string          `json:"sha256"`
 	}
 	return json.Marshal(terminalEnvelopeJSON{
-		Schema:       e.Schema,
-		JobID:        e.JobID,
-		Status:       e.Status,
-		Kind:         e.Kind,
-		ContractKind: e.ContractKind,
-		Contract:     contractStampEnvelopeValue(e.Contract),
-		ResultSHA256: e.ResultSHA256,
-		SHA256:       e.SHA256,
+		Schema:                  e.Schema,
+		JobID:                   e.JobID,
+		Status:                  e.Status,
+		Kind:                    e.Kind,
+		ContractKind:            e.ContractKind,
+		Contract:                contractStampEnvelopeValue(e.Contract),
+		ResultSHA256:            e.ResultSHA256,
+		ResultUnavailableReason: e.ResultUnavailableReason,
+		BackendError:            e.BackendError,
+		SHA256:                  e.SHA256,
 	})
 }
 
@@ -102,10 +108,7 @@ func newLaunchEnvelope(jobID string, state engine.JobState) (LaunchEnvelope, err
 	return env, nil
 }
 
-func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind string, stamp engine.ContractStamp, resultSHA256 string) (TerminalEnvelope, error) {
-	if resultSHA256 == "" {
-		return TerminalEnvelope{}, fmt.Errorf("terminal result for %s is missing result sha256", jobID)
-	}
+func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind string, stamp engine.ContractStamp, resultSHA256, backendError string) (TerminalEnvelope, error) {
 	stamp = normalizeContractStamp(stamp)
 	env := TerminalEnvelope{
 		Schema:       envelopeSchema,
@@ -114,7 +117,12 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 		Kind:         kind,
 		ContractKind: contractKind,
 		Contract:     stamp,
-		ResultSHA256: resultSHA256,
+		BackendError: backendError,
+	}
+	if resultSHA256 != "" {
+		env.ResultSHA256 = &resultSHA256
+	} else {
+		env.ResultUnavailableReason = "result_unavailable"
 	}
 	sum, err := envelopeSHA256(env)
 	if err != nil {

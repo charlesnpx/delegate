@@ -57,6 +57,27 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	_ = sweepTerminalJobInputs(ctx, c, "")
 	cleanupStatuses("", status)
+	if *jobID != "" {
+		if job, ok := findJobStatus(status, *jobID); ok && engine.IsTerminal(job.State) && !*probe {
+			result, resultErr := c.JobResult(ctx, client.JobResultParams{JobID: *jobID})
+			if resultErr != nil {
+				result = client.JobResult{JobID: job.JobID, SessionID: job.SessionID, State: job.State}
+			}
+			env, envelopeErr := terminalEnvelopeFromJobResult("", result)
+			if envelopeErr != nil {
+				return 0, envelopeErr
+			}
+			if *jsonOut {
+				return engine.ExitCodeForState(env.Status), writeJSONLine(stdout, env)
+			}
+			if env.BackendError != "" {
+				_, envelopeErr = fmt.Fprintf(stdout, "%s %s backend_error=%s\n", env.JobID, env.Status, env.BackendError)
+			} else {
+				_, envelopeErr = fmt.Fprintf(stdout, "%s %s\n", env.JobID, env.Status)
+			}
+			return engine.ExitCodeForState(env.Status), envelopeErr
+		}
+	}
 	if *probe {
 		job, ok := findJobStatus(status, *jobID)
 		if !ok {
@@ -266,6 +287,7 @@ func waitForJobStatus(ctx context.Context, c agentbusClient, stateDir, jobID str
 
 func cleanupStatuses(stateDir string, status client.JobStatusResult) {
 	for _, job := range status.Jobs {
+		_ = captureBackendError(stateDir, job)
 		_ = cleanupJobInput(stateDir, job.JobID, job.SessionID, job.State)
 	}
 }
@@ -416,7 +438,14 @@ func terminalEnvelopeFromJobResult(stateDir string, result client.JobResult) (Te
 	if result.Result != nil {
 		resultSHA256 = result.Result.SHA256
 	}
-	return newTerminalEnvelope(result.JobID, result.State, kind, contractKind, stamp, resultSHA256)
+	backendError := ""
+	if found {
+		backendError = meta.BackendError
+	}
+	if result.Result == nil && backendError != "" && !(found && meta.NoContract) {
+		stamp = skippedDelegateContractStamp(engine.SkipBackendError)
+	}
+	return newTerminalEnvelope(result.JobID, result.State, kind, contractKind, stamp, resultSHA256, backendError)
 }
 
 func skippedDelegateContractStamp(reason engine.SkippedReason) engine.ContractStamp {

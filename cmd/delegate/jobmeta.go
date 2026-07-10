@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
 	"github.com/charlesnpx/delegate/internal/handoff"
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
@@ -27,8 +28,32 @@ type jobMetadata struct {
 	ReviewWorkspace string    `json:"review_workspace,omitempty"`
 	Provisional     bool      `json:"provisional,omitempty"`
 	AdoptedJobID    string    `json:"adopted_job_id,omitempty"`
+	BackendError    string    `json:"backend_error,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+func captureBackendError(stateDir string, job client.JobStatus) error {
+	if !engine.IsTerminal(job.State) || job.LogPaths.Stderr == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(job.LogPaths.Stderr)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	detail := strings.TrimSpace(string(raw))
+	if detail == "" {
+		return nil
+	}
+	meta, found, err := loadJobMetadata(stateDir, job.JobID)
+	if err != nil || !found {
+		return err
+	}
+	meta.BackendError = detail
+	return saveJobMetadata(stateDir, meta)
 }
 
 func saveJobMetadata(stateDir string, meta jobMetadata) error {

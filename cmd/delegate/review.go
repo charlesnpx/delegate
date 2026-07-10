@@ -112,7 +112,7 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 		fs.PrintDefaults()
 	}
 	var background bool
-	fs.StringVar(&opts.Backend, "backend", "", "backend name: claude or codex")
+	fs.StringVar(&opts.Backend, "backend", "", "backend name discovered from agentbus")
 	fs.BoolVar(&background, "background", false, "return after launch")
 	fs.BoolVar(&opts.Wait, "wait", false, "wait for terminal result")
 	fs.BoolVar(&opts.JSON, "json", false, "emit JSON")
@@ -132,8 +132,8 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	if fs.NArg() != 0 {
 		return reviewOptions{}, fmt.Errorf("%s does not accept positional arguments", command)
 	}
-	if opts.Backend != "claude" && opts.Backend != "codex" {
-		return reviewOptions{}, fmt.Errorf("%s requires --backend claude|codex", command)
+	if opts.Backend == "" {
+		return reviewOptions{}, fmt.Errorf("%s requires --backend", command)
 	}
 	if background && opts.Wait {
 		return reviewOptions{}, fmt.Errorf("use only one of --background or --wait")

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/charlesnpx/agentbus/client"
@@ -26,14 +27,15 @@ type setupJSON struct {
 }
 
 type setupAgentbus struct {
-	Found           bool            `json:"found"`
-	Path            string          `json:"path"`
-	Version         string          `json:"version,omitempty"`
-	ProtocolVersion int             `json:"protocolVersion"`
-	Backends        []string        `json:"backends"`
-	Capabilities    map[string]bool `json:"capabilities"`
-	Required        []string        `json:"requiredCapabilities"`
-	CapabilitiesOK  bool            `json:"capabilitiesOK"`
+	Found           bool                 `json:"found"`
+	Path            string               `json:"path"`
+	Version         string               `json:"version,omitempty"`
+	ProtocolVersion int                  `json:"protocolVersion"`
+	Backends        []string             `json:"backends"`
+	BackendMetadata []client.BackendInfo `json:"backendMetadata,omitempty"`
+	Capabilities    map[string]bool      `json:"capabilities"`
+	Required        []string             `json:"requiredCapabilities"`
+	CapabilitiesOK  bool                 `json:"capabilitiesOK"`
 }
 
 // setupSkill reports whether one managed skill is present and matches the
@@ -83,6 +85,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 				Version:         version,
 				ProtocolVersion: hello.ProtocolVersion,
 				Backends:        hello.Backends,
+				BackendMetadata: hello.BackendMetadata,
 				Capabilities:    hello.Capabilities,
 				Required:        setupRequiredCapabilities(),
 				CapabilitiesOK:  true,
@@ -101,6 +104,17 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	if _, err := fmt.Fprintf(stdout, "agentbus discovery: found\nagentbus protocol: %d\ncapabilities: ok\n", hello.ProtocolVersion); err != nil {
 		return 0, err
+	}
+	for _, backend := range hello.Backends {
+		line := "backend " + backend
+		for _, meta := range hello.BackendMetadata {
+			if meta.Backend == backend {
+				line += fmt.Sprintf(": models=%s efforts=%s", strings.Join(meta.Models, ","), strings.Join(meta.Efforts, ","))
+			}
+		}
+		if _, err := fmt.Fprintln(stdout, line); err != nil {
+			return 0, err
+		}
 	}
 	for _, skill := range skills {
 		if _, err := fmt.Fprintf(stdout, "skill %s (%s): %s\n", skill.Name, skill.Target, skill.Status); err != nil {

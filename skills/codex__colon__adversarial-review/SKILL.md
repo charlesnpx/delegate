@@ -1,7 +1,7 @@
 ---
 name: codex:adversarial-review
 description: Delegate a refute-first adversarial code review from Claude Code to Codex through sanitized delegate review context and return the launch envelope verbatim.
-version: v0.1.1
+version: v0.2.0
 ---
 
 # codex:adversarial-review
@@ -11,6 +11,8 @@ Use this when Claude Code should delegate a read-only refute-first adversarial c
 ## Preflight
 
 Before launching, check the subagent context and stop with a clear setup error if any item is missing:
+
+Superseding escape hatch: if the requester explicitly asks for a direct local review and delegate is unavailable in this environment, perform the review locally. That explicit request supersedes this skill's delegation trigger; do not refuse merely because delegate cannot run.
 
 - no-fork support: the job must run through "delegate adversarial-review"/agentbus supervision, not an unmanaged background shell or a local substitute review.
 - shared fs: Claude Code, "delegate", agentbus, and Codex can see the delegate state path. Using the private workspace as backend cwd is not OS isolation; a same-user backend can still read repository or other filesystem files when process permissions allow it.

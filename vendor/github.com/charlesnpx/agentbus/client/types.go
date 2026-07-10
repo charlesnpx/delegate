@@ -4,6 +4,7 @@ import "github.com/charlesnpx/agentbus/internal/protocol"
 
 type HelloParams = protocol.HelloParams
 type HelloResult = protocol.HelloResult
+type BackendInfo = protocol.BackendInfo
 type SessionStartParams = protocol.SessionStartParams
 type SessionStartResult = protocol.SessionStartResult
 type SessionResumeParams = protocol.SessionResumeParams

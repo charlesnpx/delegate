@@ -112,7 +112,7 @@ func TestRescueSmokeFixtures(t *testing.T) {
 			if terminal.Contract.Status != engine.ContractCompliant || terminal.Contract.Attempts != 1 || terminal.Contract.RetryUsed {
 				t.Fatalf("contract stamp = %#v, want one compliant validation", terminal.Contract)
 			}
-			if terminal.Contract.ContractSHA256 == "" || terminal.ResultSHA256 != sha256Text(compliantReport()) || terminal.SHA256 == "" {
+			if terminal.Contract.ContractSHA256 == "" || terminal.ResultSHA256 == nil || *terminal.ResultSHA256 != sha256Text(compliantReport()) || terminal.SHA256 == "" {
 				t.Fatalf("terminal hashes = %#v, want contract, result, and envelope hashes", terminal)
 			}
 			if len(backend.turns) != 1 || backend.turns[0].Write {
