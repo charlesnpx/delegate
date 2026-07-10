@@ -8,7 +8,7 @@ import (
 )
 
 func TestVersionLine(t *testing.T) {
-	const want = "delegate v0.0.0-dev"
+	const want = "delegate 0.0.0-dev"
 	if got := versionLine(); got != want {
 		t.Fatalf("versionLine() = %q, want %q", got, want)
 	}
@@ -89,7 +89,7 @@ func TestRunVersion(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if got, want := stdout.String(), "delegate v0.0.0-dev\n"; got != want {
+	if got, want := stdout.String(), "delegate 0.0.0-dev\n"; got != want {
 		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 }

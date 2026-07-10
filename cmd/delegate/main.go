@@ -11,7 +11,7 @@ import (
 )
 
 // Version is the development version overridden by release builds.
-var Version = "v0.0.0-dev"
+var Version = "0.0.0-dev"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))

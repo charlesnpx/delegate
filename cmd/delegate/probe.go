@@ -37,6 +37,7 @@ type statusProbeResult struct {
 	LeaseExpired    bool            `json:"lease_expired"`
 	Probes          []livenessProbe `json:"probes"`
 	Verdict         string          `json:"verdict"`
+	VerdictReason   string          `json:"verdict_reason,omitempty"`
 }
 
 type livenessProbe struct {
@@ -67,6 +68,12 @@ type processObservation struct {
 	Err   string
 }
 
+type processIdentityObservation struct {
+	Alive     bool
+	StartTime string
+	Err       string
+}
+
 type socketObservation struct {
 	Established bool
 	Raw         string
@@ -80,19 +87,21 @@ type logObservation struct {
 }
 
 type probeOps struct {
-	Process func(context.Context, int) processObservation
-	Socket  func(context.Context, int) socketObservation
-	LogSize func(engine.LogPaths) logObservation
-	Sleep   func(context.Context, time.Duration) error
+	ProcessIdentity func(context.Context, int) processIdentityObservation
+	Process         func(context.Context, int) processObservation
+	Socket          func(context.Context, int) socketObservation
+	LogSize         func(engine.LogPaths) logObservation
+	Sleep           func(context.Context, time.Duration) error
 }
 
 var (
 	probeInterval = 60 * time.Second
 	livenessOps   = probeOps{
-		Process: realProcessObservation,
-		Socket:  realSocketObservation,
-		LogSize: realLogObservation,
-		Sleep:   sleepContext,
+		ProcessIdentity: realProcessIdentityObservation,
+		Process:         realProcessObservation,
+		Socket:          realSocketObservation,
+		LogSize:         realLogObservation,
+		Sleep:           sleepContext,
 	}
 	probeCommandOutput = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return exec.CommandContext(ctx, name, args...).CombinedOutput()
@@ -131,7 +140,7 @@ func probeJobStatus(ctx context.Context, job client.JobStatus) (statusProbeResul
 		return statusProbeResult{}, err
 	}
 	result.Probes = probes
-	result.Verdict = livenessVerdict(probes)
+	result.Verdict, result.VerdictReason = livenessVerdictReason(probes)
 	return result, nil
 }
 
@@ -144,6 +153,9 @@ func skippedLeaseProbes() []livenessProbe {
 }
 
 func runLivenessProbes(ctx context.Context, job client.JobStatus, ops probeOps, interval time.Duration) ([]livenessProbe, error) {
+	if ops.ProcessIdentity == nil {
+		ops.ProcessIdentity = realProcessIdentityObservation
+	}
 	if ops.Process == nil {
 		ops.Process = realProcessObservation
 	}
@@ -160,20 +172,98 @@ func runLivenessProbes(ctx context.Context, job client.JobStatus, ops probeOps, 
 	if pid == 0 {
 		pid = job.WorkerPID
 	}
-	firstProcess := observeProcess(ctx, ops, pid)
-	firstSocket := observeSocket(ctx, ops, pid)
+	identity, ok, detail := verifyProcessIdentity(ctx, ops, job, pid)
+	var firstProcess processObservation
+	var firstSocket socketObservation
+	if ok && identity.Alive {
+		firstProcess = observeProcess(ctx, ops, pid)
+		firstSocket = observeSocket(ctx, ops, pid)
+	}
 	firstLog := observeLog(ops, job.LogPaths)
 	if err := ops.Sleep(ctx, interval); err != nil {
 		return nil, err
 	}
+	secondLog := observeLog(ops, job.LogPaths)
+	if !ok {
+		return []livenessProbe{
+			unknownPIDProbe("process", detail),
+			unknownPIDProbe("network", detail),
+			logProbe(firstLog, secondLog),
+		}, nil
+	}
+	if !identity.Alive {
+		missingProcess := processObservation{Alive: false}
+		missingSocket := socketObservation{}
+		return []livenessProbe{
+			processProbe(missingProcess, missingProcess, pid),
+			socketProbe(missingSocket, missingSocket, pid),
+			logProbe(firstLog, secondLog),
+		}, nil
+	}
+	secondIdentity, secondOK, secondDetail := verifyProcessIdentity(ctx, ops, job, pid)
+	if !secondOK {
+		return []livenessProbe{
+			unknownPIDProbe("process", secondDetail),
+			unknownPIDProbe("network", secondDetail),
+			logProbe(firstLog, secondLog),
+		}, nil
+	}
+	if !secondIdentity.Alive {
+		missingProcess := processObservation{Alive: false}
+		missingSocket := socketObservation{}
+		return []livenessProbe{
+			processProbe(firstProcess, missingProcess, pid),
+			socketProbe(firstSocket, missingSocket, pid),
+			logProbe(firstLog, secondLog),
+		}, nil
+	}
 	secondProcess := observeProcess(ctx, ops, pid)
 	secondSocket := observeSocket(ctx, ops, pid)
-	secondLog := observeLog(ops, job.LogPaths)
 	return []livenessProbe{
 		processProbe(firstProcess, secondProcess, pid),
 		socketProbe(firstSocket, secondSocket, pid),
 		logProbe(firstLog, secondLog),
 	}, nil
+}
+
+func verifyProcessIdentity(ctx context.Context, ops probeOps, job client.JobStatus, pid int) (processIdentityObservation, bool, string) {
+	if pid <= 0 {
+		return processIdentityObservation{}, false, "no child pid recorded"
+	}
+	expectedStartTime, ok := expectedProcessStartTime(job, pid)
+	if !ok {
+		return processIdentityObservation{}, false, "process start-time is missing from job status"
+	}
+	identity := ops.ProcessIdentity(ctx, pid)
+	if identity.Err != "" {
+		return identity, false, "process start-time could not be verified: " + identity.Err
+	}
+	if !identity.Alive {
+		return identity, true, ""
+	}
+	if identity.StartTime == "" {
+		return identity, false, "process start-time is unavailable from the host"
+	}
+	if identity.StartTime != expectedStartTime {
+		return identity, false, "process start-time does not match job status"
+	}
+	return identity, true, ""
+}
+
+func expectedProcessStartTime(job client.JobStatus, pid int) (string, bool) {
+	refs := []engine.ProcessRef{job.BackendChild, job.Worker}
+	for _, ref := range refs {
+		if ref.PID == pid {
+			return ref.StartTime, ref.StartTime != ""
+		}
+	}
+	if job.BackendChildPID == pid && job.BackendChild.PID == 0 && job.BackendChild.StartTime != "" {
+		return job.BackendChild.StartTime, true
+	}
+	if job.WorkerPID == pid && job.Worker.PID == 0 && job.Worker.StartTime != "" {
+		return job.Worker.StartTime, true
+	}
+	return "", false
 }
 
 func observeProcess(ctx context.Context, ops probeOps, pid int) processObservation {
@@ -195,6 +285,10 @@ func observeLog(ops probeOps, paths engine.LogPaths) logObservation {
 		return logObservation{Err: "no captured log paths recorded"}
 	}
 	return ops.LogSize(paths)
+}
+
+func unknownPIDProbe(name, detail string) livenessProbe {
+	return livenessProbe{Name: name, Status: probeStatusUnknown, Detail: detail}
 }
 
 func processProbe(first, second processObservation, pid int) livenessProbe {
@@ -222,7 +316,7 @@ func socketProbe(first, second socketObservation, pid int) livenessProbe {
 	if first.Established || second.Established {
 		return livenessProbe{Name: "network", Status: probeStatusActive, Detail: "established TCP socket observed", Samples: samples}
 	}
-	if first.Err != "" && second.Err != "" && first.Raw != "" && second.Raw != "" {
+	if first.Err != "" || second.Err != "" {
 		return livenessProbe{Name: "network", Status: probeStatusUnknown, Detail: "socket probe returned errors", Samples: samples}
 	}
 	return livenessProbe{Name: "network", Status: probeStatusFlat, Detail: "no established TCP socket observed", Samples: samples}
@@ -272,22 +366,66 @@ func logSample(index int, obs logObservation) probeSample {
 }
 
 func livenessVerdict(probes []livenessProbe) string {
+	verdict, _ := livenessVerdictReason(probes)
+	return verdict
+}
+
+func livenessVerdictReason(probes []livenessProbe) (string, string) {
 	if len(probes) == 0 {
-		return probeVerdictInconclusive
+		return probeVerdictInconclusive, "no liveness probes ran"
 	}
 	allFlat := true
+	var unknown []string
 	for _, probe := range probes {
 		if probe.Status == probeStatusActive {
-			return probeVerdictActive
+			return probeVerdictActive, ""
+		}
+		if probe.Status == probeStatusUnknown {
+			unknown = append(unknown, probe.Name)
 		}
 		if probe.Status != probeStatusFlat {
 			allFlat = false
 		}
 	}
-	if allFlat {
-		return probeVerdictStalled
+	if len(unknown) > 0 {
+		return probeVerdictInconclusive, "unknown probes: " + strings.Join(unknown, ", ")
 	}
-	return probeVerdictInconclusive
+	if allFlat && hasRequiredFlatProbes(probes) {
+		return probeVerdictStalled, ""
+	}
+	return probeVerdictInconclusive, "stalled verdict requires process, network, and log_size probes to be flat"
+}
+
+func hasRequiredFlatProbes(probes []livenessProbe) bool {
+	required := map[string]bool{
+		"process":  false,
+		"network":  false,
+		"log_size": false,
+	}
+	for _, probe := range probes {
+		if _, ok := required[probe.Name]; ok && probe.Status == probeStatusFlat {
+			required[probe.Name] = true
+		}
+	}
+	for _, ok := range required {
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func realProcessIdentityObservation(ctx context.Context, pid int) processIdentityObservation {
+	select {
+	case <-ctx.Done():
+		return processIdentityObservation{Err: ctx.Err().Error()}
+	default:
+	}
+	info, alive, err := (engine.NativeProcessTable{}).Lookup(pid)
+	if err != nil {
+		return processIdentityObservation{Err: err.Error()}
+	}
+	return processIdentityObservation{Alive: alive, StartTime: info.StartTime}
 }
 
 func realProcessObservation(ctx context.Context, pid int) processObservation {
@@ -328,7 +466,7 @@ func realSocketObservation(ctx context.Context, pid int) socketObservation {
 	if raw != "" && strings.Contains(raw, "TCP") {
 		obs.Established = true
 	}
-	if err != nil && raw != "" {
+	if err != nil {
 		obs.Err = err.Error()
 	}
 	return obs

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -104,6 +106,53 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 	}
 }
 
+func TestDelegatedInstallerToolsInstallBuildsDelegate(t *testing.T) {
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(tmp, "root")
+	gocache := privateTmpDir(t, "delegate-gocache-*")
+	env := []string{
+		"GOCACHE=" + gocache,
+		"GOPROXY=off",
+		"GOSUMDB=off",
+	}
+
+	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "tools", "--json", "--install-root", root}, env)
+	if installed.Version != "0.0.5" {
+		t.Fatalf("installer version = %q, want 0.0.5", installed.Version)
+	}
+	toolsTarget := installed.Targets["tools"]
+	if len(toolsTarget.Files) != 1 {
+		t.Fatalf("tools files = %d, want 1: %#v", len(toolsTarget.Files), toolsTarget.Files)
+	}
+	toolFile := toolsTarget.Files[0]
+	wantPath := filepath.Join(root, ".local", "bin", "delegate")
+	if toolFile.Path != wantPath {
+		t.Fatalf("tool path = %q, want %q", toolFile.Path, wantPath)
+	}
+	if _, err := hex.DecodeString(toolFile.SHA256); err != nil || len(toolFile.SHA256) != 64 {
+		t.Fatalf("tool sha256 = %q, want 64 hex chars (decode err %v)", toolFile.SHA256, err)
+	}
+	raw, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	if got := hex.EncodeToString(sum[:]); got != toolFile.SHA256 {
+		t.Fatalf("reported sha256 = %q, computed %q", toolFile.SHA256, got)
+	}
+	cmd := exec.Command(wantPath, "version")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("staged delegate version failed: %v\n%s", err, out)
+	}
+	if got, want := string(out), "delegate 0.0.5\n"; got != want {
+		t.Fatalf("staged delegate version = %q, want %q", got, want)
+	}
+}
+
 func runDelegatedInstallerScript(t *testing.T, args, extraEnv []string) delegatedInstallerResult {
 	t.Helper()
 	script, err := filepath.Abs(filepath.Join("..", "..", "install-skill.sh"))
@@ -125,4 +174,18 @@ func runDelegatedInstallerScript(t *testing.T, args, extraEnv []string) delegate
 		t.Fatalf("installer output is not JSON: %v\n%s", err, out)
 	}
 	return result
+}
+
+func privateTmpDir(t *testing.T, pattern string) string {
+	t.Helper()
+	base := "/private/tmp"
+	if info, err := os.Stat(base); err != nil || !info.IsDir() {
+		base = os.TempDir()
+	}
+	dir, err := os.MkdirTemp(base, pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }

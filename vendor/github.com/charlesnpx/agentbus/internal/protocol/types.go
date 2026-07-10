@@ -245,7 +245,9 @@ type JobStatus struct {
 	UpdatedAt       *time.Time        `json:"updatedAt,omitempty"`
 	HeartbeatAt     *time.Time        `json:"heartbeatAt,omitempty"`
 	Lease           *engine.Lease     `json:"lease,omitempty"`
+	Worker          engine.ProcessRef `json:"worker,omitempty"`
 	WorkerPID       int               `json:"workerPid,omitempty"`
+	BackendChild    engine.ProcessRef `json:"backendChild,omitempty"`
 	BackendChildPID int               `json:"backendChildPid,omitempty"`
 	StatePath       string            `json:"statePath,omitempty"`
 	LogPaths        engine.LogPaths   `json:"logPaths,omitempty"`
