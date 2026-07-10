@@ -108,7 +108,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	for _, backend := range hello.Backends {
 		line := "backend " + backend
 		for _, meta := range hello.BackendMetadata {
-			if meta.Backend == backend {
+			if meta.Name == backend {
 				line += fmt.Sprintf(": models=%s efforts=%s", strings.Join(meta.Models, ","), strings.Join(meta.Efforts, ","))
 			}
 		}

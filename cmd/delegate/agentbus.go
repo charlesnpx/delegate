@@ -40,7 +40,7 @@ func validateBackend(hello client.HelloResult, backend, model, effort string) er
 		return fmt.Errorf("unknown backend %q; available backends: %s", backend, strings.Join(available, ", "))
 	}
 	for _, meta := range hello.BackendMetadata {
-		if meta.Backend != backend {
+		if meta.Name != backend {
 			continue
 		}
 		if model != "" && len(meta.Models) > 0 && !containsString(meta.Models, model) {

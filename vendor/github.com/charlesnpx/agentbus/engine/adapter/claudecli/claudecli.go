@@ -135,7 +135,7 @@ func valuesFromGroup(text, pattern string) []string {
 }
 
 func buildArgs(resumeID string, opts engine.SessionOpts, input engine.TurnInput) ([]string, error) {
-	args := []string{"--print", "--output-format", "stream-json"}
+	args := []string{"--print", "--output-format", "stream-json", "--verbose"}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
@@ -146,9 +146,8 @@ func buildArgs(resumeID string, opts engine.SessionOpts, input engine.TurnInput)
 		args = append(args, "--dangerously-skip-permissions")
 	} else {
 		args = append(args,
-			"--bare",
 			"--strict-mcp-config",
-			"--mcp-config", "{}",
+			"--mcp-config", `{"mcpServers":{}}`,
 			"--permission-mode", "dontAsk",
 			"--allowedTools", strings.Join(readOnlyAllowedTools, ","),
 			"--disallowedTools", strings.Join(readOnlyDeniedTools, ","),
