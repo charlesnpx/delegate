@@ -210,11 +210,14 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 }
 
 func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy) (taskRunResult, error) {
-	c, _, err := connectAgentbusCommand(ctx, requiredCapabilitiesForPolicy(turnPolicy))
+	c, hello, err := connectAgentbusCommand(ctx, requiredCapabilitiesForPolicy(turnPolicy))
 	if err != nil {
 		return taskRunResult{}, err
 	}
 	defer c.Close()
+	if err := validateBackend(hello, opts.Backend, opts.Model, opts.Effort); err != nil {
+		return taskRunResult{}, err
+	}
 	spec := client.TaskSpec{
 		Backend:   opts.Backend,
 		CWD:       opts.CWD,

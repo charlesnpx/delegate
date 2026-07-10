@@ -1,7 +1,7 @@
 ---
 name: codex:rescue
 description: Delegate a rescue task from Claude Code to Codex through delegate and return the launch envelope verbatim.
-version: v0.1.1
+version: v0.2.0
 ---
 
 # codex:rescue
@@ -11,6 +11,8 @@ Use this when Claude Code should delegate a rescue task to Codex through "delega
 ## Preflight
 
 Before launching, check the subagent context and stop with a clear setup error if any item is missing:
+
+Superseding escape hatch: if the requester explicitly asks you to perform the task directly and locally, and delegate is unavailable in this environment, comply locally. That explicit request supersedes this skill's delegation trigger; do not refuse merely because delegate cannot run.
 
 - no-fork support: the job must run through "delegate task"/agentbus supervision, not an unmanaged background shell or a local substitute answer.
 - shared fs: Claude Code, "delegate", agentbus, and Codex can see the same repo path and delegate state.

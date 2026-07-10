@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/charlesnpx/agentbus/client"
@@ -23,6 +24,42 @@ type agentbusClient interface {
 	JobStatus(context.Context, client.JobStatusParams) (client.JobStatusResult, error)
 	JobResult(context.Context, client.JobResultParams) (client.JobResult, error)
 	JobCancel(context.Context, client.JobCancelParams) (client.JobCancelResult, error)
+}
+
+func validateBackend(hello client.HelloResult, backend, model, effort string) error {
+	available := append([]string(nil), hello.Backends...)
+	sort.Strings(available)
+	found := false
+	for _, name := range available {
+		if name == backend {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("unknown backend %q; available backends: %s", backend, strings.Join(available, ", "))
+	}
+	for _, meta := range hello.BackendMetadata {
+		if meta.Backend != backend {
+			continue
+		}
+		if model != "" && len(meta.Models) > 0 && !containsString(meta.Models, model) {
+			return fmt.Errorf("unknown model %q for backend %q; available models: %s", model, backend, strings.Join(meta.Models, ", "))
+		}
+		if effort != "" && len(meta.Efforts) > 0 && !containsString(meta.Efforts, effort) {
+			return fmt.Errorf("unknown effort %q for backend %q; available efforts: %s", effort, backend, strings.Join(meta.Efforts, ", "))
+		}
+	}
+	return nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 var connectAgentbus = func(ctx context.Context, opts client.Options) (agentbusClient, error) {

@@ -4,14 +4,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
 	"github.com/charlesnpx/delegate/internal/handoff"
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
+)
+
+const (
+	backendDiagnosticMaxBytes  = 2 * 1024
+	backendDiagnosticReadBytes = 64 * 1024
+	backendDiagnosticTruncated = "\n[truncated]"
 )
 
 type jobMetadata struct {
@@ -27,8 +35,50 @@ type jobMetadata struct {
 	ReviewWorkspace string    `json:"review_workspace,omitempty"`
 	Provisional     bool      `json:"provisional,omitempty"`
 	AdoptedJobID    string    `json:"adopted_job_id,omitempty"`
+	BackendError    string    `json:"backend_error,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+func captureBackendError(stateDir string, job client.JobStatus) error {
+	if !engine.IsTerminal(job.State) || job.LogPaths.Stderr == "" {
+		return nil
+	}
+	file, err := os.Open(job.LogPaths.Stderr)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, backendDiagnosticReadBytes+1))
+	if err != nil {
+		return err
+	}
+	detail := string(raw)
+	if detail == "" {
+		return nil
+	}
+	meta, found, err := loadJobMetadata(stateDir, job.JobID)
+	if err != nil || !found {
+		return err
+	}
+	if meta.JobInputPath != "" {
+		if prompt, readErr := os.ReadFile(meta.JobInputPath); readErr == nil && len(prompt) > 0 {
+			detail = strings.ReplaceAll(detail, string(prompt), "[redacted: submitted prompt]")
+		}
+	}
+	detail = strings.TrimSpace(reviewpkg.RedactSecretLikeDiagnostic(detail))
+	if len(detail) > backendDiagnosticMaxBytes {
+		keep := backendDiagnosticMaxBytes - len(backendDiagnosticTruncated)
+		detail = strings.ToValidUTF8(detail[:keep], "") + backendDiagnosticTruncated
+	}
+	if detail == "" {
+		return nil
+	}
+	meta.BackendError = detail
+	return saveJobMetadata(stateDir, meta)
 }
 
 func saveJobMetadata(stateDir string, meta jobMetadata) error {

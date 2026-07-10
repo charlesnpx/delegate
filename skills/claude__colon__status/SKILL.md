@@ -1,7 +1,7 @@
 ---
 name: claude:status
 description: Check a delegated job status through delegate.
-version: v0.1.1
+version: v0.2.0
 ---
 
 # claude:status

@@ -16,7 +16,7 @@ import (
 
 const (
 	// Version is the content version for the generated skill prose.
-	Version = "v0.1.1"
+	Version = "v0.2.0"
 
 	TargetClaude = "claude"
 	TargetCodex  = "codex"
@@ -419,6 +419,8 @@ Use this when {{.HostAgent}} should delegate a rescue task to {{.OtherAgent}} th
 
 Before launching, check the subagent context and stop with a clear setup error if any item is missing:
 
+Superseding escape hatch: if the requester explicitly asks you to perform the task directly and locally, and delegate is unavailable in this environment, comply locally. That explicit request supersedes this skill's delegation trigger; do not refuse merely because delegate cannot run.
+
 - no-fork support: the job must run through "delegate task"/agentbus supervision, not an unmanaged background shell or a local substitute answer.
 - shared fs: {{.HostAgent}}, "delegate", agentbus, and {{.OtherAgent}} can see the same repo path and delegate state.
 - exec: "delegate", "agentbus", and the {{.Backend}} backend executable are runnable.
@@ -469,6 +471,8 @@ Use this when {{.HostAgent}} should delegate a read-only {{if eq .Action "advers
 ## Preflight
 
 Before launching, check the subagent context and stop with a clear setup error if any item is missing:
+
+Superseding escape hatch: if the requester explicitly asks for a direct local review and delegate is unavailable in this environment, perform the review locally. That explicit request supersedes this skill's delegation trigger; do not refuse merely because delegate cannot run.
 
 - no-fork support: the job must run through "delegate {{.Action}}"/agentbus supervision, not an unmanaged background shell or a local substitute review.
 - shared fs: {{.HostAgent}}, "delegate", agentbus, and {{.OtherAgent}} can see the delegate state path. Using the private workspace as backend cwd is not OS isolation; a same-user backend can still read repository or other filesystem files when process permissions allow it.

@@ -36,7 +36,7 @@ var newJobID = randomJobID
 func runEmbeddedTask(ctx context.Context, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy) (taskRunResult, error) {
 	backend, ok := embeddedBackend(opts.Backend)
 	if !ok {
-		return taskRunResult{}, fmt.Errorf("embedded backend %q unavailable; use daemon mode", opts.Backend)
+		return taskRunResult{}, fmt.Errorf("backend %q has no local embedded adapter; use daemon mode (embedded adapters: claude, codex)", opts.Backend)
 	}
 	store, err := engine.NewStore(engine.StoreConfig{CWD: opts.CWD})
 	if err != nil {
