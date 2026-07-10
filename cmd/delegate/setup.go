@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/charlesnpx/agentbus/client"
+	skillpkg "github.com/charlesnpx/delegate/internal/skills"
 )
 
 const stopReviewGateLine = "stop-review-gate: not available (planned v0.2)"
@@ -16,15 +21,30 @@ type setupJSON struct {
 	Schema         int           `json:"schema"`
 	Delegate       string        `json:"delegate"`
 	Agentbus       setupAgentbus `json:"agentbus"`
+	Skills         []setupSkill  `json:"skills"`
 	StopReviewGate string        `json:"stop_review_gate"`
 }
 
 type setupAgentbus struct {
+	Found           bool            `json:"found"`
 	Path            string          `json:"path"`
 	Version         string          `json:"version,omitempty"`
 	ProtocolVersion int             `json:"protocolVersion"`
 	Backends        []string        `json:"backends"`
 	Capabilities    map[string]bool `json:"capabilities"`
+	Required        []string        `json:"requiredCapabilities"`
+	CapabilitiesOK  bool            `json:"capabilitiesOK"`
+}
+
+// setupSkill reports whether one managed skill is present and matches the
+// release's generated source. Status is installed, missing, outdated, or
+// unreadable. Setup reports each skill rather than assuming a whole target was
+// installed together.
+type setupSkill struct {
+	Target string `json:"target"`
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Status string `json:"status"`
 }
 
 func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
@@ -49,17 +69,25 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, err
 	}
 	defer c.Close()
+	skills, err := installedSkills()
+	if err != nil {
+		return 0, err
+	}
 	if *jsonOut {
 		return 0, writeJSONLine(stdout, setupJSON{
 			Schema:   envelopeSchema,
 			Delegate: versionLine(),
 			Agentbus: setupAgentbus{
+				Found:           true,
 				Path:            path,
 				Version:         version,
 				ProtocolVersion: hello.ProtocolVersion,
 				Backends:        hello.Backends,
 				Capabilities:    hello.Capabilities,
+				Required:        setupRequiredCapabilities(),
+				CapabilitiesOK:  true,
 			},
+			Skills:         skills,
 			StopReviewGate: "not available (planned v0.2)",
 		})
 	}
@@ -71,8 +99,60 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 			return 0, err
 		}
 	}
-	if _, err := fmt.Fprintf(stdout, "agentbus protocol: %d\ncapabilities: ok\n%s\n", hello.ProtocolVersion, stopReviewGateLine); err != nil {
+	if _, err := fmt.Fprintf(stdout, "agentbus discovery: found\nagentbus protocol: %d\ncapabilities: ok\n", hello.ProtocolVersion); err != nil {
+		return 0, err
+	}
+	for _, skill := range skills {
+		if _, err := fmt.Fprintf(stdout, "skill %s (%s): %s\n", skill.Name, skill.Target, skill.Status); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := fmt.Fprintf(stdout, "%s\n", stopReviewGateLine); err != nil {
 		return 0, err
 	}
 	return 0, nil
+}
+
+func installedSkills() ([]setupSkill, error) {
+	var statuses []setupSkill
+	for _, target := range []string{skillpkg.TargetClaude, skillpkg.TargetCodex} {
+		root, err := skillpkg.TargetRoot(target, "", nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		generated, err := skillpkg.Generate(target)
+		if err != nil {
+			return nil, err
+		}
+		for _, skill := range generated {
+			path := filepath.Join(root, skillpkg.DecodeName(skill.EscapedName), "SKILL.md")
+			statuses = append(statuses, setupSkill{
+				Target: target,
+				Name:   skill.Name,
+				Path:   path,
+				Status: skillInstallStatus(path, []byte(skill.Content)),
+			})
+		}
+	}
+	sort.Slice(statuses, func(i, j int) bool {
+		if statuses[i].Target == statuses[j].Target {
+			return statuses[i].Name < statuses[j].Name
+		}
+		return statuses[i].Target < statuses[j].Target
+	})
+	return statuses, nil
+}
+
+func skillInstallStatus(path string, expected []byte) string {
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "missing"
+	}
+	if err != nil {
+		return "unreadable"
+	}
+	if bytes.Equal(raw, expected) {
+		return "installed"
+	}
+	return "outdated"
 }

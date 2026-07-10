@@ -106,6 +106,44 @@ func TestSetupOutputIncludesStopReviewGateLine(t *testing.T) {
 	}
 }
 
+func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, "codex-home"))
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	var result setupJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw = %q", err, stdout.String())
+	}
+	if !result.Agentbus.Found || result.Agentbus.Path != "/tmp/agentbus" {
+		t.Fatalf("agentbus discovery = %#v, want found /tmp/agentbus", result.Agentbus)
+	}
+	if !result.Agentbus.CapabilitiesOK || !result.Agentbus.Capabilities["policy.shape"] || !result.Agentbus.Capabilities["policy.retry"] {
+		t.Fatalf("agentbus capabilities = %#v, want required capabilities passing", result.Agentbus)
+	}
+	if result.StopReviewGate != "not available (planned v0.2)" {
+		t.Fatalf("stop_review_gate = %q", result.StopReviewGate)
+	}
+	if len(result.Skills) != 10 {
+		t.Fatalf("skill statuses = %d, want 10: %#v", len(result.Skills), result.Skills)
+	}
+	for _, skill := range result.Skills {
+		if skill.Target == "" || skill.Name == "" || skill.Path == "" {
+			t.Fatalf("incomplete skill status: %#v", skill)
+		}
+		if skill.Status != "missing" {
+			t.Fatalf("skill status = %#v, want missing in fresh HOME", skill)
+		}
+	}
+}
+
 func TestTaskPolicyTierWiring(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -310,6 +348,10 @@ func TestTaskMetadataPersistFailureStillLaunchesWithWarning(t *testing.T) {
 }
 
 func stubAgentbusGlobals(t *testing.T, fake *fakeAgentbusClient) func() {
+	return stubAgentbusClientGlobals(t, fake)
+}
+
+func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 	t.Helper()
 	oldConnect := connectAgentbus
 	oldLookPath := lookPath
