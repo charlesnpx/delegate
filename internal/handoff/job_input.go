@@ -39,11 +39,8 @@ func PersistJobInput(opts JobInputOptions) (JobInput, error) {
 	if opts.JobID == "" {
 		return JobInput{}, errors.New("job id is required")
 	}
-	stateDir, err := ResolveStateDir(StateConfig{StateDir: opts.StateDir})
+	stateDir, err := prepareStateDir(opts.StateDir)
 	if err != nil {
-		return JobInput{}, err
-	}
-	if err := EnsureStateDir(stateDir); err != nil {
 		return JobInput{}, err
 	}
 	pattern := jobInputPrefix + encodeJobID(opts.JobID) + ".*" + jobInputSuffix
@@ -122,12 +119,10 @@ func SweepTerminalJobInputs(stateDir string, lookup JobStateLookup, hooks Hooks)
 	if lookup == nil {
 		return nil, errors.New("job state lookup is required")
 	}
-	if stateDir == "" {
-		var err error
-		stateDir, err = ResolveStateDir(StateConfig{})
-		if err != nil {
-			return nil, err
-		}
+	var err error
+	stateDir, err = prepareStateDir(stateDir)
+	if err != nil {
+		return nil, err
 	}
 	entries, err := os.ReadDir(stateDir)
 	if errors.Is(err, fs.ErrNotExist) {

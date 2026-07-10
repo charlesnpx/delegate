@@ -106,6 +106,17 @@ func EnsureStateDir(dir string) error {
 	return nil
 }
 
+func prepareStateDir(dir string) (string, error) {
+	stateDir, err := ResolveStateDir(StateConfig{StateDir: dir})
+	if err != nil {
+		return "", err
+	}
+	if err := EnsureStateDir(stateDir); err != nil {
+		return "", err
+	}
+	return stateDir, nil
+}
+
 func resolveConfiguredStateDir(label, path string) (string, error) {
 	if err := validateConfiguredPath(label, path); err != nil {
 		return "", err
@@ -188,11 +199,8 @@ func Create(opts CreateOptions) (CreateResult, error) {
 	if reader == nil {
 		reader = os.Stdin
 	}
-	stateDir, err := ResolveStateDir(StateConfig{StateDir: opts.StateDir})
+	stateDir, err := prepareStateDir(opts.StateDir)
 	if err != nil {
-		return CreateResult{}, err
-	}
-	if err := EnsureStateDir(stateDir); err != nil {
 		return CreateResult{}, err
 	}
 	file, err := os.CreateTemp(stateDir, "handoff-*.prompt")

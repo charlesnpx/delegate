@@ -174,6 +174,21 @@ func TestResolvePromptRejectsInvalidHandoffPromptFile(t *testing.T) {
 	}
 }
 
+func TestResolvePromptRejectsUnsafeStateDir(t *testing.T) {
+	stateDir := canonicalTempDir(t)
+	handoffFile := writeTestHandoffFile(t, stateDir, "handoff-unsafe-state.prompt", 0o600, "unsafe")
+	if err := os.Chmod(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ResolvePrompt(PromptSources{HandoffPromptFile: handoffFile, StateDir: stateDir})
+	if err == nil {
+		t.Fatal("ResolvePrompt() error = nil, want state dir mode rejection")
+	}
+	assertExists(t, handoffFile)
+	assertMode(t, stateDir, 0o755)
+}
+
 func TestResolveStateDirHardeningRejectsConfiguredPaths(t *testing.T) {
 	root := canonicalTempDir(t)
 	traversing := root + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "delegate"
@@ -475,6 +490,59 @@ func TestSweepTerminalJobInputs(t *testing.T) {
 	assertExists(t, unknown.Path)
 }
 
+func TestSweepTerminalJobInputsRejectsUnsafeStateDirs(t *testing.T) {
+	terminalLookup := func(jobID string) (engine.JobState, bool, error) {
+		return engine.StateCompleted, true, nil
+	}
+
+	t.Run("relative path", func(t *testing.T) {
+		root := canonicalTempDir(t)
+		stateDir := filepath.Join(root, "state", "delegate")
+		if err := os.MkdirAll(stateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		inputPath := writeTestJobInputFile(t, stateDir, "relative-job")
+		t.Chdir(root)
+
+		removed, err := SweepTerminalJobInputs(filepath.Join("state", "delegate"), terminalLookup, Hooks{})
+
+		assertSweepRejectedWithoutRemoval(t, removed, err, inputPath)
+	})
+
+	t.Run("symlinked dir", func(t *testing.T) {
+		root := canonicalTempDir(t)
+		realDir := filepath.Join(root, "real")
+		if err := os.Mkdir(realDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		inputPath := writeTestJobInputFile(t, realDir, "symlink-job")
+		linkDir := filepath.Join(root, "delegate")
+		if err := os.Symlink(realDir, linkDir); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+
+		removed, err := SweepTerminalJobInputs(linkDir, terminalLookup, Hooks{})
+
+		assertSweepRejectedWithoutRemoval(t, removed, err, inputPath)
+	})
+
+	t.Run("non-0700 dir", func(t *testing.T) {
+		stateDir := filepath.Join(canonicalTempDir(t), "delegate")
+		if err := os.Mkdir(stateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		inputPath := writeTestJobInputFile(t, stateDir, "wrong-mode-job")
+		if err := os.Chmod(stateDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		removed, err := SweepTerminalJobInputs(stateDir, terminalLookup, Hooks{})
+
+		assertSweepRejectedWithoutRemoval(t, removed, err, inputPath)
+		assertMode(t, stateDir, 0o755)
+	})
+}
+
 func TestMarshalCreateResult(t *testing.T) {
 	raw, err := MarshalCreateResult(CreateResult{HandoffPath: "/tmp/handoff"})
 	if err != nil {
@@ -507,6 +575,18 @@ func persistTestJobInputInDir(t *testing.T, stateDir, jobID string) JobInput {
 	return input
 }
 
+func writeTestJobInputFile(t *testing.T, stateDir, jobID string) string {
+	t.Helper()
+	path := filepath.Join(stateDir, jobInputPrefix+encodeJobID(jobID)+".test"+jobInputSuffix)
+	if err := os.WriteFile(path, []byte("prompt for "+jobID), fileMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, fileMode); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func writeTestHandoffFile(t *testing.T, dir, name string, mode os.FileMode, content string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
@@ -523,6 +603,9 @@ func canonicalTempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, dirMode); err != nil {
 		t.Fatal(err)
 	}
 	return dir
@@ -542,6 +625,17 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 	if got := info.Mode().Perm(); got != want {
 		t.Fatalf("%s mode = %o, want %o", path, got, want)
 	}
+}
+
+func assertSweepRejectedWithoutRemoval(t *testing.T, removed []JobInput, err error, path string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("SweepTerminalJobInputs() error = nil, want rejection")
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed = %#v, want none", removed)
+	}
+	assertExists(t, path)
 }
 
 func assertMissing(t *testing.T, path string) {

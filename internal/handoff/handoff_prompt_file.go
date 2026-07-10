@@ -56,7 +56,7 @@ func validateHandoffPromptFile(path, stateDir string) (string, error) {
 		return "", fmt.Errorf("handoff prompt file %q must match %s*%s", path, handoffPromptPrefix, handoffPromptSuffix)
 	}
 
-	resolvedStateDir, err := ResolveStateDir(StateConfig{StateDir: stateDir})
+	resolvedStateDir, err := prepareStateDir(stateDir)
 	if err != nil {
 		return "", err
 	}
