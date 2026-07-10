@@ -927,6 +927,7 @@ type fakeAgentbusClient struct {
 	statuses     []client.JobStatusParams
 	status       client.JobStatusResult
 	result       client.JobResult
+	resultErr    error
 	cancel       client.JobCancelResult
 	cancelErr    error
 }
@@ -1003,6 +1004,9 @@ func (f *fakeAgentbusClient) JobStatus(_ context.Context, params client.JobStatu
 }
 
 func (f *fakeAgentbusClient) JobResult(context.Context, client.JobResultParams) (client.JobResult, error) {
+	if f.resultErr != nil {
+		return client.JobResult{}, f.resultErr
+	}
 	if f.result.JobID == "" {
 		return client.JobResult{}, errors.New("result not ready")
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -35,6 +36,53 @@ var secretContentPatterns = []secretPattern{
 }
 
 var allHexValue = regexp.MustCompile(`^[A-Fa-f0-9]+$`)
+
+// RedactSecretLikeDiagnostic applies the review secret patterns to arbitrary
+// diagnostic text while preserving non-secret context around each match.
+func RedactSecretLikeDiagnostic(content string) string {
+	type interval struct{ start, end int }
+	var matches []interval
+	for _, pattern := range secretContentPatterns {
+		for _, indexes := range pattern.expression.FindAllStringSubmatchIndex(content, -1) {
+			candidate := content[indexes[0]:indexes[1]]
+			if pattern.valueSubmatch > 0 {
+				i := pattern.valueSubmatch * 2
+				if i+1 >= len(indexes) || indexes[i] < 0 {
+					continue
+				}
+				candidate = strings.TrimSpace(content[indexes[i]:indexes[i+1]])
+			}
+			if pattern.minEntropy > 0 && shannonEntropy(candidate) < pattern.minEntropy {
+				continue
+			}
+			if pattern.validate != nil && !pattern.validate(candidate) {
+				continue
+			}
+			matches = append(matches, interval{indexes[0], indexes[1]})
+		}
+	}
+	if len(matches) == 0 {
+		return content
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].start == matches[j].start {
+			return matches[i].end > matches[j].end
+		}
+		return matches[i].start < matches[j].start
+	})
+	var out strings.Builder
+	last := 0
+	for _, match := range matches {
+		if match.start < last {
+			continue
+		}
+		out.WriteString(content[last:match.start])
+		out.WriteString(secretRedactionMarker)
+		last = match.end
+	}
+	out.WriteString(content[last:])
+	return out.String()
+}
 
 // redactSecretLikeContent redacts matching diff hunks after every changed file
 // has been assembled. Path/status entries are rendered separately and remain

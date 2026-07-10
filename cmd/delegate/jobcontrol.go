@@ -61,7 +61,7 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		if job, ok := findJobStatus(status, *jobID); ok && engine.IsTerminal(job.State) && !*probe {
 			result, resultErr := c.JobResult(ctx, client.JobResultParams{JobID: *jobID})
 			if resultErr != nil {
-				result = client.JobResult{JobID: job.JobID, SessionID: job.SessionID, State: job.State}
+				result = terminalJobResultFromStatus(job)
 			}
 			env, envelopeErr := terminalEnvelopeFromJobResult("", result)
 			if envelopeErr != nil {
@@ -158,6 +158,9 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 		result, err = waitForJobResult(ctx, c, "", *jobID)
 	} else {
 		result, err = c.JobResult(ctx, client.JobResultParams{JobID: *jobID})
+		if err != nil {
+			result, err = terminalJobResultFallback(ctx, c, "", *jobID, err)
+		}
 	}
 	if err != nil {
 		return 0, err
@@ -244,10 +247,7 @@ func waitForJobResult(ctx context.Context, c agentbusClient, stateDir, jobID str
 			cleanupStatuses(stateDir, status)
 			for _, job := range status.Jobs {
 				if job.JobID == jobID && engine.IsTerminal(job.State) {
-					result, err := c.JobResult(ctx, client.JobResultParams{JobID: jobID})
-					if err != nil {
-						return client.JobResult{}, err
-					}
+					result := terminalJobResultFromStatus(job)
 					if err := cleanupJobInput(stateDir, result.JobID, result.SessionID, result.State); err != nil {
 						return client.JobResult{}, err
 					}
@@ -261,6 +261,23 @@ func waitForJobResult(ctx context.Context, c agentbusClient, stateDir, jobID str
 		case <-ticker.C:
 		}
 	}
+}
+
+func terminalJobResultFallback(ctx context.Context, c agentbusClient, stateDir, jobID string, resultErr error) (client.JobResult, error) {
+	status, statusErr := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
+	if statusErr != nil {
+		return client.JobResult{}, resultErr
+	}
+	cleanupStatuses(stateDir, status)
+	job, found := findJobStatus(status, jobID)
+	if !found || !engine.IsTerminal(job.State) {
+		return client.JobResult{}, resultErr
+	}
+	return terminalJobResultFromStatus(job), nil
+}
+
+func terminalJobResultFromStatus(job client.JobStatus) client.JobResult {
+	return client.JobResult{JobID: job.JobID, SessionID: job.SessionID, State: job.State}
 }
 
 func waitForJobStatus(ctx context.Context, c agentbusClient, stateDir, jobID string) (client.JobStatusResult, error) {
