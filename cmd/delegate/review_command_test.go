@@ -148,6 +148,89 @@ func TestReviewBackgroundArtifactPersistsUntilTerminalResultCleanup(t *testing.T
 	}
 }
 
+func TestReviewMetadataFailureBeforeLaunchAbortsAndCleansWorkspace(t *testing.T) {
+	repo := newCommandGitFixture(t)
+	writeCommandFixture(t, repo, "visible.txt", "change\n")
+	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	oldSave := saveDelegateJobMetadata
+	saveDelegateJobMetadata = func(string, jobMetadata) error {
+		return errors.New("metadata unavailable before launch")
+	}
+	defer func() { saveDelegateJobMetadata = oldSave }()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--background", "--json"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("review code=0, want metadata failure; stdout=%q", stdout.String())
+	}
+	if len(fake.submits) != 0 {
+		t.Fatalf("JobSubmit calls=%d, want 0", len(fake.submits))
+	}
+	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate")
+	workspaces, err := filepath.Glob(filepath.Join(stateDir, "review-*"))
+	if err != nil || len(workspaces) != 0 {
+		t.Fatalf("review workspaces after aborted launch=%#v, %v", workspaces, err)
+	}
+	if !strings.Contains(stderr.String(), "persist metadata before launch") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestReviewMetadataFailureAfterLaunchUsesDurableFallbackAndPreservesKind(t *testing.T) {
+	repo := newCommandGitFixture(t)
+	writeCommandFixture(t, repo, "visible.txt", "change\n")
+	report := compliantReport()
+	fake := &fakeAgentbusClient{
+		hello: helloWithCapabilities(),
+		result: client.JobResult{
+			JobID:     "job_review_metadata_fallback",
+			SessionID: "session_review_metadata_fallback",
+			State:     engine.StateCompleted,
+			Result:    &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
+			Contract:  ptr(compliantContractStamp(t, report)),
+		},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	oldSave := saveDelegateJobMetadata
+	saveCalls := 0
+	saveDelegateJobMetadata = func(string, jobMetadata) error {
+		saveCalls++
+		if saveCalls == 2 {
+			return errors.New("primary metadata write failed after launch")
+		}
+		return nil
+	}
+	defer func() { saveDelegateJobMetadata = oldSave }()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--wait", "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("review code=%d stderr=%q", code, stderr.String())
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("JobSubmit calls=%d, want 1", len(fake.submits))
+	}
+	workspace := fake.submits[0].TaskSpec.CWD
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Kind != reviewKind {
+		t.Fatalf("terminal envelope kind=%q, want %q", env.Kind, reviewKind)
+	}
+	if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fallback metadata did not reap review workspace: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "durable state-directory fallback") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
 func TestReviewAllowLiveRepoReadIsExplicitAndWarned(t *testing.T) {
 	repo := newCommandGitFixture(t)
 	writeCommandFixture(t, repo, "visible.txt", "change\n")
@@ -172,7 +255,7 @@ func TestReviewAllowLiveRepoReadIsExplicitAndWarned(t *testing.T) {
 	if spec.CWD != canonicalRepo || spec.Write {
 		t.Fatalf("live review spec cwd=%q write=%v", spec.CWD, spec.Write)
 	}
-	if !strings.Contains(spec.Prompt, "UNSAFE LIVE-REPOSITORY MODE") || !strings.Contains(stderr.String(), liveRepoReadWarning) {
+	if !strings.Contains(spec.Prompt, "LIVE-REPOSITORY MODE") || !strings.Contains(stderr.String(), liveRepoReadWarning) {
 		t.Fatalf("prompt=%q stderr=%q", spec.Prompt, stderr.String())
 	}
 }
@@ -185,6 +268,21 @@ func TestReviewRejectsWriteAndWorkingTreeBaseFlags(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		if code := run(args, nil, &stdout, &stderr); code == 0 {
 			t.Fatalf("run(%v) code=0", args)
+		}
+	}
+}
+
+func TestReviewHelpStatesContextBoundaryAndFilesystemLimits(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	_ = run([]string{"review", "--help"}, nil, &stdout, &stderr)
+	for _, want := range []string{
+		"never includes content from paths matched by its secret heuristic",
+		"does not prevent a same-user backend from reading",
+		"--allow-live-repo-read makes those reads easier",
+		"v0.2 roadmap item",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("review help missing %q: %q", want, stderr.String())
 		}
 	}
 }

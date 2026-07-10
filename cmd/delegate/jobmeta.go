@@ -78,6 +78,29 @@ func loadJobMetadata(stateDir, jobID string) (jobMetadata, bool, error) {
 	return meta, true, nil
 }
 
+func deleteJobMetadata(stateDir, jobID string) error {
+	if err := validateDelegateJobID(jobID); err != nil {
+		return err
+	}
+	dir, err := jobMetadataDir(stateDir)
+	if err != nil {
+		return err
+	}
+	err = os.Remove(filepath.Join(dir, jobID+".json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirFile.Close()
+	return dirFile.Sync()
+}
+
 func cleanupJobInput(stateDir, jobID, sessionID string, state engine.JobState) error {
 	meta, found, err := loadJobMetadata(stateDir, jobID)
 	if err != nil || !found {

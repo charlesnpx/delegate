@@ -230,23 +230,31 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 	if err != nil {
 		return taskRunResult{}, err
 	}
+	contractKind := contractKindForPolicy(turnPolicy, opts.NoContract)
+	if _, err := persistDelegateJobMetadata(opts, input, input.JobID, contractKind); err != nil {
+		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
+		return taskRunResult{}, fmt.Errorf("persist metadata before launch: %w", err)
+	}
+	pendingJobID := input.JobID
 	submitted, err := c.JobSubmit(ctx, client.JobSubmitParams{TaskSpec: spec})
 	if err != nil {
 		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
+		_ = deleteJobMetadata(opts.StateDir, pendingJobID)
 		return taskRunResult{}, err
 	}
 	var warnings []string
 	input, warnings = reassociateSubmittedJobInput(input, submitted.JobID, warnings)
-	metadataSaved := true
-	if _, err := persistDelegateJobMetadata(opts, input, submitted.JobID, contractKindForPolicy(turnPolicy, opts.NoContract)); err != nil {
-		metadataSaved = false
-		warnings = append(warnings, metadataPersistWarning(submitted.JobID, err))
+	if warning, err := persistLaunchedJobMetadata(opts, input, submitted.JobID, contractKind); err != nil {
+		return taskRunResult{}, err
+	} else if warning != "" {
+		warnings = append(warnings, warning)
 	}
-	if metadataSaved {
-		err = cleanupJobInput(opts.StateDir, submitted.JobID, "", submitted.State)
-	} else {
-		err = cleanupUntrackedJobInput(input, "", submitted.State)
+	if pendingJobID != submitted.JobID {
+		if err := deleteJobMetadata(opts.StateDir, pendingJobID); err != nil {
+			warnings = append(warnings, fmt.Sprintf("pending metadata for %s could not be removed: %v", pendingJobID, err))
+		}
 	}
+	err = cleanupJobInput(opts.StateDir, submitted.JobID, "", submitted.State)
 	if err != nil {
 		return taskRunResult{}, err
 	}
@@ -258,11 +266,6 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 		env, err := terminalEnvelopeFromJobResult(opts.StateDir, jobResult)
 		if err != nil {
 			return taskRunResult{}, err
-		}
-		if !metadataSaved {
-			if err := cleanupUntrackedJobInput(input, jobResult.SessionID, jobResult.State); err != nil {
-				return taskRunResult{}, err
-			}
 		}
 		return taskRunResult{Terminal: &env, Warnings: warnings}, nil
 	}
@@ -289,6 +292,12 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 	if err != nil {
 		return taskRunResult{}, err
 	}
+	contractKind := contractKindForPolicy(turnPolicy, opts.NoContract)
+	if _, err := persistDelegateJobMetadata(opts, input, input.JobID, contractKind); err != nil {
+		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
+		return taskRunResult{}, fmt.Errorf("persist metadata before launch: %w", err)
+	}
+	pendingJobID := input.JobID
 	write := opts.Write
 	started, notifications, err := c.TurnStart(ctx, client.TurnStartParams{
 		SessionID: session.SessionID,
@@ -299,20 +308,22 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 	})
 	if err != nil {
 		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
+		_ = deleteJobMetadata(opts.StateDir, pendingJobID)
 		return taskRunResult{}, err
 	}
 	var warnings []string
 	input, warnings = reassociateSubmittedJobInput(input, started.JobID, warnings)
-	metadataSaved := true
-	if _, err := persistDelegateJobMetadata(opts, input, started.JobID, contractKindForPolicy(turnPolicy, opts.NoContract)); err != nil {
-		metadataSaved = false
-		warnings = append(warnings, metadataPersistWarning(started.JobID, err))
+	if warning, err := persistLaunchedJobMetadata(opts, input, started.JobID, contractKind); err != nil {
+		return taskRunResult{}, err
+	} else if warning != "" {
+		warnings = append(warnings, warning)
 	}
-	if metadataSaved {
-		err = cleanupJobInput(opts.StateDir, started.JobID, started.SessionID, engine.StateRunning)
-	} else {
-		err = cleanupUntrackedJobInput(input, started.SessionID, engine.StateRunning)
+	if pendingJobID != started.JobID {
+		if err := deleteJobMetadata(opts.StateDir, pendingJobID); err != nil {
+			warnings = append(warnings, fmt.Sprintf("pending metadata for %s could not be removed: %v", pendingJobID, err))
+		}
 	}
+	err = cleanupJobInput(opts.StateDir, started.JobID, started.SessionID, engine.StateRunning)
 	if err != nil {
 		return taskRunResult{}, err
 	}
@@ -397,7 +408,15 @@ func persistDelegateJobInput(opts taskOptions, resolved handoff.ResolvedPrompt, 
 }
 
 func persistDelegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) (jobMetadata, error) {
-	meta := jobMetadata{
+	meta := delegateJobMetadata(opts, input, jobID, contractKind)
+	if err := saveDelegateJobMetadata(opts.StateDir, meta); err != nil {
+		return jobMetadata{}, err
+	}
+	return meta, nil
+}
+
+func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) jobMetadata {
+	return jobMetadata{
 		Schema:          envelopeSchema,
 		JobID:           jobID,
 		Kind:            effectiveTaskKind(opts),
@@ -408,14 +427,17 @@ func persistDelegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID,
 		JobInputPath:    input.Path,
 		ReviewWorkspace: opts.ReviewWorkspace,
 	}
-	if err := saveDelegateJobMetadata(opts.StateDir, meta); err != nil {
-		return jobMetadata{}, err
-	}
-	return meta, nil
 }
 
-func metadataPersistWarning(jobID string, err error) string {
-	return fmt.Sprintf("delegate job metadata for %s was not persisted: %v", jobID, err)
+func persistLaunchedJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) (string, error) {
+	meta := delegateJobMetadata(opts, input, jobID, contractKind)
+	if err := saveDelegateJobMetadata(opts.StateDir, meta); err != nil {
+		if fallbackErr := saveJobMetadata(opts.StateDir, meta); fallbackErr != nil {
+			return "", fmt.Errorf("persist launched job metadata for %s: primary: %v; state-dir fallback: %w", jobID, err, fallbackErr)
+		}
+		return fmt.Sprintf("delegate job metadata for %s required the durable state-directory fallback after the primary write failed: %v", jobID, err), nil
+	}
+	return "", nil
 }
 
 func reassociateSubmittedJobInput(input handoff.JobInput, jobID string, warnings []string) (handoff.JobInput, []string) {
@@ -427,18 +449,6 @@ func reassociateSubmittedJobInput(input handoff.JobInput, jobID string, warnings
 		warnings = append(warnings, fmt.Sprintf("job input for %s could not be re-associated: %v", jobID, err))
 	}
 	return input, warnings
-}
-
-func cleanupUntrackedJobInput(input handoff.JobInput, sessionID string, state engine.JobState) error {
-	var err error
-	if sessionID != "" {
-		_, err = handoff.DeleteJobInputOnSessionRecorded(input, handoff.Hooks{})
-		return err
-	}
-	if engine.IsTerminal(state) {
-		_, err = handoff.DeleteJobInputOnTerminalState(input, state, handoff.Hooks{})
-	}
-	return err
 }
 
 func taskTags(opts taskOptions) map[string]string {

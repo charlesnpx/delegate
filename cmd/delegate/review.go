@@ -13,7 +13,7 @@ import (
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
 )
 
-const liveRepoReadWarning = "--allow-live-repo-read exposes the live repository to the backend and is not secret-safe"
+const liveRepoReadWarning = "--allow-live-repo-read makes backend filesystem reads easier by using the live repository as cwd; delegate only excludes secret content from the context it assembles"
 
 type reviewOptions struct {
 	Backend           string
@@ -98,6 +98,14 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	var opts reviewOptions
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		_, _ = fmt.Fprintf(fs.Output(), "Usage of %s:\n", command)
+		_, _ = fmt.Fprintln(fs.Output(), "  Delegate never includes content from paths matched by its secret heuristic in the review context it assembles.")
+		_, _ = fmt.Fprintln(fs.Output(), "  This does not prevent a same-user backend from reading repository or other filesystem files itself.")
+		_, _ = fmt.Fprintln(fs.Output(), "  --allow-live-repo-read makes those reads easier by using the repository as cwd.")
+		_, _ = fmt.Fprintln(fs.Output(), "  OS-level isolation requires a container/sandbox profile and is a named v0.2 roadmap item.")
+		fs.PrintDefaults()
+	}
 	var background bool
 	fs.StringVar(&opts.Backend, "backend", "", "backend name: claude or codex")
 	fs.BoolVar(&background, "background", false, "return after launch")
@@ -111,8 +119,8 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	fs.StringVar(&opts.Origin, "origin", "", "originating skill")
 	fs.BoolVar(&opts.Embedded, "embedded", false, "run through the embedded engine path")
 	fs.StringVar(&opts.Base, "base", "", "comparison base ref")
-	fs.StringVar(&opts.Scope, "scope", reviewpkg.ScopeAuto, "review scope: auto, working-tree, or branch")
-	fs.BoolVar(&opts.AllowLiveRepoRead, "allow-live-repo-read", false, "allow backend access to the live repository (not secret-safe)")
+	fs.StringVar(&opts.Scope, "scope", reviewpkg.ScopeAuto, "review scope: auto combines branch and working-tree changes; or working-tree, branch")
+	fs.BoolVar(&opts.AllowLiveRepoRead, "allow-live-repo-read", false, "use live repository as backend cwd (makes backend file reads easier; does not prevent backend file reads)")
 	if err := fs.Parse(args); err != nil {
 		return reviewOptions{}, err
 	}

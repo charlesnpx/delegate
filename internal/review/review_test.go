@@ -24,17 +24,20 @@ func TestResolveBaseFallbackChain(t *testing.T) {
 
 	t.Run("upstream", func(t *testing.T) {
 		repo := newGitFixture(t)
-		head := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+		upstreamHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
 		gitFixture(t, repo, "remote", "add", "origin", repo)
-		gitFixture(t, repo, "update-ref", "refs/remotes/origin/main", head)
+		gitFixture(t, repo, "update-ref", "refs/remotes/origin/main", upstreamHead)
 		gitFixture(t, repo, "config", "branch.main.remote", "origin")
 		gitFixture(t, repo, "config", "branch.main.merge", "refs/heads/main")
+		writeFixtureFile(t, repo, "unpushed.txt", "local commit\n")
+		gitFixture(t, repo, "add", "unpushed.txt")
+		gitFixture(t, repo, "commit", "-m", "unpushed change")
 		got, err := ResolveBase(context.Background(), repo, "")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Source != "upstream" || got.Ref != "origin/main" || got.Commit != head {
-			t.Fatalf("ResolveBase() = %#v, want upstream origin/main at %s", got, head)
+		if got.Source != "upstream-unpushed" || got.Ref != "origin/main" || got.Commit != upstreamHead {
+			t.Fatalf("ResolveBase() = %#v, want unpushed upstream origin/main at %s", got, upstreamHead)
 		}
 	})
 
@@ -73,12 +76,61 @@ func TestResolveBaseFallbackChain(t *testing.T) {
 		if err == nil {
 			t.Fatal("ResolveBase() error = nil")
 		}
-		for _, fragment := range []string{"--base <ref>", "upstream tracking branch", "default remote branch"} {
+		for _, fragment := range []string{"--base <ref>", "upstream behind HEAD", "default remote branch"} {
 			if !strings.Contains(err.Error(), fragment) {
 				t.Fatalf("ResolveBase() error = %q, want %q", err, fragment)
 			}
 		}
 	})
+}
+
+func TestResolveBasePushedFeaturePrefersDefaultRemoteBranch(t *testing.T) {
+	repo := newGitFixture(t)
+	mainHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	gitFixture(t, repo, "update-ref", "refs/remotes/origin/main", mainHead)
+	gitFixture(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	gitFixture(t, repo, "switch", "-c", "feature")
+	writeFixtureFile(t, repo, "feature.go", "package feature\n")
+	gitFixture(t, repo, "add", "feature.go")
+	gitFixture(t, repo, "commit", "-m", "feature")
+	featureHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	gitFixture(t, repo, "update-ref", "refs/remotes/origin/feature", featureHead)
+	gitFixture(t, repo, "config", "branch.feature.remote", "origin")
+	gitFixture(t, repo, "config", "branch.feature.merge", "refs/heads/feature")
+
+	got, err := ResolveBase(context.Background(), repo, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Ref != "origin/main" || got.Source != "default-remote" || got.Commit != mainHead {
+		t.Fatalf("ResolveBase() = %#v, want default origin/main at %s", got, mainHead)
+	}
+}
+
+func TestAssembleAutoCombinesCommittedBranchAndWorkingTreeOverlay(t *testing.T) {
+	repo := newGitFixture(t)
+	mainHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	gitFixture(t, repo, "update-ref", "refs/remotes/origin/main", mainHead)
+	gitFixture(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	gitFixture(t, repo, "switch", "-c", "feature")
+	writeFixtureFile(t, repo, "committed.go", "package feature\n// COMMITTED_BRANCH_CHANGE\n")
+	gitFixture(t, repo, "add", "committed.go")
+	gitFixture(t, repo, "commit", "-m", "committed feature change")
+	writeFixtureFile(t, repo, "overlay.txt", "UNTRACKED_OVERLAY_CHANGE\n")
+
+	assembled, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeAuto, StateDir: filepath.Join(t.TempDir(), "state")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	if assembled.Scope != ScopeAuto || assembled.Base.Ref != "origin/main" {
+		t.Fatalf("scope/base = %q %#v", assembled.Scope, assembled.Base)
+	}
+	for _, want := range []string{"COMMITTED_BRANCH_CHANGE", "UNTRACKED_OVERLAY_CHANGE"} {
+		if !strings.Contains(assembled.Inline, want) {
+			t.Fatalf("automatic context missing %q: %q", want, assembled.Inline)
+		}
+	}
 }
 
 func TestAssembleSanitizesTrackedAndUntrackedSecretPathsBeforeArtifact(t *testing.T) {
@@ -137,6 +189,80 @@ func TestAssembleSanitizesTrackedAndUntrackedSecretPathsBeforeArtifact(t *testin
 	}
 	if strings.Contains(prompt, repo) || strings.Contains(prompt, "TRACKED_SECRET") {
 		t.Fatalf("safe backend prompt exposed live repo or secret: %q", prompt)
+	}
+}
+
+func TestAssembleRedactsRenameCopyWhenEitherEndpointIsSecretAndOmitsBinaryContent(t *testing.T) {
+	repo := newGitFixture(t)
+	writeFixtureFile(t, repo, ".env", "RENAMED_SECRET_MUST_NOT_LEAK\n")
+	writeFixtureFile(t, repo, "credentials.json", "COPIED_SECRET_MUST_NOT_LEAK\n")
+	if err := os.WriteFile(filepath.Join(repo, "client.p12"), []byte{'o', 'l', 'd', 0, 'b', 'i', 'n'}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitFixture(t, repo, "add", ".env", "credentials.json", "client.p12")
+	gitFixture(t, repo, "commit", "-m", "secret fixtures")
+	gitFixture(t, repo, "mv", ".env", "config.txt")
+	raw, err := os.ReadFile(filepath.Join(repo, "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "public-copy.txt"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitFixture(t, repo, "add", "public-copy.txt")
+	if err := os.WriteFile(filepath.Join(repo, "client.p12"), []byte{'n', 'e', 'w', 0, 's', 'e', 'c', 'r', 'e', 't'}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	assembled, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeWorkingTree, StateDir: filepath.Join(t.TempDir(), "state")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	for _, want := range []string{
+		"REDACTED\tR100\t\".env\" -> \"config.txt\"",
+		"REDACTED\tC100\t\"credentials.json\" -> \"public-copy.txt\"",
+		"REDACTED\tM\t\"client.p12\"",
+	} {
+		if !strings.Contains(assembled.Inline, want) {
+			t.Fatalf("sanitized context missing %q: %q", want, assembled.Inline)
+		}
+	}
+	for _, forbidden := range []string{"RENAMED_SECRET_MUST_NOT_LEAK", "COPIED_SECRET_MUST_NOT_LEAK", "GIT binary patch", "literal "} {
+		if strings.Contains(assembled.Inline, forbidden) {
+			t.Fatalf("sanitized context leaked binary/secret marker %q: %q", forbidden, assembled.Inline)
+		}
+	}
+}
+
+func TestAssembleDoesNotExecuteCleanFilter(t *testing.T) {
+	repo := newGitFixture(t)
+	writeFixtureFile(t, repo, ".gitattributes", "filtered.txt filter=tripwire\n")
+	writeFixtureFile(t, repo, "filtered.txt", "before\n")
+	gitFixture(t, repo, "add", ".gitattributes", "filtered.txt")
+	gitFixture(t, repo, "commit", "-m", "attribute fixture")
+	marker := filepath.Join(t.TempDir(), "clean-filter-ran")
+	script := filepath.Join(t.TempDir(), "clean-filter.sh")
+	scriptBody := "#!/bin/sh\nprintf invoked > '" + strings.ReplaceAll(marker, "'", "'\"'\"'") + "'\ncat\n"
+	if err := os.WriteFile(script, []byte(scriptBody), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(script, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitFixture(t, repo, "config", "filter.tripwire.clean", script)
+	writeFixtureFile(t, repo, "filtered.txt", "after\n")
+
+	assembled, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeWorkingTree, StateDir: filepath.Join(t.TempDir(), "state")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("clean filter executed during assembly: %v", err)
+	}
+	if !strings.Contains(assembled.Inline, "after") {
+		t.Fatalf("assembled context missing unfiltered worktree content: %q", assembled.Inline)
 	}
 }
 
@@ -297,7 +423,7 @@ func TestAllowLiveRepoReadGatesBackendCWDAndPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if safe.BackendCWD == safe.CanonicalCWD || strings.Contains(safePrompt, "UNSAFE LIVE-REPOSITORY MODE") || !strings.Contains(safePrompt, "live repository is intentionally unavailable") {
+	if safe.BackendCWD == safe.CanonicalCWD || strings.Contains(safePrompt, "LIVE-REPOSITORY MODE") || !strings.Contains(safePrompt, "does not prevent a same-user backend") {
 		t.Fatalf("safe gating failed: cwd=%q prompt=%q", safe.BackendCWD, safePrompt)
 	}
 
@@ -310,7 +436,7 @@ func TestAllowLiveRepoReadGatesBackendCWDAndPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if live.BackendCWD != live.CanonicalCWD || !strings.Contains(livePrompt, "UNSAFE LIVE-REPOSITORY MODE") || !strings.Contains(livePrompt, "not secret-safe") || !strings.Contains(livePrompt, "self-collect") {
+	if live.BackendCWD != live.CanonicalCWD || !strings.Contains(livePrompt, "LIVE-REPOSITORY MODE") || !strings.Contains(livePrompt, "makes backend file reads easier") || !strings.Contains(livePrompt, "self-collect") {
 		t.Fatalf("live gating failed: cwd=%q prompt=%q", live.BackendCWD, livePrompt)
 	}
 }
@@ -326,7 +452,14 @@ func TestComposeAdversarialPromptIsRefuteFirst(t *testing.T) {
 }
 
 func TestIsSecretPath(t *testing.T) {
-	for _, path := range []string{".ENV", "config/.env.local", "Credentials.json", "nested/secrets/value.txt", "api-token.txt", "service_api_key.json", "id_rsa", "tls/private.pem"} {
+	for _, path := range []string{
+		".ENV", "config/.env.local", "config/PROD.ENV", ".NETRC", ".NPMRC",
+		"Credentials.json", "backup-creds.yml", "db-PASSWORD.txt", "nested/secrets/value.txt", "api-token.txt",
+		"KUBECONFIG-prod", "prod-SERVICE-ACCOUNT-key.JSON", "service_api_key.json",
+		"id_rsa", "id_ECDSA.pub", "id_ed25519_backup", "cert/client.P12", "cert/client.PFX",
+		"stores/app.JKS", "stores/app.KEYSTORE", "tls/private.PEM", "tls/private.KEY", "auth/session.TOKEN",
+		"home/.AWS/config", "home/.SSH/config", "home/.GNUPG/pubring.kbx",
+	} {
 		if !IsSecretPath(path) {
 			t.Errorf("IsSecretPath(%q) = false", path)
 		}

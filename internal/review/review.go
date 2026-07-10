@@ -75,8 +75,9 @@ type Context struct {
 
 type changedFile struct {
 	File
-	untracked bool
-	diff      []byte
+	sourcePath string
+	untracked  bool
+	diff       []byte
 }
 
 // ShouldInline reports whether sanitized context is within both inline limits.
@@ -105,27 +106,11 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	var changed []changedFile
 	switch scope {
 	case ScopeAuto:
-		if opts.Base != "" {
-			scope = ScopeBranch
-			base, err = ResolveBase(ctx, repoRoot, opts.Base)
-			if err != nil {
-				return Context{}, err
-			}
-			changed, diffBase, err = branchChanges(ctx, repoRoot, base.Commit)
-		} else {
-			changed, err = workingTreeChanges(ctx, repoRoot)
-			if err != nil {
-				return Context{}, err
-			}
-			if len(changed) == 0 {
-				scope = ScopeBranch
-				base, err = ResolveBase(ctx, repoRoot, "")
-				if err != nil {
-					return Context{}, err
-				}
-				changed, diffBase, err = branchChanges(ctx, repoRoot, base.Commit)
-			}
+		base, err = ResolveBase(ctx, repoRoot, opts.Base)
+		if err != nil {
+			return Context{}, err
 		}
+		changed, diffBase, err = autoChanges(ctx, repoRoot, base.Commit)
 	case ScopeWorkingTree:
 		changed, err = workingTreeChanges(ctx, repoRoot)
 	case ScopeBranch:
@@ -139,16 +124,18 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	}
 
 	for i := range changed {
-		changed[i].Redacted = IsSecretPath(changed[i].Path)
+		changed[i].Redacted = IsSecretPath(changed[i].Path) || IsSecretPath(changed[i].sourcePath)
 		if changed[i].Redacted {
 			continue
 		}
 		if changed[i].untracked {
 			changed[i].diff, err = untrackedDiff(ctx, repoRoot, changed[i].Path)
 		} else if scope == ScopeBranch {
-			changed[i].diff, err = trackedDiff(ctx, repoRoot, diffBase, "HEAD", changed[i].Path)
+			changed[i].diff, err = trackedDiff(ctx, repoRoot, diffBase, "HEAD", changed[i].paths()...)
+		} else if scope == ScopeAuto {
+			changed[i].diff, err = trackedDiff(ctx, repoRoot, diffBase, "", changed[i].paths()...)
 		} else {
-			changed[i].diff, err = trackedDiff(ctx, repoRoot, "HEAD", "", changed[i].Path)
+			changed[i].diff, err = trackedDiff(ctx, repoRoot, "HEAD", "", changed[i].paths()...)
 		}
 		if err != nil {
 			return Context{}, err
@@ -207,8 +194,9 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	return result, nil
 }
 
-// ResolveBase follows the required explicit, upstream, default-remote chain.
-// It never invokes a command that contacts a remote.
+// ResolveBase follows the required explicit, default-remote, unpushed-upstream
+// chain. An upstream at HEAD describes a pushed feature branch, not its review
+// base, so it is deliberately skipped. No command contacts a remote.
 func ResolveBase(ctx context.Context, cwd, explicit string) (Base, error) {
 	if explicit != "" {
 		commit, err := resolveCommit(ctx, cwd, explicit)
@@ -218,22 +206,23 @@ func ResolveBase(ctx context.Context, cwd, explicit string) (Base, error) {
 		return Base{Ref: explicit, Commit: commit, Source: "explicit"}, nil
 	}
 
-	if upstreamRaw, err := gitOutput(ctx, cwd, false, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); err == nil {
-		upstream := strings.TrimSpace(string(upstreamRaw))
-		if upstream != "" && upstream != "@{upstream}" {
-			if commit, resolveErr := resolveCommit(ctx, cwd, upstream); resolveErr == nil {
-				return Base{Ref: upstream, Commit: commit, Source: "upstream"}, nil
-			}
-		}
-	}
-
 	if ref, ok := defaultRemoteBranch(ctx, cwd); ok {
 		commit, err := resolveCommit(ctx, cwd, ref)
 		if err == nil {
 			return Base{Ref: ref, Commit: commit, Source: "default-remote"}, nil
 		}
 	}
-	return Base{}, errors.New("cannot resolve review base: pass --base <ref>, configure an upstream tracking branch, or set a default remote branch (for example: git remote set-head origin --auto)")
+
+	head, headErr := resolveCommit(ctx, cwd, "HEAD")
+	if upstreamRaw, err := gitOutput(ctx, cwd, false, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); err == nil {
+		upstream := strings.TrimSpace(string(upstreamRaw))
+		if upstream != "" && upstream != "@{upstream}" {
+			if commit, resolveErr := resolveCommit(ctx, cwd, upstream); resolveErr == nil && (headErr != nil || commit != head) {
+				return Base{Ref: upstream, Commit: commit, Source: "upstream-unpushed"}, nil
+			}
+		}
+	}
+	return Base{}, errors.New("cannot resolve review base: pass --base <ref>, set a default remote branch (for example: git remote set-head origin --auto), or configure an upstream behind HEAD for an unpushed-commits comparison")
 }
 
 // CanonicalizeCWD returns an absolute, symlink-resolved directory.
@@ -264,18 +253,33 @@ func CanonicalizeCWD(cwd string) (string, error) {
 
 // IsSecretPath implements the conservative, case-insensitive path heuristic.
 func IsSecretPath(path string) bool {
+	if path == "" {
+		return false
+	}
 	normalized := strings.ToLower(filepath.ToSlash(path))
 	parts := strings.Split(normalized, "/")
 	for _, part := range parts {
-		if strings.HasPrefix(part, ".env") || strings.Contains(part, "credential") || strings.Contains(part, "secret") || strings.Contains(part, "token") {
+		if part == ".aws" || part == ".ssh" || part == ".gnupg" || part == ".netrc" || part == ".npmrc" {
+			return true
+		}
+		if strings.HasPrefix(part, ".env") || strings.HasSuffix(part, ".env") ||
+			strings.Contains(part, "credential") || strings.Contains(part, "creds") ||
+			strings.Contains(part, "password") || strings.Contains(part, "secret") || strings.Contains(part, "token") ||
+			strings.HasPrefix(part, "kubeconfig") || strings.HasPrefix(part, "id_rsa") ||
+			strings.HasPrefix(part, "id_ecdsa") || strings.HasPrefix(part, "id_ed25519") {
+			return true
+		}
+		if strings.Contains(part, "service-account") && strings.HasSuffix(part, ".json") {
 			return true
 		}
 		compact := strings.NewReplacer("-", "", "_", "", ".", "").Replace(part)
 		if strings.Contains(compact, "apikey") || strings.Contains(compact, "privatekey") || strings.Contains(compact, "accesskey") || strings.Contains(compact, "authkey") || strings.Contains(compact, "apitoken") || strings.Contains(compact, "accesstoken") || strings.Contains(compact, "authtoken") || strings.Contains(compact, "refreshtoken") {
 			return true
 		}
-		if strings.HasSuffix(part, ".key") || strings.HasSuffix(part, ".pem") || part == "id_rsa" || part == "id_ed25519" {
-			return true
+		for _, suffix := range []string{".p12", ".pfx", ".jks", ".keystore", ".pem", ".key", ".token"} {
+			if strings.HasSuffix(part, suffix) {
+				return true
+			}
 		}
 	}
 	return false
@@ -297,9 +301,9 @@ func ComposePrompt(kind string, assembled Context) (string, error) {
 		prompt.WriteString("Resolved base: " + strconv.Quote(assembled.Base.Ref) + " (" + assembled.Base.Source + ").\n")
 	}
 	if assembled.AllowLiveRepoRead {
-		prompt.WriteString("UNSAFE LIVE-REPOSITORY MODE was explicitly enabled. This mode is not secret-safe. You may inspect the current repository to validate and self-collect context, but remain read-only and do not expose secret-looking file contents in the response.\n")
+		prompt.WriteString("LIVE-REPOSITORY MODE was explicitly enabled. Delegate still excludes content from secret-matched paths only in the context it assembles; this flag makes backend file reads easier by using the live repository as its working directory. You may inspect the current repository to validate and self-collect context, but remain read-only and do not expose secret-looking file contents in the response.\n")
 	} else {
-		prompt.WriteString("The live repository is intentionally unavailable. Review only the delegate-produced sanitized context in this workspace; do not inspect any other filesystem path or try to reconstruct redacted content. Secret-looking paths appear as path/status only.\n")
+		prompt.WriteString("Delegate has provided only its assembled context in this workspace, with secret-looking paths represented as path/status only. This does not prevent a same-user backend from reading repository or other filesystem files itself; review only this context and do not try to inspect or reconstruct redacted content. OS-level isolation requires a container or sandbox profile and is planned for v0.2.\n")
 	}
 	if assembled.ArtifactPath != "" {
 		path := artifactFilename
@@ -420,7 +424,7 @@ func defaultRemoteBranch(ctx context.Context, cwd string) (string, bool) {
 }
 
 func workingTreeChanges(ctx context.Context, repoRoot string) ([]changedFile, error) {
-	raw, err := gitOutput(ctx, repoRoot, false, "diff", "--name-status", "-z", "--no-renames", "HEAD", "--")
+	raw, err := gitOutput(ctx, repoRoot, false, nameStatusArgs("HEAD", "")...)
 	if err != nil {
 		return nil, fmt.Errorf("collect tracked working-tree paths: %w", err)
 	}
@@ -428,19 +432,8 @@ func workingTreeChanges(ctx context.Context, repoRoot string) ([]changedFile, er
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[string]bool, len(files))
-	for _, file := range files {
-		seen[file.Path] = true
-	}
-	untracked, err := gitOutput(ctx, repoRoot, false, "ls-files", "--others", "--exclude-standard", "-z", "--")
-	if err != nil {
-		return nil, fmt.Errorf("collect untracked working-tree paths: %w", err)
-	}
-	for _, path := range splitNUL(untracked) {
-		if path == "" || seen[path] {
-			continue
-		}
-		files = append(files, changedFile{File: File{Path: path, Status: "??"}, untracked: true})
+	if err := appendUntracked(ctx, repoRoot, &files); err != nil {
+		return nil, err
 	}
 	sortChanged(files)
 	return files, nil
@@ -452,7 +445,7 @@ func branchChanges(ctx context.Context, repoRoot, baseCommit string) ([]changedF
 		return nil, "", fmt.Errorf("resolve merge base for %q: %w", baseCommit, err)
 	}
 	mergeBase := strings.TrimSpace(string(mergeBaseRaw))
-	raw, err := gitOutput(ctx, repoRoot, false, "diff", "--name-status", "-z", "--no-renames", mergeBase, "HEAD", "--")
+	raw, err := gitOutput(ctx, repoRoot, false, nameStatusArgs(mergeBase, "HEAD")...)
 	if err != nil {
 		return nil, "", fmt.Errorf("collect branch paths: %w", err)
 	}
@@ -460,23 +453,68 @@ func branchChanges(ctx context.Context, repoRoot, baseCommit string) ([]changedF
 	if err != nil {
 		return nil, "", err
 	}
-	// Store the merge base used by trackedDiff in the otherwise unused marker.
-	for i := range files {
-		files[i].untracked = false
+	sortChanged(files)
+	return files, mergeBase, nil
+}
+
+func autoChanges(ctx context.Context, repoRoot, baseCommit string) ([]changedFile, string, error) {
+	mergeBaseRaw, err := gitOutput(ctx, repoRoot, false, "merge-base", baseCommit, "HEAD")
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve merge base for %q: %w", baseCommit, err)
+	}
+	mergeBase := strings.TrimSpace(string(mergeBaseRaw))
+	raw, err := gitOutput(ctx, repoRoot, false, nameStatusArgs(mergeBase, "")...)
+	if err != nil {
+		return nil, "", fmt.Errorf("collect automatic review paths: %w", err)
+	}
+	files, err := parseNameStatus(raw)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := appendUntracked(ctx, repoRoot, &files); err != nil {
+		return nil, "", err
 	}
 	sortChanged(files)
 	return files, mergeBase, nil
 }
 
-func trackedDiff(ctx context.Context, repoRoot, from, to, path string) ([]byte, error) {
-	args := []string{"diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--no-renames", from}
+func nameStatusArgs(from, to string) []string {
+	args := []string{"diff", "--name-status", "-z", "--find-renames", "--find-copies", "--find-copies-harder", from}
 	if to != "" {
 		args = append(args, to)
 	}
-	args = append(args, "--", path)
+	return append(args, "--")
+}
+
+func appendUntracked(ctx context.Context, repoRoot string, files *[]changedFile) error {
+	seen := make(map[string]bool, len(*files))
+	for _, file := range *files {
+		seen[file.Path] = true
+		seen[file.sourcePath] = true
+	}
+	untracked, err := gitOutput(ctx, repoRoot, false, "ls-files", "--others", "--exclude-standard", "-z", "--")
+	if err != nil {
+		return fmt.Errorf("collect untracked working-tree paths: %w", err)
+	}
+	for _, path := range splitNUL(untracked) {
+		if path == "" || seen[path] {
+			continue
+		}
+		*files = append(*files, changedFile{File: File{Path: path, Status: "??"}, untracked: true})
+	}
+	return nil
+}
+
+func trackedDiff(ctx context.Context, repoRoot, from, to string, paths ...string) ([]byte, error) {
+	args := []string{"diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--find-renames", "--find-copies", "--find-copies-harder", from}
+	if to != "" {
+		args = append(args, to)
+	}
+	args = append(args, "--")
+	args = append(args, paths...)
 	raw, err := gitOutput(ctx, repoRoot, false, args...)
 	if err != nil {
-		return nil, fmt.Errorf("collect sanitized diff for %q: %w", path, err)
+		return nil, fmt.Errorf("collect sanitized diff for %q: %w", paths, err)
 	}
 	return raw, nil
 }
@@ -491,18 +529,37 @@ func untrackedDiff(ctx context.Context, repoRoot, path string) ([]byte, error) {
 
 func parseNameStatus(raw []byte) ([]changedFile, error) {
 	parts := splitNUL(raw)
-	if len(parts)%2 != 0 {
-		return nil, errors.New("git returned malformed name-status data")
-	}
 	files := make([]changedFile, 0, len(parts)/2)
-	for i := 0; i < len(parts); i += 2 {
-		status, path := parts[i], parts[i+1]
-		if status == "" || path == "" {
+	for i := 0; i < len(parts); {
+		status := parts[i]
+		i++
+		if status == "" || i >= len(parts) {
+			return nil, errors.New("git returned malformed name-status data")
+		}
+		path := parts[i]
+		i++
+		if path == "" {
 			return nil, errors.New("git returned an empty status or path")
 		}
-		files = append(files, changedFile{File: File{Path: path, Status: status}})
+		file := changedFile{File: File{Path: path, Status: status}}
+		if status[0] == 'R' || status[0] == 'C' {
+			if i >= len(parts) || parts[i] == "" {
+				return nil, errors.New("git returned malformed rename/copy name-status data")
+			}
+			file.sourcePath = path
+			file.Path = parts[i]
+			i++
+		}
+		files = append(files, file)
 	}
 	return files, nil
+}
+
+func (file changedFile) paths() []string {
+	if file.sourcePath == "" || file.sourcePath == file.Path {
+		return []string{file.Path}
+	}
+	return []string{file.sourcePath, file.Path}
 }
 
 func splitNUL(raw []byte) []string {
@@ -523,6 +580,9 @@ func splitNUL(raw []byte) []string {
 func sortChanged(files []changedFile) {
 	sort.Slice(files, func(i, j int) bool {
 		if files[i].Path == files[j].Path {
+			if files[i].sourcePath != files[j].sourcePath {
+				return files[i].sourcePath < files[j].sourcePath
+			}
 			return files[i].Status < files[j].Status
 		}
 		return files[i].Path < files[j].Path
@@ -538,11 +598,15 @@ func renderSanitizedContext(scope string, base Base, files []changedFile) []byte
 	}
 	out.WriteString(fmt.Sprintf("file_count\t%d\n", len(files)))
 	for _, file := range files {
+		pathText := strconv.Quote(file.Path)
+		if file.sourcePath != "" {
+			pathText = strconv.Quote(file.sourcePath) + " -> " + pathText
+		}
 		if file.Redacted {
-			out.WriteString("REDACTED\t" + file.Status + "\t" + strconv.Quote(file.Path) + "\n")
+			out.WriteString("REDACTED\t" + file.Status + "\t" + pathText + "\n")
 			continue
 		}
-		out.WriteString("FILE\t" + file.Status + "\t" + strconv.Quote(file.Path) + "\n")
+		out.WriteString("FILE\t" + file.Status + "\t" + pathText + "\n")
 		out.Write(file.diff)
 		if len(file.diff) > 0 && file.diff[len(file.diff)-1] != '\n' {
 			out.WriteByte('\n')
@@ -599,9 +663,17 @@ func writePrivateFile(path string, payload []byte) error {
 }
 
 func gitOutput(ctx context.Context, cwd string, acceptDiff bool, args ...string) ([]byte, error) {
-	commandArgs := append([]string{"-C", cwd, "--literal-pathspecs"}, args...)
+	commandArgs := []string{"-C", cwd, "--literal-pathspecs", "-c", "core.attributesFile=/dev/null", "-c", "attr.tree=refs/delegate/empty-attributes"}
+	for _, driver := range configuredFilterDrivers(ctx, cwd) {
+		commandArgs = append(commandArgs,
+			"-c", "filter."+driver+".clean=",
+			"-c", "filter."+driver+".process=",
+			"-c", "filter."+driver+".required=false",
+		)
+	}
+	commandArgs = append(commandArgs, args...)
 	cmd := exec.CommandContext(ctx, "git", commandArgs...)
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_ATTR_NOSYSTEM=1")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -618,4 +690,32 @@ func gitOutput(ctx context.Context, cwd string, acceptDiff bool, args ...string)
 		detail = err.Error()
 	}
 	return nil, errors.New(detail)
+}
+
+func configuredFilterDrivers(ctx context.Context, cwd string) []string {
+	cmd := exec.CommandContext(ctx, "git", "-C", cwd, "config", "--null", "--name-only", "--get-regexp", `^filter\..*\.(clean|process|required)$`)
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_ATTR_NOSYSTEM=1")
+	raw, err := cmd.Output()
+	if err != nil && len(raw) == 0 {
+		return nil
+	}
+	drivers := make(map[string]struct{})
+	for _, key := range splitNUL(raw) {
+		key = strings.TrimSpace(key)
+		if !strings.HasPrefix(key, "filter.") {
+			continue
+		}
+		withoutPrefix := strings.TrimPrefix(key, "filter.")
+		dot := strings.LastIndexByte(withoutPrefix, '.')
+		if dot <= 0 {
+			continue
+		}
+		drivers[withoutPrefix[:dot]] = struct{}{}
+	}
+	out := make([]string, 0, len(drivers))
+	for driver := range drivers {
+		out = append(out, driver)
+	}
+	sort.Strings(out)
+	return out
 }

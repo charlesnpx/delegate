@@ -318,7 +318,7 @@ func TestTaskSubmitFailureUnlinksHandoffAndDeletesJobInput(t *testing.T) {
 	}
 }
 
-func TestTaskMetadataPersistFailureStillLaunchesWithWarning(t *testing.T) {
+func TestTaskMetadataPersistFailureBeforeLaunchAborts(t *testing.T) {
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		result: client.JobResult{
@@ -335,20 +335,23 @@ func TestTaskMetadataPersistFailureStillLaunchesWithWarning(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "launch only"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do not launch"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("task code = 0, want metadata failure; stdout = %q", stdout.String())
 	}
-	var launch LaunchEnvelope
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &launch); err != nil {
-		t.Fatalf("launch envelope JSON invalid: %v; raw = %q", err, stdout.String())
+	if len(fake.submits) != 0 {
+		t.Fatalf("JobSubmit calls = %d, want 0", len(fake.submits))
 	}
-	if launch.JobID != "job_meta_warning" || launch.Status != string(engine.StateQueued) {
-		t.Fatalf("launch = %#v, want queued job_meta_warning", launch)
+	if !strings.Contains(stderr.String(), "persist metadata before launch: metadata store read-only") {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
-	wantWarning := "warning: delegate job metadata for job_meta_warning was not persisted: metadata store read-only"
-	if !strings.Contains(stderr.String(), wantWarning) {
-		t.Fatalf("stderr = %q, want warning %q", stderr.String(), wantWarning)
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches, err := filepath.Glob(filepath.Join(stateDir, "job-input.*.prompt"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("job inputs after aborted launch = %#v, %v", matches, err)
 	}
 }
 
@@ -363,8 +366,13 @@ func TestBackgroundJobInputIsReassociatedAndSweptByNextStatus(t *testing.T) {
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
 	oldSave := saveDelegateJobMetadata
+	saveCalls := 0
 	saveDelegateJobMetadata = func(string, jobMetadata) error {
-		return errors.New("metadata unavailable")
+		saveCalls++
+		if saveCalls == 2 {
+			return errors.New("metadata unavailable after launch")
+		}
+		return nil
 	}
 	defer func() { saveDelegateJobMetadata = oldSave }()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -415,8 +423,13 @@ func TestBackgroundJobInputIsSweptByNextResult(t *testing.T) {
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
 	oldSave := saveDelegateJobMetadata
+	saveCalls := 0
 	saveDelegateJobMetadata = func(string, jobMetadata) error {
-		return errors.New("metadata unavailable")
+		saveCalls++
+		if saveCalls == 2 {
+			return errors.New("metadata unavailable after launch")
+		}
+		return nil
 	}
 	defer func() { saveDelegateJobMetadata = oldSave }()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())

@@ -471,13 +471,13 @@ Use this when {{.HostAgent}} should delegate a read-only {{if eq .Action "advers
 Before launching, check the subagent context and stop with a clear setup error if any item is missing:
 
 - no-fork support: the job must run through "delegate {{.Action}}"/agentbus supervision, not an unmanaged background shell or a local substitute review.
-- shared fs: {{.HostAgent}}, "delegate", agentbus, and {{.OtherAgent}} can see the delegate state path; the backend does not need the live repository in safe mode.
+- shared fs: {{.HostAgent}}, "delegate", agentbus, and {{.OtherAgent}} can see the delegate state path. Using the private workspace as backend cwd is not OS isolation; a same-user backend can still read repository or other filesystem files when process permissions allow it.
 - exec: "delegate", "agentbus", "git", and the {{.Backend}} backend executable are runnable.
-- repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts.
+- repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate guarantees only that it never includes content from paths matched by its secret heuristic in the context it assembles.
 - cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
 - backend reachability: "delegate setup --json" shows agentbus capabilities and {{.Backend}} backend availability.
 
-Do not add "--allow-live-repo-read" unless the user explicitly requests live-repository access after being told that it is not secret-safe.
+Do not add "--allow-live-repo-read" unless the user explicitly requests live-repository access after being told that using the repository as backend cwd makes backend file reads easier. It does not change OS filesystem permissions. A container/sandbox profile for OS-level isolation is planned for v0.2.
 
 ## Launch
 
