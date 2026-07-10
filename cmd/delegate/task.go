@@ -323,35 +323,40 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 	var warnings []string
 	input, warnings = reassociateSubmittedJobInput(input, started.JobID, warnings)
 	if warning, err := persistLaunchedJobMetadata(opts, input, started.JobID, contractKind); err != nil {
-		return taskRunResult{}, err
+		warnings = append(warnings, err.Error())
+		env, envelopeErr := newLaunchEnvelope(started.JobID, engine.StateRunning)
+		if envelopeErr != nil {
+			return taskRunResult{Submitted: true, Warnings: warnings}, envelopeErr
+		}
+		return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
 	} else if warning != "" {
 		warnings = append(warnings, warning)
 	}
-	if pendingJobID != started.JobID {
+	if pendingJobID != started.JobID && input.JobID == started.JobID {
 		if err := deleteJobMetadata(opts.StateDir, pendingJobID); err != nil {
 			warnings = append(warnings, fmt.Sprintf("pending metadata for %s could not be removed: %v", pendingJobID, err))
 		}
 	}
 	err = cleanupJobInput(opts.StateDir, started.JobID, started.SessionID, engine.StateRunning)
 	if err != nil {
-		return taskRunResult{}, err
+		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
 	if opts.Wait {
 		jobResult, err := waitForTurnResult(ctx, c, opts.StateDir, started.JobID, notifications)
 		if err != nil {
-			return taskRunResult{}, err
+			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
 		env, err := terminalEnvelopeFromJobResult(opts.StateDir, jobResult)
 		if err != nil {
-			return taskRunResult{}, err
+			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
-		return taskRunResult{Terminal: &env, Warnings: warnings}, nil
+		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
 	}
 	env, err := newLaunchEnvelope(started.JobID, engine.StateRunning)
 	if err != nil {
-		return taskRunResult{}, err
+		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
-	return taskRunResult{Launch: &env, Warnings: warnings}, nil
+	return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
 }
 
 func validateResumeTarget(opts taskOptions, target client.SessionInfo) error {

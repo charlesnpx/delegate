@@ -301,6 +301,77 @@ func TestAssembleRedactsContentThatTraversedSecretRenameChainAndCopies(t *testin
 	}
 }
 
+func TestAssembleRedactsPublicPathEditedAfterSecretRename(t *testing.T) {
+	repo := newGitFixture(t)
+	stable := strings.Repeat("stable context line\n", 80)
+	writeFixtureFile(t, repo, "public.txt", stable+"base version\n")
+	gitFixture(t, repo, "add", "public.txt")
+	gitFixture(t, repo, "commit", "-m", "public base")
+	base := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	gitFixture(t, repo, "switch", "-c", "feature")
+
+	gitFixture(t, repo, "mv", "public.txt", ".ENV")
+	writeFixtureFile(t, repo, ".ENV", stable+"SECRET_PATH_VERSION_MUST_NOT_LEAK\n")
+	gitFixture(t, repo, "add", ".ENV")
+	gitFixture(t, repo, "commit", "-m", "edit under secret name")
+
+	gitFixture(t, repo, "mv", ".ENV", "public.txt")
+	writeFixtureFile(t, repo, "public.txt", "FINAL_PUBLIC_EDIT_MUST_NOT_LEAK\ncompletely rewritten after rename\n")
+	gitFixture(t, repo, "add", "public.txt")
+	gitFixture(t, repo, "commit", "-m", "return and edit public path")
+
+	assembled, err := Assemble(context.Background(), Options{CWD: repo, Base: base, Scope: ScopeBranch, StateDir: filepath.Join(t.TempDir(), "state")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	if len(assembled.Files) != 1 || assembled.Files[0].Path != "public.txt" || !assembled.Files[0].Redacted {
+		t.Fatalf("files = %#v, want tainted public.txt", assembled.Files)
+	}
+	for _, forbidden := range []string{"SECRET_PATH_VERSION_MUST_NOT_LEAK", "FINAL_PUBLIC_EDIT_MUST_NOT_LEAK"} {
+		if strings.Contains(assembled.Inline, forbidden) {
+			t.Fatalf("transitively tainted content %q leaked: %q", forbidden, assembled.Inline)
+		}
+	}
+}
+
+func TestAssemblePathTaintSurvivesMultipleRenameHops(t *testing.T) {
+	repo := newGitFixture(t)
+	stable := strings.Repeat("multi-hop stable line\n", 80)
+	writeFixtureFile(t, repo, "origin.txt", stable+"origin\n")
+	gitFixture(t, repo, "add", "origin.txt")
+	gitFixture(t, repo, "commit", "-m", "origin")
+	base := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	gitFixture(t, repo, "switch", "-c", "feature")
+
+	hops := []struct {
+		from, to, marker string
+	}{
+		{from: "origin.txt", to: ".ENV", marker: "secret-hop"},
+		{from: ".ENV", to: "middle.txt", marker: "middle-hop"},
+		{from: "middle.txt", to: "final.txt", marker: "FINAL_MULTI_HOP_MUST_NOT_LEAK"},
+	}
+	for _, hop := range hops {
+		gitFixture(t, repo, "mv", hop.from, hop.to)
+		writeFixtureFile(t, repo, hop.to, stable+hop.marker+"\n")
+		gitFixture(t, repo, "add", hop.to)
+		gitFixture(t, repo, "commit", "-m", hop.marker)
+	}
+
+	assembled, err := Assemble(context.Background(), Options{CWD: repo, Base: base, Scope: ScopeBranch, StateDir: filepath.Join(t.TempDir(), "state")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	redacted := make(map[string]bool)
+	for _, file := range assembled.Files {
+		redacted[file.Path] = file.Redacted
+	}
+	if !redacted["final.txt"] || strings.Contains(assembled.Inline, "FINAL_MULTI_HOP_MUST_NOT_LEAK") {
+		t.Fatalf("multi-hop taint was lost: files=%#v context=%q", assembled.Files, assembled.Inline)
+	}
+}
+
 func TestAssembleRedactsNormalizedSecretPathVariants(t *testing.T) {
 	paths := []string{"SERVICE_ACCOUNT.JSON", "service_account.json", ".kube/config", "KUBE_CONFIG"}
 	for _, path := range paths {

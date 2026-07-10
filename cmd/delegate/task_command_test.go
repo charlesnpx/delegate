@@ -546,6 +546,84 @@ func TestTaskResumeSessionUsesResumeAndTurnStart(t *testing.T) {
 	}
 }
 
+func TestTaskResumeMetadataFailureAfterTurnStartEmitsLaunchAndPreservesInput(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "delegate")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := os.MkdirTemp(stateDir, "review-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := t.TempDir()
+	fake := &fakeAgentbusClient{
+		sessions:     []client.SessionInfo{{SessionID: "session_durable_resume", Backend: "codex", CWD: cwd}},
+		resumeResult: client.SessionStartResult{SessionID: "session_durable_resume", Backend: "codex"},
+		turnResult:   client.TurnStartResult{TurnID: "turn_durable_resume", JobID: "job_durable_resume", SessionID: "session_durable_resume"},
+	}
+
+	oldPrimary := saveDelegateJobMetadata
+	oldFallback := saveLaunchedJobMetadataFallback
+	primaryCalls := 0
+	saveDelegateJobMetadata = func(dir string, meta jobMetadata) error {
+		primaryCalls++
+		if primaryCalls == 1 {
+			return saveJobMetadata(dir, meta)
+		}
+		return errors.New("primary metadata unavailable after turn start")
+	}
+	saveLaunchedJobMetadataFallback = func(string, jobMetadata) error {
+		return errors.New("fallback metadata unavailable after turn start")
+	}
+	defer func() {
+		saveDelegateJobMetadata = oldPrimary
+		saveLaunchedJobMetadataFallback = oldFallback
+	}()
+
+	result, err := runDaemonSessionTask(context.Background(), fake, taskOptions{
+		Backend:         "codex",
+		Wait:            true,
+		CWD:             cwd,
+		ResumeSession:   "session_durable_resume",
+		StateDir:        stateDir,
+		Kind:            reviewKind,
+		ReviewWorkspace: workspace,
+	}, handoff.ResolvedPrompt{Prompt: "durable resumed prompt", Source: handoff.SourcePrompt}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Submitted || result.Launch == nil || result.Launch.JobID != "job_durable_resume" || result.Terminal != nil {
+		t.Fatalf("result = %#v, want real post-TurnStart launch", result)
+	}
+	if len(result.Warnings) == 0 || !strings.Contains(strings.Join(result.Warnings, "\n"), "persist launched job metadata for job_durable_resume") {
+		t.Fatalf("warnings = %#v, want metadata durability warning", result.Warnings)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code, err := writeTaskRunResult(result, &stdout, &stderr); err != nil || code != 0 {
+		t.Fatalf("writeTaskRunResult() = %d, %v", code, err)
+	}
+	var envelope LaunchEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &envelope); err != nil || envelope.JobID != "job_durable_resume" {
+		t.Fatalf("launch envelope = %#v, err=%v, raw=%q", envelope, err, stdout.String())
+	}
+
+	inputs, err := filepath.Glob(filepath.Join(stateDir, "job-input.*.prompt"))
+	if err != nil || len(inputs) != 1 {
+		t.Fatalf("job inputs = %#v, err=%v, want one", inputs, err)
+	}
+	input, ok := handoff.ParseJobInputPath(inputs[0])
+	if !ok || input.JobID != "job_durable_resume" {
+		t.Fatalf("reassociated input = %#v, ok=%v", input, ok)
+	}
+	if raw, err := os.ReadFile(inputs[0]); err != nil || string(raw) != "durable resumed prompt" {
+		t.Fatalf("durable input = %q, err=%v", raw, err)
+	}
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("review workspace was not preserved: %v", err)
+	}
+}
+
 func TestTaskResumeSelectsMostRecentSessionForBackendAndCWD(t *testing.T) {
 	fake := &fakeAgentbusClient{
 		hello:        helloWithCapabilities(),

@@ -122,13 +122,13 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	if err != nil {
 		return Context{}, err
 	}
-	secretBlobs, err := collectSecretBlobHashes(ctx, repoRoot, diffBase)
-	if err != nil {
-		return Context{}, err
-	}
+	secretBlobs, blobErr := collectSecretBlobHashes(ctx, repoRoot, diffBase)
+	secretPaths, pathErr := collectSecretPathTaint(ctx, repoRoot, diffBase)
+	redactAll := blobErr != nil || pathErr != nil
 
 	for i := range changed {
-		changed[i].Redacted = IsSecretPath(changed[i].Path) || IsSecretPath(changed[i].sourcePath)
+		changed[i].Redacted = redactAll || IsSecretPath(changed[i].Path) || IsSecretPath(changed[i].sourcePath) ||
+			secretPaths[changed[i].Path] || secretPaths[changed[i].sourcePath]
 		if changed[i].Redacted {
 			continue
 		}
@@ -521,6 +521,171 @@ func appendUntracked(ctx context.Context, repoRoot string, files *[]changedFile)
 		*files = append(*files, untrackedFile)
 	}
 	return nil
+}
+
+type pathHistoryNode struct {
+	revision string
+	path     string
+}
+
+type pathHistoryGraph struct {
+	edges   map[pathHistoryNode]map[pathHistoryNode]struct{}
+	tainted map[pathHistoryNode]struct{}
+	trees   map[string]map[string]string
+}
+
+// collectSecretPathTaint follows path identity and detected rename/copy edges
+// through committed review history. Edges are undirected so a secret-looking
+// name taints every earlier and later path in the same lineage, even after the
+// content changes. The caller redacts every output path if this walk fails.
+func collectSecretPathTaint(ctx context.Context, repoRoot, historyBase string) (map[string]bool, error) {
+	graph := pathHistoryGraph{
+		edges:   make(map[pathHistoryNode]map[pathHistoryNode]struct{}),
+		tainted: make(map[pathHistoryNode]struct{}),
+		trees:   make(map[string]map[string]string),
+	}
+	if historyBase == "" {
+		if _, err := graph.loadTree(ctx, repoRoot, "HEAD"); err != nil {
+			return nil, err
+		}
+		return graph.propagatedPathNames(), nil
+	}
+
+	if _, err := graph.loadTree(ctx, repoRoot, historyBase); err != nil {
+		return nil, err
+	}
+	raw, err := gitOutput(ctx, repoRoot, false, "rev-list", "--reverse", "--topo-order", "--parents", historyBase+"..HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("collect review path history: %w", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		commit := fields[0]
+		childTree, err := graph.loadTree(ctx, repoRoot, commit)
+		if err != nil {
+			return nil, err
+		}
+		for _, parent := range fields[1:] {
+			parentTree, err := graph.loadTree(ctx, repoRoot, parent)
+			if err != nil {
+				return nil, err
+			}
+			for path := range parentTree {
+				if _, exists := childTree[path]; exists {
+					graph.addEdge(pathHistoryNode{parent, path}, pathHistoryNode{commit, path})
+				}
+			}
+
+			delta, err := gitOutput(ctx, repoRoot, false, nameStatusArgs(parent, commit)...)
+			if err != nil {
+				return nil, fmt.Errorf("detect review path transitions %s..%s: %w", parent, commit, err)
+			}
+			transitions, err := parseNameStatus(delta)
+			if err != nil {
+				return nil, fmt.Errorf("parse review path transitions %s..%s: %w", parent, commit, err)
+			}
+			var unmatchedAdds, unmatchedDeletes []string
+			for _, transition := range transitions {
+				if transition.sourcePath == "" {
+					switch transition.Status[0] {
+					case 'A':
+						unmatchedAdds = append(unmatchedAdds, transition.Path)
+					case 'D':
+						unmatchedDeletes = append(unmatchedDeletes, transition.Path)
+					}
+					continue
+				}
+				destination := pathHistoryNode{commit, transition.Path}
+				graph.addEdge(pathHistoryNode{parent, transition.sourcePath}, destination)
+
+				// Equal source blobs make rename/copy attribution ambiguous. Join
+				// every candidate to the destination so redaction fails closed.
+				sourceHash := parentTree[transition.sourcePath]
+				if sourceHash != "" {
+					for candidate, hash := range parentTree {
+						if hash == sourceHash {
+							graph.addEdge(pathHistoryNode{parent, candidate}, destination)
+						}
+					}
+				}
+			}
+			// Git cannot record renames directly. An unmatched delete/add set
+			// may therefore be a rename whose similarity was too low or whose
+			// attribution was ambiguous. Treat every endpoint as connected so
+			// a tainted lineage cannot escape through an uncertain detection.
+			for _, deleted := range unmatchedDeletes {
+				for _, added := range unmatchedAdds {
+					graph.addEdge(pathHistoryNode{parent, deleted}, pathHistoryNode{commit, added})
+				}
+			}
+		}
+	}
+	return graph.propagatedPathNames(), nil
+}
+
+func (graph *pathHistoryGraph) loadTree(ctx context.Context, repoRoot, revision string) (map[string]string, error) {
+	if tree, ok := graph.trees[revision]; ok {
+		return tree, nil
+	}
+	raw, err := gitOutput(ctx, repoRoot, false, "ls-tree", "-r", "-z", "--full-tree", revision)
+	if err != nil {
+		return nil, fmt.Errorf("inspect commit %s for path redaction: %w", revision, err)
+	}
+	tree := make(map[string]string)
+	for _, entry := range splitNUL(raw) {
+		metadata, path, ok := strings.Cut(entry, "\t")
+		fields := strings.Fields(metadata)
+		if !ok || len(fields) < 3 || path == "" {
+			return nil, fmt.Errorf("inspect commit %s for path redaction: malformed tree entry", revision)
+		}
+		tree[path] = fields[2]
+		node := pathHistoryNode{revision, path}
+		graph.addNode(node)
+		if IsSecretPath(path) {
+			graph.tainted[node] = struct{}{}
+		}
+	}
+	graph.trees[revision] = tree
+	return tree, nil
+}
+
+func (graph *pathHistoryGraph) addNode(node pathHistoryNode) {
+	if graph.edges[node] == nil {
+		graph.edges[node] = make(map[pathHistoryNode]struct{})
+	}
+}
+
+func (graph *pathHistoryGraph) addEdge(left, right pathHistoryNode) {
+	graph.addNode(left)
+	graph.addNode(right)
+	graph.edges[left][right] = struct{}{}
+	graph.edges[right][left] = struct{}{}
+}
+
+func (graph *pathHistoryGraph) propagatedPathNames() map[string]bool {
+	queue := make([]pathHistoryNode, 0, len(graph.tainted))
+	seen := make(map[pathHistoryNode]struct{}, len(graph.tainted))
+	for node := range graph.tainted {
+		queue = append(queue, node)
+		seen[node] = struct{}{}
+	}
+	paths := make(map[string]bool)
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		paths[node.path] = true
+		for adjacent := range graph.edges[node] {
+			if _, ok := seen[adjacent]; ok {
+				continue
+			}
+			seen[adjacent] = struct{}{}
+			queue = append(queue, adjacent)
+		}
+	}
+	return paths
 }
 
 // collectSecretBlobHashes taints content that appeared at a secret-looking
