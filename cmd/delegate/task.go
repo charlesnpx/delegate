@@ -269,9 +269,8 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 	if err != nil {
 		return taskRunResult{}, err
 	}
-	actualCWD := filepath.Clean(target.CWD)
-	if target.Backend != opts.Backend || actualCWD != opts.CWD {
-		return taskRunResult{}, fmt.Errorf("session %q has backend %q and cwd %q, which do not match requested --backend %q and effective --cwd %q; use --fresh to start a new session", opts.ResumeSession, target.Backend, actualCWD, opts.Backend, opts.CWD)
+	if err := validateResumeTarget(opts, target); err != nil {
+		return taskRunResult{}, err
 	}
 	session, err := c.SessionResume(ctx, client.SessionResumeParams{SessionID: opts.ResumeSession})
 	if err != nil {
@@ -324,6 +323,15 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 		return taskRunResult{}, err
 	}
 	return taskRunResult{Launch: &env, Warnings: warnings}, nil
+}
+
+func validateResumeTarget(opts taskOptions, target client.SessionInfo) error {
+	actualCWD := filepath.Clean(target.CWD)
+	requestedCWD := filepath.Clean(opts.CWD)
+	if target.Backend != opts.Backend || actualCWD != requestedCWD {
+		return fmt.Errorf("session %q has backend %q and cwd %q, which do not match requested --backend %q and effective --cwd %q; use --fresh to start a new session", opts.ResumeSession, target.Backend, actualCWD, opts.Backend, requestedCWD)
+	}
+	return nil
 }
 
 func resumableSessionInfo(ctx context.Context, c agentbusClient, stateDir, sessionID string) (client.SessionInfo, error) {

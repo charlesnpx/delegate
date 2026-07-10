@@ -128,6 +128,17 @@ func startEmbeddedSession(ctx context.Context, backend engine.Backend, opts task
 		Timeout: opts.Timeout,
 	}
 	if opts.ResumeSession != "" {
+		meta, found, err := delegateSessionMetadata(opts.StateDir, opts.ResumeSession)
+		if err != nil {
+			return nil, err
+		}
+		if !found || meta.Backend == "" || meta.CWD == "" {
+			return nil, fmt.Errorf("cannot verify backend and cwd for session %q before resume; use --fresh to start a new session", opts.ResumeSession)
+		}
+		target := client.SessionInfo{SessionID: opts.ResumeSession, Backend: meta.Backend, CWD: meta.CWD}
+		if err := validateResumeTarget(opts, target); err != nil {
+			return nil, err
+		}
 		return backend.Resume(ctx, opts.ResumeSession, sessionOpts)
 	}
 	return backend.Start(ctx, sessionOpts)

@@ -590,6 +590,50 @@ func TestTaskResumeRejectsSessionBackendOrCWDMismatch(t *testing.T) {
 	}
 }
 
+func TestEmbeddedTaskResumeRejectsSessionBackendOrCWDMismatch(t *testing.T) {
+	requestedCWD := t.TempDir()
+	otherCWD := t.TempDir()
+	for _, tc := range []struct {
+		name          string
+		actualBackend string
+		actualCWD     string
+	}{
+		{name: "backend", actualBackend: "claude", actualCWD: requestedCWD},
+		{name: "cwd", actualBackend: "codex", actualCWD: otherCWD},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			if err := saveJobMetadata("", jobMetadata{
+				JobID:     "job_embedded_resume_source",
+				Kind:      taskKind,
+				Backend:   tc.actualBackend,
+				CWD:       tc.actualCWD,
+				SessionID: "session_mismatch",
+				CreatedAt: time.Unix(1, 0).UTC(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			backend := &recordingBackend{name: "codex", sessionID: "session_mismatch", reports: []string{compliantReport()}}
+			restore := stubEmbeddedGlobals(t, "job_embedded_resume_attempt", backend)
+			defer restore()
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"task", "--backend", "codex", "--cwd", requestedCWD, "--resume-session", "session_mismatch", "--prompt", "continue", "--embedded", "--wait"}, nil, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("task succeeded, stdout = %q", stdout.String())
+			}
+			for _, want := range []string{tc.actualBackend, filepath.Clean(tc.actualCWD), "--fresh"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want actual session detail %q", stderr.String(), want)
+				}
+			}
+			if len(backend.starts) != 0 {
+				t.Fatalf("mismatched embedded session was resumed: starts=%#v", backend.starts)
+			}
+		})
+	}
+}
+
 func TestTaskHelpDocumentsResumeWaitRequirement(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"task", "--help"}, nil, &stdout, &stderr); code == 0 {
