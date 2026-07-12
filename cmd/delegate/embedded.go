@@ -143,7 +143,11 @@ func startEmbeddedSession(ctx context.Context, backend engine.Backend, opts task
 		if err := validateResumeTarget(opts, target); err != nil {
 			return nil, err
 		}
-		return backend.Resume(ctx, opts.ResumeSession, sessionOpts)
+		return backend.Resume(ctx, opts.ResumeSession, engine.SessionOpts{
+			CWD:     opts.CWD,
+			Write:   opts.Write,
+			Timeout: opts.Timeout,
+		})
 	}
 	return backend.Start(ctx, sessionOpts)
 }

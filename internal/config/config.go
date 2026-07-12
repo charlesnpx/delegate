@@ -114,27 +114,43 @@ func Save(cfg Config) error {
 		return err
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, configDirMode); err != nil {
-		return fmt.Errorf("create delegate config directory %q: %w", dir, err)
+	_, err = os.Lstat(dir)
+	dirCreated := errors.Is(err, os.ErrNotExist)
+	if err != nil && !dirCreated {
+		return fmt.Errorf("inspect delegate config directory %q: %w", dir, err)
 	}
-	if err := os.Chmod(dir, configDirMode); err != nil {
-		return fmt.Errorf("set delegate config directory mode %q: %w", dir, err)
+	if dirCreated {
+		if err := os.MkdirAll(dir, configDirMode); err != nil {
+			return fmt.Errorf("create delegate config directory %q: %w", dir, err)
+		}
 	}
-	info, err := os.Stat(dir)
+	// Symlinked config directories are deliberate; their pre-existing permissions
+	// are the user's responsibility.
+	resolvedDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return fmt.Errorf("stat delegate config directory %q: %w", dir, err)
+		return fmt.Errorf("resolve delegate config directory %q: %w", dir, err)
+	}
+	info, err := os.Stat(resolvedDir)
+	if err != nil {
+		return fmt.Errorf("stat delegate config directory %q: %w", resolvedDir, err)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("delegate config directory %q is not a directory", dir)
+		return fmt.Errorf("delegate config directory %q is not a directory", resolvedDir)
 	}
+	if dirCreated {
+		if err := os.Chmod(resolvedDir, configDirMode); err != nil {
+			return fmt.Errorf("set delegate config directory mode %q: %w", resolvedDir, err)
+		}
+	}
+	path = filepath.Join(resolvedDir, filepath.Base(path))
 
 	var encoded strings.Builder
 	if err := toml.NewEncoder(&encoded).Encode(toDisk(cfg)); err != nil {
 		return fmt.Errorf("encode delegate config %q: %w", path, err)
 	}
-	tmp, err := os.CreateTemp(dir, ".config.toml-*")
+	tmp, err := os.CreateTemp(resolvedDir, ".config.toml-*")
 	if err != nil {
-		return fmt.Errorf("create delegate config temporary file in %q: %w", dir, err)
+		return fmt.Errorf("create delegate config temporary file in %q: %w", resolvedDir, err)
 	}
 	tmpPath := tmp.Name()
 	cleanup := true
@@ -159,16 +175,16 @@ func Save(cfg Config) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("replace delegate config %q: %w", path, err)
 	}
-	dirFile, err := os.Open(dir)
+	dirFile, err := os.Open(resolvedDir)
 	if err != nil {
-		return fmt.Errorf("open delegate config directory %q for sync: %w", dir, err)
+		return fmt.Errorf("open delegate config directory %q for sync: %w", resolvedDir, err)
 	}
 	if err := dirFile.Sync(); err != nil {
 		_ = dirFile.Close()
-		return fmt.Errorf("sync delegate config directory %q: %w", dir, err)
+		return fmt.Errorf("sync delegate config directory %q: %w", resolvedDir, err)
 	}
 	if err := dirFile.Close(); err != nil {
-		return fmt.Errorf("close delegate config directory %q: %w", dir, err)
+		return fmt.Errorf("close delegate config directory %q: %w", resolvedDir, err)
 	}
 	cleanup = false
 	return nil

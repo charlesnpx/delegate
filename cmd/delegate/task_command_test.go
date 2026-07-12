@@ -15,6 +15,7 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/delegate/internal/config"
 	"github.com/charlesnpx/delegate/internal/handoff"
 	"github.com/charlesnpx/delegate/internal/policy"
 )
@@ -556,6 +557,151 @@ func TestTaskResumeSessionUsesResumeAndTurnStart(t *testing.T) {
 	}
 }
 
+func TestTaskResumeUsesSessionModelEffortAndSkipsConfigDefaults(t *testing.T) {
+	cwd := t.TempDir()
+	fake := &fakeAgentbusClient{
+		hello:        helloWithCapabilities(),
+		sessions:     []client.SessionInfo{{SessionID: "session_configured_resume", Backend: "codex", CWD: cwd}},
+		resumeResult: client.SessionStartResult{SessionID: "session_configured_resume", Backend: "codex"},
+		turnResult:   client.TurnStartResult{TurnID: "turn_configured_resume", JobID: "job_configured_resume", SessionID: "session_configured_resume"},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	if err := config.Save(config.Config{Overridable: false, Backend: config.Backends{
+		Codex: config.Defaults{Model: "configured-model", Effort: "configured-effort"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"task", "--backend", "codex", "--cwd", cwd, "--resume-session", "session_configured_resume", "--prompt", "continue", "--wait"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+	}
+	if len(fake.submits) != 0 || len(fake.resumes) != 1 || len(fake.turns) != 1 {
+		t.Fatalf("resume calls: submits=%d resumes=%d turns=%d", len(fake.submits), len(fake.resumes), len(fake.turns))
+	}
+
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("resume envelope JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	assertSessionModelEffort(t, env.Model, env.Effort)
+	meta, found, err := loadJobMetadata("", "job_configured_resume")
+	if err != nil || !found {
+		t.Fatalf("loadJobMetadata() = %#v, %v, %v", meta, found, err)
+	}
+	assertSessionModelEffort(t, meta.Model, meta.Effort)
+}
+
+func TestEmbeddedTaskResumeUsesSessionModelEffortAndClearsSessionOpts(t *testing.T) {
+	cwd := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := config.Save(config.Config{Overridable: false, Backend: config.Backends{
+		Codex: config.Defaults{Model: "configured-model", Effort: "configured-effort"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveJobMetadata("", jobMetadata{
+		JobID:     "job_embedded_configured_resume_source",
+		Kind:      taskKind,
+		Backend:   "codex",
+		CWD:       cwd,
+		SessionID: "session_embedded_configured_resume",
+		CreatedAt: time.Unix(1, 0).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &recordingBackend{name: "codex", sessionID: "session_embedded_configured_resume", reports: []string{compliantReport()}}
+	restore := stubEmbeddedGlobals(t, "job_embedded_configured_resume", backend)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"task", "--backend", "codex", "--cwd", cwd, "--resume-session", "session_embedded_configured_resume", "--prompt", "continue", "--embedded", "--wait"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+	}
+	if len(backend.starts) != 1 {
+		t.Fatalf("embedded starts = %#v, want one resume", backend.starts)
+	}
+	if backend.starts[0].Model != "" || backend.starts[0].Effort != "" {
+		t.Fatalf("embedded resume SessionOpts = %#v, want empty model and effort", backend.starts[0])
+	}
+
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("embedded resume envelope JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	assertSessionModelEffort(t, env.Model, env.Effort)
+	meta, found, err := loadJobMetadata("", "job_embedded_configured_resume")
+	if err != nil || !found {
+		t.Fatalf("loadJobMetadata() = %#v, %v, %v", meta, found, err)
+	}
+	assertSessionModelEffort(t, meta.Model, meta.Effort)
+}
+
+func TestTaskResumeRejectsExplicitModelOrEffort(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		embedded   bool
+		resumeArgs []string
+		override   []string
+	}{
+		{name: "daemon_resume_model", resumeArgs: []string{"--resume"}, override: []string{"--model", "different-model"}},
+		{name: "daemon_resume_session_effort", resumeArgs: []string{"--resume-session", "session_override"}, override: []string{"--effort", "different-effort"}},
+		{name: "embedded_resume_model", embedded: true, resumeArgs: []string{"--resume"}, override: []string{"--model", "different-model"}},
+		{name: "embedded_resume_session_effort", embedded: true, resumeArgs: []string{"--resume-session", "session_override"}, override: []string{"--effort", "different-effort"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "continue", "--wait"}
+			args = append(args, tc.resumeArgs...)
+			args = append(args, tc.override...)
+
+			var fake *fakeAgentbusClient
+			var backend *recordingBackend
+			if tc.embedded {
+				t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				backend = &recordingBackend{name: "codex", sessionID: "session_override", reports: []string{compliantReport()}}
+				restore := stubEmbeddedGlobals(t, "job_resume_override", backend)
+				defer restore()
+				args = append(args, "--embedded")
+			} else {
+				fake = &fakeAgentbusClient{hello: helloWithCapabilities()}
+				restore := stubAgentbusGlobals(t, fake)
+				defer restore()
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := run(args, nil, &stdout, &stderr); code == 0 {
+				t.Fatalf("task succeeded, stdout = %q", stdout.String())
+			}
+			if want := "model/effort cannot be changed when resuming a session; the session keeps the values it was started with"; !strings.Contains(stderr.String(), want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+			}
+			if fake != nil && (len(fake.submits) != 0 || len(fake.resumes) != 0 || len(fake.turns) != 0) {
+				t.Fatalf("daemon calls after rejected resume override: submits=%d resumes=%d turns=%d", len(fake.submits), len(fake.resumes), len(fake.turns))
+			}
+			if backend != nil && len(backend.starts) != 0 {
+				t.Fatalf("embedded starts after rejected resume override: %#v", backend.starts)
+			}
+		})
+	}
+}
+
+func assertSessionModelEffort(t *testing.T, model, effort config.DimensionResolution) {
+	t.Helper()
+	for name, dimension := range map[string]config.DimensionResolution{
+		"model":  model,
+		"effort": effort,
+	} {
+		if dimension.Source != "session" || dimension.Requested != "" || dimension.Effective != "" {
+			t.Fatalf("%s resolution = %#v, want only source session", name, dimension)
+		}
+	}
+}
+
 func TestTaskResumeMetadataFailureAfterTurnStartEmitsLaunchAndPreservesInput(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "delegate")
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
@@ -610,6 +756,7 @@ func TestTaskResumeMetadataFailureAfterTurnStartEmitsLaunchAndPreservesInput(t *
 	if !result.Submitted || result.Launch == nil || result.Launch.JobID != "job_durable_resume" || result.Terminal != nil {
 		t.Fatalf("result = %#v, want real post-TurnStart launch", result)
 	}
+	assertSessionModelEffort(t, result.Launch.Model, result.Launch.Effort)
 	if len(result.Warnings) == 0 || !strings.Contains(strings.Join(result.Warnings, "\n"), "persist launched job metadata for job_durable_resume") {
 		t.Fatalf("warnings = %#v, want metadata durability warning", result.Warnings)
 	}
@@ -622,6 +769,7 @@ func TestTaskResumeMetadataFailureAfterTurnStartEmitsLaunchAndPreservesInput(t *
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &envelope); err != nil || envelope.JobID != "job_durable_resume" {
 		t.Fatalf("launch envelope = %#v, err=%v, raw=%q", envelope, err, stdout.String())
 	}
+	assertSessionModelEffort(t, envelope.Model, envelope.Effort)
 
 	inputs, err := filepath.Glob(filepath.Join(stateDir, "job-input.*.prompt"))
 	if err != nil || len(inputs) != 1 {
@@ -657,6 +805,7 @@ func TestTaskResumeMetadataFailureAfterTurnStartEmitsLaunchAndPreservesInput(t *
 	if provisional.JobID == "" || provisional.AdoptedJobID != "job_durable_resume" {
 		t.Fatalf("provisional metadata = %#v, want adopted job mapping", provisional)
 	}
+	assertSessionModelEffort(t, provisional.Model, provisional.Effort)
 	provisional.CreatedAt = time.Now().Add(-2 * provisionalMetadataAdoptionThreshold)
 	if err := saveJobMetadata(stateDir, provisional); err != nil {
 		t.Fatal(err)

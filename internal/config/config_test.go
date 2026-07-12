@@ -94,6 +94,59 @@ func TestSaveRoundTripUsesPrivateAtomicDestination(t *testing.T) {
 	}
 }
 
+func TestSaveAllowsSymlinkedConfigDirectoryWithoutChangingTargetPermissions(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "delegate-config-target")
+	if err := os.MkdirAll(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "delegate")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", root)
+	cfg := Config{Overridable: false, Backend: Backends{
+		Codex: Defaults{Model: "gpt-test", Effort: "high"},
+	}}
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	resolvedPath := filepath.Join(target, "config.toml")
+	fileInfo, err := os.Stat(resolvedPath)
+	if err != nil {
+		t.Fatalf("config was not written to symlink target: %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != configFileMode {
+		t.Fatalf("config mode = %o, want %o", got, configFileMode)
+	}
+	targetInfo, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := targetInfo.Mode().Perm(); got != 0o750 {
+		t.Fatalf("pre-existing symlink target mode = %o, want 750", got)
+	}
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Overridable || loaded.Backend.Codex.Model != "gpt-test" || loaded.Backend.Codex.Effort != "high" {
+		t.Fatalf("round-trip config = %#v", loaded)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".config.toml-") {
+			t.Fatalf("atomic temporary file left behind: %s", entry.Name())
+		}
+	}
+}
+
 func TestAccessorsValidateKeysAndUnset(t *testing.T) {
 	cfg := Config{Overridable: true}
 	if err := cfg.Set(KeyClaudeModel, "opus"); err != nil {
