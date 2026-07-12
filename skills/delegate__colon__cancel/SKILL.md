@@ -1,12 +1,12 @@
 ---
-name: claude:cancel
+name: delegate:cancel
 description: Cancel a delegated job after confirming it is stalled through delegate.
-version: v0.3.0
+version: v0.4.0
 ---
 
-# claude:cancel
+# delegate:cancel
 
-Run the delegate CLI directly for a Claude Code job. Do not replace the job with a local answer.
+Run the delegate CLI directly for a delegated job. Do not replace the job with a local answer.
 
 ## Command
 

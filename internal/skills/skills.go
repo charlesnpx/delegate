@@ -16,7 +16,7 @@ import (
 
 const (
 	// Version is the content version for the generated skill prose.
-	Version = "v0.3.0"
+	Version = "v0.4.0"
 
 	TargetClaude = "claude"
 	TargetCodex  = "codex"
@@ -44,12 +44,21 @@ type File struct {
 	SHA256 string `json:"sha256,omitempty"`
 }
 
+// Removal is one legacy skill file removed or planned for removal.
+type Removal struct {
+	Path string `json:"path"`
+}
+
+// Result is the installed and removed skill files for one target.
+type Result struct {
+	Files   []File
+	Removed []Removal
+}
+
 type skillSpec struct {
 	Name         string
 	Kind         string
 	Backend      string
-	OtherAgent   string
-	HostAgent    string
 	Action       string
 	Description  string
 	Command      string
@@ -61,11 +70,30 @@ type renderData struct {
 	Name        string
 	Kind        string
 	Backend     string
-	OtherAgent  string
-	HostAgent   string
 	Action      string
 	Description string
 	Command     string
+}
+
+var supportedBackends = []string{"claude", "codex"} // Append gemini/grok when agentbus adapters ship.
+
+var legacyNamesByTarget = map[string][]string{
+	TargetClaude: {
+		"codex:rescue",
+		"codex:review",
+		"codex:adversarial-review",
+		"codex:status",
+		"codex:result",
+		"codex:cancel",
+	},
+	TargetCodex: {
+		"claude:rescue",
+		"claude:review",
+		"claude:adversarial-review",
+		"claude:status",
+		"claude:result",
+		"claude:cancel",
+	},
 }
 
 var (
@@ -124,15 +152,12 @@ func Generate(target string) ([]GeneratedSkill, error) {
 
 // SourceFiles returns all source fixture files keyed by escaped source path.
 func SourceFiles() (map[string]string, error) {
-	specs := append(claudeSpecs(), codexSpecs()...)
-	specs = append(specs, setupSpec(TargetClaude), configSpec(TargetClaude))
-	seen := map[string]bool{}
+	specs, err := targetSpecs(TargetClaude)
+	if err != nil {
+		return nil, err
+	}
 	files := map[string]string{}
 	for _, spec := range specs {
-		if seen[spec.Name] {
-			continue
-		}
-		seen[spec.Name] = true
 		content, err := render(spec)
 		if err != nil {
 			return nil, err
@@ -204,26 +229,26 @@ func TargetRoot(target, installRoot string, env func(string) string, homeDir fun
 }
 
 // Plan returns the files that would exist for target.
-func Plan(target, installRoot string, env func(string) string, homeDir func() (string, error)) (map[string][]File, error) {
+func Plan(target, installRoot string, env func(string) string, homeDir func() (string, error)) (map[string]Result, error) {
 	return apply(target, installRoot, env, homeDir, "plan")
 }
 
 // Install writes generated skills for target.
-func Install(target, installRoot string, env func(string) string, homeDir func() (string, error)) (map[string][]File, error) {
+func Install(target, installRoot string, env func(string) string, homeDir func() (string, error)) (map[string]Result, error) {
 	return apply(target, installRoot, env, homeDir, "install")
 }
 
 // Uninstall removes generated skill directories for target.
-func Uninstall(target, installRoot string, env func(string) string, homeDir func() (string, error)) (map[string][]File, error) {
+func Uninstall(target, installRoot string, env func(string) string, homeDir func() (string, error)) (map[string]Result, error) {
 	return apply(target, installRoot, env, homeDir, "uninstall")
 }
 
-func apply(target, installRoot string, env func(string) string, homeDir func() (string, error), op string) (map[string][]File, error) {
+func apply(target, installRoot string, env func(string) string, homeDir func() (string, error), op string) (map[string]Result, error) {
 	targets, err := expandTargets(target)
 	if err != nil {
 		return nil, err
 	}
-	result := map[string][]File{}
+	result := map[string]Result{}
 	for _, targetName := range targets {
 		root, err := TargetRoot(targetName, installRoot, env, homeDir)
 		if err != nil {
@@ -254,18 +279,40 @@ func apply(target, installRoot string, env func(string) string, homeDir func() (
 			default:
 				return nil, fmt.Errorf("unsupported operation %q", op)
 			}
-			result[targetName] = append(result[targetName], file)
+			targetResult := result[targetName]
+			targetResult.Files = append(targetResult.Files, file)
+			result[targetName] = targetResult
+		}
+		for _, legacyName := range legacyNamesForTarget(targetName) {
+			dir := filepath.Join(root, legacyName)
+			removal := Removal{Path: filepath.Join(dir, "SKILL.md")}
+			switch op {
+			case "plan":
+			case "install", "uninstall":
+				if err := os.RemoveAll(dir); err != nil {
+					return nil, err
+				}
+			default:
+				return nil, fmt.Errorf("unsupported operation %q", op)
+			}
+			targetResult := result[targetName]
+			targetResult.Removed = append(targetResult.Removed, removal)
+			result[targetName] = targetResult
 		}
 	}
 	return result, nil
 }
 
+func legacyNamesForTarget(target string) []string {
+	return append([]string(nil), legacyNamesByTarget[target]...)
+}
+
 func targetSpecs(target string) ([]skillSpec, error) {
 	switch target {
 	case TargetClaude:
-		return append(claudeSpecs(), setupSpec(TargetClaude), configSpec(TargetClaude)), nil
+		return namespaceSpecs(TargetClaude), nil
 	case TargetCodex:
-		return append(codexSpecs(), setupSpec(TargetCodex), configSpec(TargetCodex)), nil
+		return namespaceSpecs(TargetCodex), nil
 	default:
 		return nil, fmt.Errorf("unsupported skill target %q", target)
 	}
@@ -282,59 +329,57 @@ func expandTargets(target string) ([]string, error) {
 	}
 }
 
-func claudeSpecs() []skillSpec {
-	return crossAgentSpecs(TargetClaude, "codex", "Codex", "Claude Code")
+func namespaceSpecs(target string) []skillSpec {
+	specs := make([]skillSpec, 0, len(supportedBackends)*3+5)
+	for _, backend := range supportedBackends {
+		specs = append(specs, launchSpec(target, backend))
+	}
+	for _, backend := range supportedBackends {
+		specs = append(specs, reviewSpec(target, backend, "review"))
+	}
+	for _, backend := range supportedBackends {
+		specs = append(specs, reviewSpec(target, backend, "adversarial-review"))
+	}
+	specs = append(specs,
+		jobSpec(target, "status", "Check a delegated job status", `delegate status --job "$JOB_ID" --json`),
+		jobSpec(target, "result", "Fetch and present a delegated job result", `delegate result --job "$JOB_ID" --json`),
+		jobSpec(target, "cancel", "Cancel a delegated job after confirming it is stalled", `delegate cancel --job "$JOB_ID" --json`),
+		setupSpec(target),
+		configSpec(target),
+	)
+	return specs
 }
 
-func codexSpecs() []skillSpec {
-	return crossAgentSpecs(TargetCodex, "claude", "Claude Code", "Codex")
-}
-
-func crossAgentSpecs(target, backend, otherAgent, hostAgent string) []skillSpec {
-	prefix := backend
-	return []skillSpec{
-		{
-			Name:         prefix + ":rescue",
-			Kind:         KindLaunch,
-			Backend:      backend,
-			OtherAgent:   otherAgent,
-			HostAgent:    hostAgent,
-			Description:  fmt.Sprintf("Delegate a rescue task from %s to %s through delegate and return the launch envelope verbatim.", hostAgent, otherAgent),
-			SourceTarget: target,
-		},
-		reviewSpec(target, prefix+":review", backend, otherAgent, hostAgent, "review"),
-		reviewSpec(target, prefix+":adversarial-review", backend, otherAgent, hostAgent, "adversarial-review"),
-		jobSpec(target, prefix+":status", backend, otherAgent, hostAgent, "status", "Check a delegated job status", fmt.Sprintf("delegate status --job \"$JOB_ID\" --json")),
-		jobSpec(target, prefix+":result", backend, otherAgent, hostAgent, "result", "Fetch and present a delegated job result", fmt.Sprintf("delegate result --job \"$JOB_ID\" --json")),
-		jobSpec(target, prefix+":cancel", backend, otherAgent, hostAgent, "cancel", "Cancel a delegated job after confirming it is stalled", fmt.Sprintf("delegate cancel --job \"$JOB_ID\" --json")),
+func launchSpec(target, backend string) skillSpec {
+	return skillSpec{
+		Name:         "delegate:rescue:" + backend,
+		Kind:         KindLaunch,
+		Backend:      backend,
+		Description:  fmt.Sprintf("Delegate a rescue task to %s through delegate and return the launch envelope verbatim.", backend),
+		SourceTarget: target,
 	}
 }
 
-func reviewSpec(target, name, backend, otherAgent, hostAgent, command string) skillSpec {
+func reviewSpec(target, backend, command string) skillSpec {
 	label := "code review"
 	if command == "adversarial-review" {
 		label = "refute-first adversarial code review"
 	}
 	return skillSpec{
-		Name:         name,
+		Name:         "delegate:" + command + ":" + backend,
 		Kind:         KindReview,
 		Backend:      backend,
-		OtherAgent:   otherAgent,
-		HostAgent:    hostAgent,
 		Action:       command,
-		Description:  fmt.Sprintf("Delegate a %s from %s to %s through sanitized delegate review context and return the launch envelope verbatim.", label, hostAgent, otherAgent),
+		Description:  fmt.Sprintf("Delegate a %s to %s through sanitized delegate review context and return the launch envelope verbatim.", label, backend),
 		Command:      command,
 		SourceTarget: target,
 	}
 }
 
-func jobSpec(target, name, backend, otherAgent, hostAgent, action, description, command string) skillSpec {
+func jobSpec(target, action, description, command string) skillSpec {
 	return skillSpec{
-		Name:         name,
+		Name:         "delegate:" + action,
 		Kind:         KindJobControl,
-		Backend:      backend,
-		OtherAgent:   otherAgent,
-		HostAgent:    hostAgent,
 		Action:       action,
 		Description:  description + " through delegate.",
 		Command:      command,
@@ -367,8 +412,6 @@ func render(spec skillSpec) (string, error) {
 		Name:        spec.Name,
 		Kind:        spec.Kind,
 		Backend:     spec.Backend,
-		OtherAgent:  spec.OtherAgent,
-		HostAgent:   spec.HostAgent,
 		Action:      spec.Action,
 		Description: spec.Description,
 		Command:     spec.Command,
@@ -426,7 +469,7 @@ version: {{.Version}}
 
 # {{.Name}}
 
-Use this when {{.HostAgent}} should delegate a rescue task to {{.OtherAgent}} through "delegate" and return immediately with the launch envelope.
+Use this when an orchestrator should delegate a rescue task to the {{.Backend}} backend through "delegate" and return immediately with the launch envelope.
 
 ## Preflight
 
@@ -435,13 +478,19 @@ Before launching, check the subagent context and stop with a clear setup error i
 Superseding escape hatch: if the requester explicitly asks you to perform the task directly and locally, and delegate is unavailable in this environment, comply locally. That explicit request supersedes this skill's delegation trigger; do not refuse merely because delegate cannot run.
 
 - no-fork support: the job must run through "delegate task"/agentbus supervision, not an unmanaged background shell or a local substitute answer.
-- shared fs: {{.HostAgent}}, "delegate", agentbus, and {{.OtherAgent}} can see the same repo path and delegate state.
+- shared fs: the parent harness, "delegate", agentbus, and the {{.Backend}} backend can see the same repo path and delegate state.
 - exec: "delegate", "agentbus", and the {{.Backend}} backend executable are runnable.
 - repo+state write access: the target repo and delegate/agentbus state roots are writable when the task needs writes.
 - stdin handoff: sensitive prompt text can be piped to "delegate handoff create --json".
 - backend reachability: "delegate setup --json" shows agentbus capabilities and {{.Backend}} backend availability.
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
+
+When the parent uses the same harness as the selected backend, this launches a fresh supervised session—not a native subagent. It has its own job record, contract stamps, and read-only profile.
+
+## Parent Audit Linkage
+
+Delegate records the originating skill plus best-effort parent session identity and depth in its job tags and launch/terminal envelopes. If a harness cannot expose a parent identity through its environment, pass "--parent-client <client>" and "--parent-session <id>"; explicit values override automatic capture.
 
 ## Launch
 
@@ -481,7 +530,7 @@ version: {{.Version}}
 
 # {{.Name}}
 
-Use this when {{.HostAgent}} should delegate a read-only {{if eq .Action "adversarial-review"}}refute-first adversarial {{end}}code review to {{.OtherAgent}} through delegate's sanitized review-context pipeline and return immediately with the launch envelope.
+Use this when an orchestrator should delegate a read-only {{if eq .Action "adversarial-review"}}refute-first adversarial {{end}}code review to the {{.Backend}} backend through delegate's sanitized review-context pipeline and return immediately with the launch envelope.
 
 ## Preflight
 
@@ -490,13 +539,19 @@ Before launching, check the subagent context and stop with a clear setup error i
 Superseding escape hatch: if the requester explicitly asks for a direct local review and delegate is unavailable in this environment, perform the review locally. That explicit request supersedes this skill's delegation trigger; do not refuse merely because delegate cannot run.
 
 - no-fork support: the job must run through "delegate {{.Action}}"/agentbus supervision, not an unmanaged background shell or a local substitute review.
-- shared fs: {{.HostAgent}}, "delegate", agentbus, and {{.OtherAgent}} can see the delegate state path. Using the private workspace as backend cwd is not OS isolation; a same-user backend can still read repository or other filesystem files when process permissions allow it.
+- shared fs: the parent harness, "delegate", agentbus, and the {{.Backend}} backend can see the delegate state path. Using the private workspace as backend cwd is not OS isolation; a same-user backend can still read repository or other filesystem files when process permissions allow it.
 - exec: "delegate", "agentbus", "git", and the {{.Backend}} backend executable are runnable.
 - repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate applies path/history redaction and a final content scan to every assembled inline or spilled diff payload.
 - cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
 - backend reachability: "delegate setup --json" shows agentbus capabilities and {{.Backend}} backend availability.
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
+
+When the parent uses the same harness as the selected backend, this launches a fresh supervised session—not a native subagent. It has its own job record, contract stamps, and read-only profile.
+
+## Parent Audit Linkage
+
+Delegate records the originating skill plus best-effort parent session identity and depth in its job tags and launch/terminal envelopes. If a harness cannot expose a parent identity through its environment, pass "--parent-client <client>" and "--parent-session <id>"; explicit values override automatic capture.
 
 Threat model: v0.1 is accident prevention, not a security boundary against an adversarial repository or history. Deliberate history shuffles such as delete-and-recreate sequences intended to evade the heuristics are out of scope. v0.2 OS isolation is the boundary fix for that class.
 
@@ -538,7 +593,7 @@ version: {{.Version}}
 
 # {{.Name}}
 
-Run the delegate CLI directly for a {{.OtherAgent}} job. Do not replace the job with a local answer.
+Run the delegate CLI directly for a delegated job. Do not replace the job with a local answer.
 
 ## Command
 
@@ -615,6 +670,8 @@ delegate config set <key> <value>
 ~~~
 
 Delegate user-config defaults apply to all delegated tasks. The supported keys are "overridable", "backend.claude.model", "backend.claude.effort", "backend.codex.model", and "backend.codex.effort". Use "delegate config unset <key>" to remove a value.
+
+The supported delegation backends are explicitly "claude" and "codex".
 
 When "overridable=false", configured model and effort values pin their respective dimensions against per-task "-model" and "-effort" flags. This is an ergonomics control, not a security boundary: an agent that can run "delegate config set" can change the setting.
 

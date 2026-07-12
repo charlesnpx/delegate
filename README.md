@@ -1,6 +1,6 @@
 # delegate
 
-`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.1.1 ships `task`, rescue, sanitized review, adversarial-review, and job-control workflows in both directions.
+`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.4.0 ships `task`, rescue, sanitized review, adversarial-review, job-control workflows, and parent-session audit linkage.
 
 agentbus owns execution, supervision, and generic policy enforcement. delegate owns the delegation-specific data and decisions it passes to agentbus: the embedded `delegate-report` contract, the delegate-contract digest, policy tiers, handoff lifecycle, skill matrix, and result envelopes.
 
@@ -38,12 +38,12 @@ delegate handoff create --json
 delegate task --backend claude|codex [--background|--wait] [--json] [--cwd <abs>]
               [(--resume|--resume-session <id>) --wait|--fresh] [--model <model>] [--effort <effort>]
               [--timeout <duration>] [--write] [--strict-contract|--no-contract]
-              [--origin <skill>] [--embedded] [prompt source]
+              [--origin <skill>] [--parent-client <client>] [--parent-session <id>] [--embedded] [prompt source]
 
 delegate review|adversarial-review --backend claude|codex [--background|--wait] [--json] [--cwd <abs>]
               [--base <ref>] [--scope auto|working-tree|branch] [--allow-live-repo-read]
               [--model <model>] [--effort <effort>] [--timeout <duration>]
-              [--strict-contract] [--origin <skill>] [--embedded]
+              [--strict-contract] [--origin <skill>] [--parent-client <client>] [--parent-session <id>] [--embedded]
 
 delegate status [--job <id>] [--wait|--probe] [--json]
 delegate result --job <id> [--wait] [--json]
@@ -67,7 +67,7 @@ HANDOFF_PATH=$(
     python3 -c 'import json, sys; print(json.load(sys.stdin)["handoff_path"])'
 )
 
-delegate task --backend codex --origin codex:rescue --cwd "$PWD" \
+delegate task --backend codex --origin delegate:rescue:codex --cwd "$PWD" \
   --handoff-prompt-file "$HANDOFF_PATH" --background --json
 ```
 
@@ -93,10 +93,12 @@ The source directories escape `:` as `__colon__`; the installer decodes the name
 
 | Installed for | Skill names | Purpose |
 | --- | --- | --- |
-| Claude Code (`~/.claude/skills`) | `codex:rescue`, `codex:review`, `codex:adversarial-review`, `codex:status`, `codex:result`, `codex:cancel`, `delegate:setup` | Delegate rescue and review work to Codex and control the returned job. |
-| Codex (`${CODEX_HOME:-~/.codex}/skills`) | `claude:rescue`, `claude:review`, `claude:adversarial-review`, `claude:status`, `claude:result`, `claude:cancel`, `delegate:setup` | Delegate rescue and review work to Claude Code and control the returned job. |
+| Claude Code (`~/.claude/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:review:claude`, `delegate:review:codex`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:status`, `delegate:result`, `delegate:cancel`, `delegate:setup`, `delegate:config` | Launch either supported backend and control any delegated job. |
+| Codex (`${CODEX_HOME:-~/.codex}/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:review:claude`, `delegate:review:codex`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:status`, `delegate:result`, `delegate:cancel`, `delegate:setup`, `delegate:config` | Launch either supported backend and control any delegated job. |
 
 Launch skills preflight shared filesystem and state access, no-fork execution, agentbus capabilities, and target-backend reachability. Rescue skills launch through `delegate task`; review skills launch through the sanitized `delegate review` commands. All return the launch envelope verbatim and never add `--no-contract`. Job-control skills use the same status, result, cancellation, evidence-preservation, and no-substitute-answer discipline. Review prose requires findings ordered by severity, preservation of evidence labels, and no automatic fixes after review.
+
+v0.4.0 is a breaking namespace rename. On install or upgrade, the managed installer removes the legacy `codex:{rescue,review,adversarial-review,status,result,cancel}` names from Claude Code and the corresponding `claude:{...}` names from Codex; `--plan --json`, `--install --json`, and `--uninstall --json` report them in each target's additive `removed` array (entries of `{"path": ...}`); the `files` array contains only installed skill files.
 
 ## Contract tiers
 
@@ -110,7 +112,7 @@ Launch skills preflight shared filesystem and state access, no-fork execution, a
 
 ## Envelope reference
 
-Every envelope has `schema: 1` and `sha256`, where `sha256` is the SHA-256 of canonical JSON for that envelope with its own hash field excluded. `result_sha256` is agentbus's SHA-256 over the raw final assistant message bytes.
+Every envelope has `schema: 1` and `sha256`, where `sha256` is the SHA-256 of canonical JSON for that envelope with its own hash field excluded. `result_sha256` is agentbus's SHA-256 over the raw final assistant message bytes. When captured, the additive `origin` block carries `skill`, `parent_client`, `parent_session_id`, `parent_agent`, and `depth`; it is absent for jobs with no recorded linkage. Claude Code capture reads `CLAUDECODE=1`, `CLAUDE_CODE_SESSION_ID`, and `AI_AGENT`. Codex has no confirmed offline parent-session environment signal, so use `--parent-client` and `--parent-session` there when needed. `DELEGATE_DEPTH` is incremented for the recorded audit tag; propagation into the spawned backend is not yet supported.
 
 Launch envelopes are returned by a non-waiting task:
 
@@ -172,7 +174,7 @@ While a job is outstanding, poll `delegate status --job <id>` every 2–5 minute
 GOCACHE=/private/tmp/delegate-gocache go test -race ./...
 GOCACHE=/private/tmp/delegate-gocache go vet ./...
 bash -n install-skill.sh scripts/*.sh
-scripts/release-check.sh v0.1.1
+scripts/release-check.sh v0.4.0
 ```
 
 The release check requires a clean worktree, including no modified tracked files and no untracked files outside ignored paths. Manually inspect the same gate with `git status --short --untracked-files=all`. It also requires the requested tag to point exactly at `HEAD`, requires `VERSION` to match `v<version>`, JSON-decodes installer and CLI output, verifies every staged binary/skill hash, and confirms the staged binary reports the release version. `--allow-dirty` is an unsafe escape hatch and always prints a loud warning when used.

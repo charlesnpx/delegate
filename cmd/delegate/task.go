@@ -46,6 +46,9 @@ type taskOptions struct {
 	StrictContract    bool
 	NoContract        bool
 	Origin            string
+	ParentClient      optionalStringFlag
+	ParentSession     optionalStringFlag
+	AuditOrigin       envelopeOrigin
 	Embedded          bool
 	Prompt            optionalStringFlag
 	PromptFile        string
@@ -173,6 +176,8 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	fs.BoolVar(&opts.StrictContract, "strict-contract", false, "enable corrective retry")
 	fs.BoolVar(&opts.NoContract, "no-contract", false, "disable contract enforcement")
 	fs.StringVar(&opts.Origin, "origin", "", "originating skill")
+	fs.Var(&opts.ParentClient, "parent-client", "explicit parent client for audit linkage")
+	fs.Var(&opts.ParentSession, "parent-session", "explicit parent session id for audit linkage")
 	fs.BoolVar(&opts.Embedded, "embedded", false, "run through the embedded engine path")
 	fs.Var(&opts.Prompt, "prompt", handoff.PromptFlagUsage)
 	fs.StringVar(&opts.PromptFile, "prompt-file", "", "read prompt from file")
@@ -245,6 +250,7 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	if stdin == nil {
 		stdin = os.Stdin
 	}
+	opts.AuditOrigin = captureTaskOrigin(opts.Origin, opts.ParentClient, opts.ParentSession, nil)
 	return opts, nil
 }
 
@@ -292,7 +298,7 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 	input, warnings = reassociateSubmittedJobInput(input, submitted.JobID, warnings)
 	if warning, err := persistLaunchedJobMetadata(opts, input, submitted.JobID, contractKind); err != nil {
 		warnings = append(warnings, err.Error())
-		env, envelopeErr := newLaunchEnvelope(submitted.JobID, submitted.State, taskModelEffort(opts))
+		env, envelopeErr := newLaunchEnvelopeWithOrigin(submitted.JobID, submitted.State, taskEnvelopeOrigin(opts), taskModelEffort(opts))
 		if envelopeErr != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, envelopeErr
 		}
@@ -320,7 +326,7 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 		}
 		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
 	}
-	env, err := newLaunchEnvelope(submitted.JobID, submitted.State, taskModelEffort(opts))
+	env, err := newLaunchEnvelopeWithOrigin(submitted.JobID, submitted.State, taskEnvelopeOrigin(opts), taskModelEffort(opts))
 	if err != nil {
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
@@ -373,7 +379,7 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 	input, warnings = reassociateSubmittedJobInput(input, started.JobID, warnings)
 	if warning, err := persistLaunchedJobMetadata(opts, input, started.JobID, contractKind); err != nil {
 		warnings = append(warnings, err.Error())
-		env, envelopeErr := newLaunchEnvelope(started.JobID, engine.StateRunning, taskModelEffort(opts))
+		env, envelopeErr := newLaunchEnvelopeWithOrigin(started.JobID, engine.StateRunning, taskEnvelopeOrigin(opts), taskModelEffort(opts))
 		if envelopeErr != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, envelopeErr
 		}
@@ -401,7 +407,7 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 		}
 		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
 	}
-	env, err := newLaunchEnvelope(started.JobID, engine.StateRunning, taskModelEffort(opts))
+	env, err := newLaunchEnvelopeWithOrigin(started.JobID, engine.StateRunning, taskEnvelopeOrigin(opts), taskModelEffort(opts))
 	if err != nil {
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
@@ -514,6 +520,7 @@ func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contra
 		ReviewWorkspace: opts.ReviewWorkspace,
 		Model:           modelEffort.Model,
 		Effort:          modelEffort.Effort,
+		Origin:          envelopeOriginPointer(taskEnvelopeOrigin(opts)),
 	}
 }
 
@@ -555,8 +562,21 @@ func reassociateSubmittedJobInput(input handoff.JobInput, jobID string, warnings
 
 func taskTags(opts taskOptions) map[string]string {
 	tags := map[string]string{"delegate.kind": effectiveTaskKind(opts)}
-	if opts.Origin != "" {
-		tags["delegate.origin"] = opts.Origin
+	origin := taskEnvelopeOrigin(opts)
+	if origin.Skill != "" {
+		tags[delegateOriginTag] = origin.Skill
+	}
+	if origin.ParentClient != "" {
+		tags[parentClientTag] = origin.ParentClient
+	}
+	if origin.ParentSessionID != "" {
+		tags[parentSessionTag] = origin.ParentSessionID
+	}
+	if origin.ParentAgent != "" {
+		tags[parentAgentTag] = origin.ParentAgent
+	}
+	if origin.Depth != "" {
+		tags[delegateDepthTag] = origin.Depth
 	}
 	return tags
 }

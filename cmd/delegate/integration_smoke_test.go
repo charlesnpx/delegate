@@ -31,12 +31,12 @@ func TestRescueSmokeFixtures(t *testing.T) {
 	}{
 		{
 			name:    "claude_code_orchestrates_codex_rescue",
-			origin:  "codex:rescue",
+			origin:  "delegate:rescue:codex",
 			backend: "codex",
 		},
 		{
 			name:    "codex_orchestrates_claude_rescue",
-			origin:  "claude:rescue",
+			origin:  "delegate:rescue:claude",
 			backend: "claude",
 		},
 	} {
