@@ -324,7 +324,7 @@ func allGeneratedSkills(t *testing.T) []GeneratedSkill {
 
 func TestReviewAndRescueSkillsKeepEscapeHatchAndStallDiscipline(t *testing.T) {
 	for _, skill := range allGeneratedSkills(t) {
-		if skill.Kind != KindReview && !strings.HasSuffix(skill.Name, ":rescue") {
+		if skill.Kind != KindReview && !strings.HasPrefix(skill.Name, "delegate:rescue:") {
 			continue
 		}
 		requireFragments(t, skill, []string{"Superseding escape hatch", "explicitly asks", "delegate is unavailable", "supersedes this skill's delegation trigger"})

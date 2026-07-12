@@ -64,13 +64,18 @@ func captureTaskOrigin(skill string, parentClient, parentSession optionalStringF
 	// Do not guess one; callers can use the explicit parent override flags.
 	// Depth is an audit tag only; propagating it into spawned backends is out of
 	// scope until agentbus provides an environment-injection mechanism.
-	return envelopeOrigin{
+	origin := envelopeOrigin{
 		Skill:           skill,
 		ParentClient:    client,
 		ParentSessionID: sessionID,
 		ParentAgent:     getenv("AI_AGENT"),
-		Depth:           nextDelegateDepth(getenv("DELEGATE_DEPTH")),
 	}
+	// Depth is derived, not linkage evidence: without any captured linkage or an
+	// explicit parent depth, the origin block stays absent entirely.
+	if !origin.empty() || getenv("DELEGATE_DEPTH") != "" {
+		origin.Depth = nextDelegateDepth(getenv("DELEGATE_DEPTH"))
+	}
+	return origin
 }
 
 func nextDelegateDepth(parentDepth string) string {
