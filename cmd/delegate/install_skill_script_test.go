@@ -29,12 +29,17 @@ type delegatedInstallerSetup struct {
 }
 
 type delegatedInstallerTarget struct {
-	Files []delegatedInstallerFile `json:"files"`
+	Files   []delegatedInstallerFile    `json:"files"`
+	Removed []delegatedInstallerRemoval `json:"removed"`
 }
 
 type delegatedInstallerFile struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256,omitempty"`
+}
+
+type delegatedInstallerRemoval struct {
+	Path string `json:"path"`
 }
 
 func TestDelegatedInstallerPlanReportsSetupWhenToolsMissing(t *testing.T) {
@@ -66,13 +71,26 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 	root := filepath.Join(tmp, "root")
 	codexHome := filepath.Join(root, "codex-home")
 	env := []string{"CODEX_HOME=" + codexHome}
+	for _, legacy := range []string{"claude:rescue", "claude:review", "claude:adversarial-review", "claude:status", "claude:result", "claude:cancel"} {
+		path := filepath.Join(codexHome, "skills", legacy, "SKILL.md")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("legacy"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "codex", "--json", "--install-root", root}, env)
 	codexTarget := installed.Targets["codex"]
-	if len(codexTarget.Files) != 8 {
-		t.Fatalf("codex files = %d, want 8: %#v", len(codexTarget.Files), codexTarget.Files)
+	if len(codexTarget.Files) != 11 {
+		t.Fatalf("codex files = %d, want 11: %#v", len(codexTarget.Files), codexTarget.Files)
+	}
+	if len(codexTarget.Removed) != 6 {
+		t.Fatalf("codex removed = %d, want 6: %#v", len(codexTarget.Removed), codexTarget.Removed)
 	}
 	var rescuePath string
 	installedNames := map[string]bool{}
+	legacyRemovals := map[string]bool{}
 	for _, file := range codexTarget.Files {
 		if !strings.HasPrefix(file.Path, root+string(os.PathSeparator)) {
 			t.Fatalf("installed path %q escapes install root %q", file.Path, root)
@@ -83,17 +101,28 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 		if file.SHA256 == "" {
 			t.Fatalf("installed file %q missing sha256", file.Path)
 		}
-		if strings.Contains(file.Path, "claude:rescue") {
+		if strings.Contains(file.Path, "delegate:rescue:claude") {
 			rescuePath = file.Path
 		}
 		installedNames[filepath.Base(filepath.Dir(file.Path))] = true
 	}
-	if rescuePath == "" {
-		t.Fatalf("claude:rescue file missing from %#v", codexTarget.Files)
+	for _, removal := range codexTarget.Removed {
+		legacyRemovals[filepath.Base(filepath.Dir(removal.Path))] = true
 	}
-	for _, name := range []string{"claude:review", "claude:adversarial-review"} {
+	if rescuePath == "" {
+		t.Fatalf("delegate:rescue:claude file missing from %#v", codexTarget.Files)
+	}
+	for _, name := range []string{"delegate:review:claude", "delegate:adversarial-review:claude", "delegate:rescue:codex"} {
 		if !installedNames[name] {
 			t.Fatalf("%s file missing from %#v", name, codexTarget.Files)
+		}
+	}
+	for _, legacy := range []string{"claude:rescue", "claude:review", "claude:adversarial-review", "claude:status", "claude:result", "claude:cancel"} {
+		if !legacyRemovals[legacy] {
+			t.Fatalf("legacy removal %q missing from %#v", legacy, codexTarget.Files)
+		}
+		if _, err := os.Stat(filepath.Join(codexHome, "skills", legacy)); !os.IsNotExist(err) {
+			t.Fatalf("legacy skill %q remains after install: %v", legacy, err)
 		}
 	}
 	raw, err := os.ReadFile(rescuePath)
@@ -105,11 +134,40 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 	}
 
 	uninstalled := runDelegatedInstallerScript(t, []string{"--uninstall", "--target", "codex", "--json", "--install-root", root}, env)
-	if len(uninstalled.Targets["codex"].Files) != 8 {
+	if len(uninstalled.Targets["codex"].Files) != 11 {
 		t.Fatalf("uninstall files = %#v", uninstalled.Targets["codex"].Files)
+	}
+	if len(uninstalled.Targets["codex"].Removed) != 6 {
+		t.Fatalf("uninstall removed = %#v", uninstalled.Targets["codex"].Removed)
 	}
 	if _, err := os.Stat(filepath.Dir(rescuePath)); !os.IsNotExist(err) {
 		t.Fatalf("rescue directory still exists or stat failed unexpectedly: %v", err)
+	}
+}
+
+func TestDelegatedInstallerPlanShowsLegacyRemovals(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	codexHome := filepath.Join(root, "codex-home")
+	result := runDelegatedInstallerScript(t, []string{"--plan", "--target", "codex", "--json", "--install-root", root}, []string{"CODEX_HOME=" + codexHome})
+	files := result.Targets["codex"].Files
+	if len(files) != 11 {
+		t.Fatalf("plan files = %#v", files)
+	}
+	removed := result.Targets["codex"].Removed
+	if len(removed) != 6 {
+		t.Fatalf("plan removed = %#v", removed)
+	}
+	for _, legacy := range []string{"claude:rescue", "claude:review", "claude:adversarial-review", "claude:status", "claude:result", "claude:cancel"} {
+		found := false
+		for _, removal := range removed {
+			if filepath.Base(filepath.Dir(removal.Path)) == legacy {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("plan did not identify legacy removal %q: %#v", legacy, removed)
+		}
 	}
 }
 

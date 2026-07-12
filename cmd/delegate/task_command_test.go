@@ -32,6 +32,9 @@ func TestEnvelopeSchemasAndHashes(t *testing.T) {
 	if !bytes.Contains(raw, []byte(`"result_sha256":null`)) {
 		t.Fatalf("launch envelope = %s, want null result_sha256", raw)
 	}
+	if bytes.Contains(raw, []byte(`"origin"`)) {
+		t.Fatalf("launch envelope = %s, want no origin without captured linkage", raw)
+	}
 	wantLaunchHash := sha256.Sum256([]byte(`{"effort":{"source":"default"},"job_id":"job_envelope","model":{"source":"default"},"result_sha256":null,"schema":1,"status":"queued"}`))
 	if launch.SHA256 != hex.EncodeToString(wantLaunchHash[:]) {
 		t.Fatalf("launch sha256 = %q, want %q", launch.SHA256, hex.EncodeToString(wantLaunchHash[:]))
@@ -75,6 +78,20 @@ func TestEnvelopeSchemasAndHashes(t *testing.T) {
 	wantTerminalHash := sha256.Sum256([]byte(canonicalTerminal))
 	if terminal.SHA256 != hex.EncodeToString(wantTerminalHash[:]) {
 		t.Fatalf("terminal sha256 = %q, want independent canonical JSON digest %q", terminal.SHA256, hex.EncodeToString(wantTerminalHash[:]))
+	}
+
+	origin := envelopeOrigin{Skill: "delegate:rescue:claude", ParentClient: "claude-code", ParentSessionID: "parent-session", ParentAgent: "agent", Depth: "1"}
+	withOrigin, err := newLaunchEnvelopeWithOrigin("job_envelope", engine.StateQueued, origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withOrigin.Origin == nil || *withOrigin.Origin != origin || withOrigin.SHA256 == launch.SHA256 {
+		t.Fatalf("launch with origin = %#v, want origin-covered distinct hash", withOrigin)
+	}
+	canonicalOrigin := `{"effort":{"source":"default"},"job_id":"job_envelope","model":{"source":"default"},"origin":{"depth":"1","parent_agent":"agent","parent_client":"claude-code","parent_session_id":"parent-session","skill":"delegate:rescue:claude"},"result_sha256":null,"schema":1,"status":"queued"}`
+	wantOriginHash := sha256.Sum256([]byte(canonicalOrigin))
+	if withOrigin.SHA256 != hex.EncodeToString(wantOriginHash[:]) {
+		t.Fatalf("launch origin sha256 = %q, want %q", withOrigin.SHA256, hex.EncodeToString(wantOriginHash[:]))
 	}
 }
 
@@ -143,8 +160,8 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	if result.StopReviewGate != "not available (planned v0.2)" {
 		t.Fatalf("stop_review_gate = %q", result.StopReviewGate)
 	}
-	if len(result.Skills) != 16 {
-		t.Fatalf("skill statuses = %d, want 16: %#v", len(result.Skills), result.Skills)
+	if len(result.Skills) != 22 {
+		t.Fatalf("skill statuses = %d, want 22: %#v", len(result.Skills), result.Skills)
 	}
 	for _, skill := range result.Skills {
 		if skill.Target == "" || skill.Name == "" || skill.Path == "" {

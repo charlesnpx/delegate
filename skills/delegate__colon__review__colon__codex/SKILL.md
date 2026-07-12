@@ -1,12 +1,12 @@
 ---
-name: claude:review
-description: Delegate a code review from Codex to Claude Code through sanitized delegate review context and return the launch envelope verbatim.
-version: v0.3.0
+name: delegate:review:codex
+description: Delegate a code review to codex through sanitized delegate review context and return the launch envelope verbatim.
+version: v0.4.0
 ---
 
-# claude:review
+# delegate:review:codex
 
-Use this when Codex should delegate a read-only code review to Claude Code through delegate's sanitized review-context pipeline and return immediately with the launch envelope.
+Use this when an orchestrator should delegate a read-only code review to the codex backend through delegate's sanitized review-context pipeline and return immediately with the launch envelope.
 
 ## Preflight
 
@@ -15,13 +15,19 @@ Before launching, check the subagent context and stop with a clear setup error i
 Superseding escape hatch: if the requester explicitly asks for a direct local review and delegate is unavailable in this environment, perform the review locally. That explicit request supersedes this skill's delegation trigger; do not refuse merely because delegate cannot run.
 
 - no-fork support: the job must run through "delegate review"/agentbus supervision, not an unmanaged background shell or a local substitute review.
-- shared fs: Codex, "delegate", agentbus, and Claude Code can see the delegate state path. Using the private workspace as backend cwd is not OS isolation; a same-user backend can still read repository or other filesystem files when process permissions allow it.
-- exec: "delegate", "agentbus", "git", and the claude backend executable are runnable.
+- shared fs: the parent harness, "delegate", agentbus, and the codex backend can see the delegate state path. Using the private workspace as backend cwd is not OS isolation; a same-user backend can still read repository or other filesystem files when process permissions allow it.
+- exec: "delegate", "agentbus", "git", and the codex backend executable are runnable.
 - repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate applies path/history redaction and a final content scan to every assembled inline or spilled diff payload.
 - cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
-- backend reachability: "delegate setup --json" shows agentbus capabilities and claude backend availability.
+- backend reachability: "delegate setup --json" shows agentbus capabilities and codex backend availability.
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
+
+When the parent uses the same harness as the selected backend, this launches a fresh supervised session—not a native subagent. It has its own job record, contract stamps, and read-only profile.
+
+## Parent Audit Linkage
+
+Delegate records the originating skill plus best-effort parent session identity and depth in its job tags and launch/terminal envelopes. If a harness cannot expose a parent identity through its environment, pass "--parent-client <client>" and "--parent-session <id>"; explicit values override automatic capture.
 
 Threat model: v0.1 is accident prevention, not a security boundary against an adversarial repository or history. Deliberate history shuffles such as delete-and-recreate sequences intended to evade the heuristics are out of scope. v0.2 OS isolation is the boundary fix for that class.
 
@@ -32,7 +38,7 @@ Do not add "--allow-live-repo-read" unless the user explicitly requests live-rep
 Spawn the no-fork delegated review exactly through the CLI. Add "--base" or "--scope" only when the requested review scope requires it:
 
 ~~~bash
-delegate review --backend claude --origin claude:review --cwd "$PWD" --background --json
+delegate review --backend codex --origin delegate:review:codex --cwd "$PWD" --background --json
 ~~~
 
 Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "result_sha256", or "sha256" fields.

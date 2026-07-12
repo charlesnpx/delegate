@@ -25,6 +25,8 @@ type reviewOptions struct {
 	Timeout           time.Duration
 	StrictContract    bool
 	Origin            string
+	ParentClient      optionalStringFlag
+	ParentSession     optionalStringFlag
 	Embedded          bool
 	Base              string
 	Scope             string
@@ -75,6 +77,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		Timeout:         opts.Timeout,
 		StrictContract:  opts.StrictContract,
 		Origin:          opts.Origin,
+		AuditOrigin:     captureTaskOrigin(opts.Origin, opts.ParentClient, opts.ParentSession, nil),
 		Embedded:        opts.Embedded,
 		StateDir:        assembled.StateDir,
 		Kind:            kind,
@@ -129,6 +132,8 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout")
 	fs.BoolVar(&opts.StrictContract, "strict-contract", false, "enable one read-only corrective retry")
 	fs.StringVar(&opts.Origin, "origin", "", "originating skill")
+	fs.Var(&opts.ParentClient, "parent-client", "explicit parent client for audit linkage")
+	fs.Var(&opts.ParentSession, "parent-session", "explicit parent session id for audit linkage")
 	fs.BoolVar(&opts.Embedded, "embedded", false, "run through the embedded engine path")
 	fs.StringVar(&opts.Base, "base", "", "comparison base ref")
 	fs.StringVar(&opts.Scope, "scope", reviewpkg.ScopeAuto, "review scope: auto combines branch and working-tree changes; or working-tree, branch")

@@ -21,7 +21,8 @@ type installSkillsResult struct {
 }
 
 type installSkillTarget struct {
-	Files []skillpkg.File `json:"files"`
+	Files   []skillpkg.File    `json:"files"`
+	Removed []skillpkg.Removal `json:"removed"`
 }
 
 func runInstallSkills(args []string, stdout, stderr io.Writer) (int, error) {
@@ -55,27 +56,27 @@ func runInstallSkills(args []string, stdout, stderr io.Writer) (int, error) {
 	if *installRoot != "" && !filepath.IsAbs(*installRoot) {
 		return 0, fmt.Errorf("--install-root must be absolute")
 	}
-	files, err := applySkillOperation(operation, *target, *installRoot)
+	results, err := applySkillOperation(operation, *target, *installRoot)
 	if err != nil {
 		return 0, err
 	}
 	if *jsonOut {
-		return 0, writeJSONLine(stdout, installSkillsJSON(operation, files))
+		return 0, writeJSONLine(stdout, installSkillsJSON(operation, results))
 	}
-	names := make([]string, 0, len(files))
-	for name := range files {
+	names := make([]string, 0, len(results))
+	for name := range results {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if _, err := fmt.Fprintf(stdout, "%s %s %d file(s)\n", operation, name, len(files[name])); err != nil {
+		if _, err := fmt.Fprintf(stdout, "%s %s %d file(s)\n", operation, name, len(results[name].Files)); err != nil {
 			return 0, err
 		}
 	}
 	return 0, nil
 }
 
-func applySkillOperation(operation, target, installRoot string) (map[string][]skillpkg.File, error) {
+func applySkillOperation(operation, target, installRoot string) (map[string]skillpkg.Result, error) {
 	switch operation {
 	case "plan":
 		return skillpkg.Plan(target, installRoot, nil, nil)
@@ -88,10 +89,10 @@ func applySkillOperation(operation, target, installRoot string) (map[string][]sk
 	}
 }
 
-func installSkillsJSON(operation string, files map[string][]skillpkg.File) installSkillsResult {
-	targets := make(map[string]installSkillTarget, len(files))
-	for name, targetFiles := range files {
-		targets[name] = installSkillTarget{Files: targetFiles}
+func installSkillsJSON(operation string, results map[string]skillpkg.Result) installSkillsResult {
+	targets := make(map[string]installSkillTarget, len(results))
+	for name, result := range results {
+		targets[name] = installSkillTarget{Files: result.Files, Removed: result.Removed}
 	}
 	return installSkillsResult{
 		Schema:    envelopeSchema,

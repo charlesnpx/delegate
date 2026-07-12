@@ -15,11 +15,11 @@ func TestTargetMatrices(t *testing.T) {
 	}{
 		{
 			target: TargetClaude,
-			want:   []string{"codex:rescue", "codex:review", "codex:adversarial-review", "codex:status", "codex:result", "codex:cancel", "delegate:setup", "delegate:config"},
+			want:   expectedSkillNames(),
 		},
 		{
 			target: TargetCodex,
-			want:   []string{"claude:rescue", "claude:review", "claude:adversarial-review", "claude:status", "claude:result", "claude:cancel", "delegate:setup", "delegate:config"},
+			want:   expectedSkillNames(),
 		},
 	} {
 		t.Run(tc.target, func(t *testing.T) {
@@ -31,6 +31,35 @@ func TestTargetMatrices(t *testing.T) {
 				t.Fatalf("TargetNames(%q) = %#v, want %#v", tc.target, got, tc.want)
 			}
 		})
+	}
+	claude, err := Generate(TargetClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex, err := Generate(TargetCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range claude {
+		if claude[i].Name != codex[i].Name || claude[i].Content != codex[i].Content {
+			t.Fatalf("host matrices differ at %d: claude=%#v codex=%#v", i, claude[i], codex[i])
+		}
+	}
+}
+
+func expectedSkillNames() []string {
+	return []string{
+		"delegate:rescue:claude",
+		"delegate:rescue:codex",
+		"delegate:review:claude",
+		"delegate:review:codex",
+		"delegate:adversarial-review:claude",
+		"delegate:adversarial-review:codex",
+		"delegate:status",
+		"delegate:result",
+		"delegate:cancel",
+		"delegate:setup",
+		"delegate:config",
 	}
 }
 
@@ -81,7 +110,8 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"delete-and-recreate",
 				"v0.2 OS isolation is the boundary fix",
 			})
-			if !strings.Contains(skill.Content, "delegate "+strings.TrimPrefix(skill.Name, strings.Split(skill.Name, ":")[0]+":")+" --backend") {
+			action := strings.Split(skill.Name, ":")[1]
+			if !strings.Contains(skill.Content, "delegate "+action+" --backend") {
 				t.Fatalf("%s missing review command", skill.Name)
 			}
 			requireStallGuidance(t, skill)
@@ -108,6 +138,7 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"delegate config set <key> <value>",
 				"all delegated tasks",
 				"ergonomics control, not a security boundary",
+				"supported delegation backends are explicitly \"claude\" and \"codex\"",
 			})
 		default:
 			t.Fatalf("%s kind = %q", skill.Name, skill.Kind)
@@ -156,8 +187,8 @@ func TestSourceFixturesMatchGeneratedTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 14 {
-		t.Fatalf("SourceFiles count = %d, want 14", len(files))
+	if len(files) != 11 {
+		t.Fatalf("SourceFiles count = %d, want 11", len(files))
 	}
 	for _, rel := range SortedSourcePaths(files) {
 		if !strings.Contains(filepath.Dir(rel), "__colon__") {
@@ -171,6 +202,111 @@ func TestSourceFixturesMatchGeneratedTemplates(t *testing.T) {
 			t.Fatalf("source fixture %s drifted from generator", rel)
 		}
 	}
+	paths, err := filepath.Glob(filepath.Join("..", "..", "skills", "*", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(paths))
+	for _, path := range paths {
+		rel, err := filepath.Rel(filepath.Join("..", ".."), path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, rel)
+	}
+	if !reflect.DeepEqual(got, SortedSourcePaths(files)) {
+		t.Fatalf("skill source paths = %#v, want %#v", got, SortedSourcePaths(files))
+	}
+}
+
+func TestColonEscapingRoundTripsMultiColonNames(t *testing.T) {
+	const name = "delegate:adversarial-review:codex"
+	if got := EncodeName(name); got != "delegate__colon__adversarial-review__colon__codex" {
+		t.Fatalf("EncodeName(%q) = %q", name, got)
+	}
+	if got := DecodeName(EncodeName(name)); got != name {
+		t.Fatalf("DecodeName(EncodeName(%q)) = %q", name, got)
+	}
+}
+
+func TestPlanAndInstallRemoveLegacySkills(t *testing.T) {
+	for _, target := range []string{TargetClaude, TargetCodex} {
+		t.Run(target, func(t *testing.T) {
+			root := t.TempDir()
+			rootForTarget, err := TargetRoot(target, root, func(string) string { return "" }, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, legacyName := range legacyNamesForTarget(target) {
+				path := filepath.Join(rootForTarget, legacyName, "SKILL.md")
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("legacy"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			plan, err := Plan(target, root, func(string) string { return "" }, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := plan[target]
+			if len(result.Files) != len(expectedSkillNames()) {
+				t.Fatalf("plan files = %#v", result.Files)
+			}
+			if len(result.Removed) != len(legacyNamesForTarget(target)) {
+				t.Fatalf("plan removed = %#v", result.Removed)
+			}
+			for _, legacyName := range legacyNamesForTarget(target) {
+				path := filepath.Join(rootForTarget, legacyName, "SKILL.md")
+				if !containsPlannedRemoval(result.Removed, path) {
+					t.Fatalf("plan did not remove legacy skill %q: %#v", legacyName, result.Removed)
+				}
+			}
+
+			installed, err := Install(target, root, func(string) string { return "" }, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(installed[target].Files) != len(expectedSkillNames()) {
+				t.Fatalf("installed files = %#v", installed[target].Files)
+			}
+			if len(installed[target].Removed) != len(legacyNamesForTarget(target)) {
+				t.Fatalf("installed removed = %#v", installed[target].Removed)
+			}
+			for _, file := range installed[target].Files {
+				if file.SHA256 == "" {
+					t.Fatalf("installed file %q missing sha256", file.Path)
+				}
+			}
+			for _, legacyName := range legacyNamesForTarget(target) {
+				if _, err := os.Stat(filepath.Join(rootForTarget, legacyName)); !os.IsNotExist(err) {
+					t.Fatalf("legacy skill %q remains after install: %v", legacyName, err)
+				}
+			}
+
+			uninstalled, err := Uninstall(target, root, func(string) string { return "" }, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(uninstalled[target].Files) != len(expectedSkillNames()) {
+				t.Fatalf("uninstalled files = %#v", uninstalled[target].Files)
+			}
+			if len(uninstalled[target].Removed) != len(legacyNamesForTarget(target)) {
+				t.Fatalf("uninstalled removed = %#v", uninstalled[target].Removed)
+			}
+		})
+	}
+}
+
+func containsPlannedRemoval(removals []Removal, path string) bool {
+	for _, removal := range removals {
+		if removal.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 func allGeneratedSkills(t *testing.T) []GeneratedSkill {

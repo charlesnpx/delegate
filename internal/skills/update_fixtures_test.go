@@ -23,4 +23,12 @@ func TestUpdateSourceFixtures(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	for _, target := range []string{TargetClaude, TargetCodex} {
+		for _, name := range legacyNamesForTarget(target) {
+			path := filepath.Join("..", "..", "skills", EncodeName(name), "SKILL.md")
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+		}
+	}
 }

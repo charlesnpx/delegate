@@ -39,6 +39,7 @@ type jobMetadata struct {
 	BackendError    string                     `json:"backend_error,omitempty"`
 	Model           config.DimensionResolution `json:"model,omitempty"`
 	Effort          config.DimensionResolution `json:"effort,omitempty"`
+	Origin          *envelopeOrigin            `json:"origin,omitempty"`
 	CreatedAt       time.Time                  `json:"created_at"`
 	UpdatedAt       time.Time                  `json:"updated_at"`
 }

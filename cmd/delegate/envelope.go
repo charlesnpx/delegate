@@ -32,6 +32,7 @@ type LaunchEnvelope struct {
 	Model        config.DimensionResolution `json:"model"`
 	Effort       config.DimensionResolution `json:"effort"`
 	ResultSHA256 *string                    `json:"result_sha256"`
+	Origin       *envelopeOrigin            `json:"origin,omitempty"`
 	SHA256       string                     `json:"sha256"`
 }
 
@@ -50,6 +51,7 @@ type TerminalEnvelope struct {
 	Effort                         config.DimensionResolution `json:"effort"`
 	ModelReported                  string                     `json:"model_reported,omitempty"`
 	ModelReportedUnavailableReason string                     `json:"model_reported_unavailable_reason,omitempty"`
+	Origin                         *envelopeOrigin            `json:"origin,omitempty"`
 	SHA256                         string                     `json:"sha256"`
 }
 
@@ -57,6 +59,7 @@ type terminalEnvelopeOptions struct {
 	ModelEffort           config.ModelEffortResolution
 	ModelReported         string
 	ModelsReportedCapable bool
+	Origin                envelopeOrigin
 }
 
 func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
@@ -74,6 +77,7 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		Effort                         config.DimensionResolution `json:"effort"`
 		ModelReported                  string                     `json:"model_reported,omitempty"`
 		ModelReportedUnavailableReason string                     `json:"model_reported_unavailable_reason,omitempty"`
+		Origin                         *envelopeOrigin            `json:"origin,omitempty"`
 		SHA256                         string                     `json:"sha256"`
 	}
 	return json.Marshal(terminalEnvelopeJSON{
@@ -90,6 +94,7 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		Effort:                         e.Effort,
 		ModelReported:                  e.ModelReported,
 		ModelReportedUnavailableReason: e.ModelReportedUnavailableReason,
+		Origin:                         e.Origin,
 		SHA256:                         e.SHA256,
 	})
 }
@@ -116,6 +121,10 @@ func contractStampEnvelopeValue(stamp engine.ContractStamp) map[string]any {
 }
 
 func newLaunchEnvelope(jobID string, state engine.JobState, resolutions ...config.ModelEffortResolution) (LaunchEnvelope, error) {
+	return newLaunchEnvelopeWithOrigin(jobID, state, envelopeOrigin{}, resolutions...)
+}
+
+func newLaunchEnvelopeWithOrigin(jobID string, state engine.JobState, origin envelopeOrigin, resolutions ...config.ModelEffortResolution) (LaunchEnvelope, error) {
 	modelEffort := normalizedModelEffort(resolutions...)
 	env := LaunchEnvelope{
 		Schema: envelopeSchema,
@@ -123,6 +132,7 @@ func newLaunchEnvelope(jobID string, state engine.JobState, resolutions ...confi
 		Status: launchStatus(state),
 		Model:  modelEffort.Model,
 		Effort: modelEffort.Effort,
+		Origin: envelopeOriginPointer(origin),
 	}
 	sum, err := envelopeSHA256(env)
 	if err != nil {
@@ -151,6 +161,7 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 		Effort:                         modelEffort.Effort,
 		ModelReported:                  option.ModelReported,
 		ModelReportedUnavailableReason: modelReportedUnavailableReason(option.ModelsReportedCapable, option.ModelReported),
+		Origin:                         envelopeOriginPointer(option.Origin),
 	}
 	if resultSHA256 != "" {
 		env.ResultSHA256 = &resultSHA256

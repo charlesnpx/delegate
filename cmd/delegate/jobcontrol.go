@@ -459,10 +459,14 @@ func terminalEnvelopeFromJobResult(stateDir string, result client.JobResult, mod
 	}
 	backendError := ""
 	modelEffort := config.ModelEffortResolution{}
+	origin := envelopeOrigin{}
 	if found {
 		backendError = meta.BackendError
 		modelEffort.Model = meta.Model
 		modelEffort.Effort = meta.Effort
+		if meta.Origin != nil {
+			origin = *meta.Origin
+		}
 	}
 	if result.Result == nil && backendError != "" && !(found && meta.NoContract) {
 		stamp = skippedDelegateContractStamp(engine.SkipBackendError)
@@ -471,7 +475,7 @@ func terminalEnvelopeFromJobResult(stateDir string, result client.JobResult, mod
 	if len(modelsReportedCapable) > 0 {
 		capable = modelsReportedCapable[0]
 	}
-	return newTerminalEnvelope(result.JobID, result.State, kind, contractKind, stamp, resultSHA256, backendError, terminalEnvelopeOptions{ModelEffort: modelEffort, ModelReported: result.ModelReported, ModelsReportedCapable: capable})
+	return newTerminalEnvelope(result.JobID, result.State, kind, contractKind, stamp, resultSHA256, backendError, terminalEnvelopeOptions{ModelEffort: modelEffort, ModelReported: result.ModelReported, ModelsReportedCapable: capable, Origin: origin})
 }
 
 func skippedDelegateContractStamp(reason engine.SkippedReason) engine.ContractStamp {
