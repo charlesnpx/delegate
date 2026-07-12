@@ -114,15 +114,27 @@ func Save(cfg Config) error {
 		return err
 	}
 	dir := filepath.Dir(path)
-	_, err = os.Lstat(dir)
-	dirCreated := errors.Is(err, os.ErrNotExist)
-	if err != nil && !dirCreated {
-		return fmt.Errorf("inspect delegate config directory %q: %w", dir, err)
-	}
-	if dirCreated {
-		if err := os.MkdirAll(dir, configDirMode); err != nil {
+	// Race-free creation tracking: chmod below applies only when THIS call's
+	// os.Mkdir created the leaf directory, never when it already existed or
+	// appeared concurrently.
+	dirCreated := false
+	switch err := os.Mkdir(dir, configDirMode); {
+	case err == nil:
+		dirCreated = true
+	case errors.Is(err, os.ErrNotExist):
+		if err := os.MkdirAll(filepath.Dir(dir), configDirMode); err != nil {
+			return fmt.Errorf("create delegate config parent directory %q: %w", filepath.Dir(dir), err)
+		}
+		switch err := os.Mkdir(dir, configDirMode); {
+		case err == nil:
+			dirCreated = true
+		case errors.Is(err, os.ErrExist):
+		default:
 			return fmt.Errorf("create delegate config directory %q: %w", dir, err)
 		}
+	case errors.Is(err, os.ErrExist):
+	default:
+		return fmt.Errorf("create delegate config directory %q: %w", dir, err)
 	}
 	// Symlinked config directories are deliberate; their pre-existing permissions
 	// are the user's responsibility.

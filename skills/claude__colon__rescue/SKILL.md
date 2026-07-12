@@ -1,7 +1,7 @@
 ---
 name: claude:rescue
 description: Delegate a rescue task from Codex to Claude Code through delegate and return the launch envelope verbatim.
-version: v0.2.0
+version: v0.3.0
 ---
 
 # claude:rescue

@@ -1,7 +1,7 @@
 ---
 name: claude:review
 description: Delegate a code review from Codex to Claude Code through sanitized delegate review context and return the launch envelope verbatim.
-version: v0.2.0
+version: v0.3.0
 ---
 
 # claude:review

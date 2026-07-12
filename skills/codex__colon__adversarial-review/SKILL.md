@@ -1,7 +1,7 @@
 ---
 name: codex:adversarial-review
 description: Delegate a refute-first adversarial code review from Claude Code to Codex through sanitized delegate review context and return the launch envelope verbatim.
-version: v0.2.0
+version: v0.3.0
 ---
 
 # codex:adversarial-review
