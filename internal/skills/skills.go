@@ -16,7 +16,7 @@ import (
 
 const (
 	// Version is the content version for the generated skill prose.
-	Version = "v0.2.0"
+	Version = "v0.3.0"
 
 	TargetClaude = "claude"
 	TargetCodex  = "codex"
@@ -26,6 +26,7 @@ const (
 	KindReview     = "review"
 	KindJobControl = "job-control"
 	KindSetup      = "setup"
+	KindConfig     = "config"
 )
 
 // GeneratedSkill is one rendered skill and its source/final naming metadata.
@@ -72,6 +73,7 @@ var (
 	reviewTemplate = template.Must(template.New("review").Parse(strings.TrimSpace(reviewSkillTemplate) + "\n"))
 	jobTemplate    = template.Must(template.New("job").Parse(strings.TrimSpace(jobControlSkillTemplate) + "\n"))
 	setupTemplate  = template.Must(template.New("setup").Parse(strings.TrimSpace(setupSkillTemplate) + "\n"))
+	configTemplate = template.Must(template.New("config").Parse(strings.TrimSpace(configSkillTemplate) + "\n"))
 )
 
 // DecodeName decodes source directory escaping used under skills/.
@@ -123,7 +125,7 @@ func Generate(target string) ([]GeneratedSkill, error) {
 // SourceFiles returns all source fixture files keyed by escaped source path.
 func SourceFiles() (map[string]string, error) {
 	specs := append(claudeSpecs(), codexSpecs()...)
-	specs = append(specs, setupSpec(TargetClaude))
+	specs = append(specs, setupSpec(TargetClaude), configSpec(TargetClaude))
 	seen := map[string]bool{}
 	files := map[string]string{}
 	for _, spec := range specs {
@@ -261,9 +263,9 @@ func apply(target, installRoot string, env func(string) string, homeDir func() (
 func targetSpecs(target string) ([]skillSpec, error) {
 	switch target {
 	case TargetClaude:
-		return append(claudeSpecs(), setupSpec(TargetClaude)), nil
+		return append(claudeSpecs(), setupSpec(TargetClaude), configSpec(TargetClaude)), nil
 	case TargetCodex:
-		return append(codexSpecs(), setupSpec(TargetCodex)), nil
+		return append(codexSpecs(), setupSpec(TargetCodex), configSpec(TargetCodex)), nil
 	default:
 		return nil, fmt.Errorf("unsupported skill target %q", target)
 	}
@@ -350,6 +352,15 @@ func setupSpec(target string) skillSpec {
 	}
 }
 
+func configSpec(target string) skillSpec {
+	return skillSpec{
+		Name:         "delegate:config",
+		Kind:         KindConfig,
+		Description:  "View and change delegate user model and effort defaults.",
+		SourceTarget: target,
+	}
+}
+
 func render(spec skillSpec) (string, error) {
 	data := renderData{
 		Version:     Version,
@@ -372,6 +383,8 @@ func render(spec skillSpec) (string, error) {
 		tmpl = jobTemplate
 	case KindSetup:
 		tmpl = setupTemplate
+	case KindConfig:
+		tmpl = configTemplate
 	default:
 		return "", fmt.Errorf("unsupported skill kind %q", spec.Kind)
 	}
@@ -428,6 +441,8 @@ Superseding escape hatch: if the requester explicitly asks you to perform the ta
 - stdin handoff: sensitive prompt text can be piped to "delegate handoff create --json".
 - backend reachability: "delegate setup --json" shows agentbus capabilities and {{.Backend}} backend availability.
 
+The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
+
 ## Launch
 
 1. Create a prompt for the delegated task. Include the acceptance criteria, repo path, current state, constraints, and what the subagent must report back.
@@ -480,6 +495,8 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 - repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate applies path/history redaction and a final content scan to every assembled inline or spilled diff payload.
 - cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
 - backend reachability: "delegate setup --json" shows agentbus capabilities and {{.Backend}} backend availability.
+
+The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
 Threat model: v0.1 is accident prevention, not a security boundary against an adversarial repository or history. Deliberate history shuffles such as delete-and-recreate sequences intended to evade the heuristics are out of scope. v0.2 OS isolation is the boundary fix for that class.
 
@@ -576,3 +593,29 @@ Run:
 Use this before launching delegated work. Confirm that "delegate" and "agentbus" are executable, agentbus reports the policy capabilities delegate requires, the intended backend is available, the repo and delegate state are writable when needed, and stdin handoff through "delegate handoff create --json" is viable. Report the "stop-review-gate" line exactly as delegate prints it.
 
 If setup fails, report the failing prerequisite and stop. Do not improvise alternate auth, install, or execution flows.`
+
+const configSkillTemplate = `---
+name: {{.Name}}
+description: {{.Description}}
+version: {{.Version}}
+---
+
+# {{.Name}}
+
+View the effective user defaults and config path with:
+
+~~~bash
+delegate config list --json
+~~~
+
+Change one supported setting with:
+
+~~~bash
+delegate config set <key> <value>
+~~~
+
+Delegate user-config defaults apply to all delegated tasks. The supported keys are "overridable", "backend.claude.model", "backend.claude.effort", "backend.codex.model", and "backend.codex.effort". Use "delegate config unset <key>" to remove a value.
+
+When "overridable=false", configured model and effort values pin their respective dimensions against per-task "-model" and "-effort" flags. This is an ergonomics control, not a security boundary: an agent that can run "delegate config set" can change the setting.
+
+Do not pass policy-bypass flags when using this skill.`

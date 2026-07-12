@@ -1,7 +1,7 @@
 ---
 name: claude:adversarial-review
 description: Delegate a refute-first adversarial code review from Codex to Claude Code through sanitized delegate review context and return the launch envelope verbatim.
-version: v0.2.0
+version: v0.3.0
 ---
 
 # claude:adversarial-review
@@ -20,6 +20,8 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 - repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate applies path/history redaction and a final content scan to every assembled inline or spilled diff payload.
 - cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
 - backend reachability: "delegate setup --json" shows agentbus capabilities and claude backend availability.
+
+The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
 Threat model: v0.1 is accident prevention, not a security boundary against an adversarial repository or history. Deliberate history shuffles such as delete-and-recreate sequences intended to evade the heuristics are out of scope. v0.2 OS isolation is the boundary fix for that class.
 

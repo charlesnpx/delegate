@@ -1,7 +1,7 @@
 ---
 name: claude:result
 description: Fetch and present a delegated job result through delegate.
-version: v0.2.0
+version: v0.3.0
 ---
 
 # claude:result

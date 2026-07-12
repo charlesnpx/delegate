@@ -29,6 +29,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "setup":
 		code, err := runSetup(args[1:], stdout, stderr)
 		return finishCommand(code, err, stderr)
+	case "config":
+		code, err := runConfig(args[1:], stdout, stderr)
+		return finishCommand(code, err, stderr)
 	case "task":
 		code, err := runTask(args[1:], stdin, stdout, stderr)
 		return finishCommand(code, err, stderr)

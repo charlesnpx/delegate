@@ -68,8 +68,8 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 	env := []string{"CODEX_HOME=" + codexHome}
 	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "codex", "--json", "--install-root", root}, env)
 	codexTarget := installed.Targets["codex"]
-	if len(codexTarget.Files) != 7 {
-		t.Fatalf("codex files = %d, want 7: %#v", len(codexTarget.Files), codexTarget.Files)
+	if len(codexTarget.Files) != 8 {
+		t.Fatalf("codex files = %d, want 8: %#v", len(codexTarget.Files), codexTarget.Files)
 	}
 	var rescuePath string
 	installedNames := map[string]bool{}
@@ -105,7 +105,7 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 	}
 
 	uninstalled := runDelegatedInstallerScript(t, []string{"--uninstall", "--target", "codex", "--json", "--install-root", root}, env)
-	if len(uninstalled.Targets["codex"].Files) != 7 {
+	if len(uninstalled.Targets["codex"].Files) != 8 {
 		t.Fatalf("uninstall files = %#v", uninstalled.Targets["codex"].Files)
 	}
 	if _, err := os.Stat(filepath.Dir(rescuePath)); !os.IsNotExist(err) {

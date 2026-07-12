@@ -10,6 +10,7 @@ import (
 	"sort"
 
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/delegate/internal/config"
 )
 
 const (
@@ -25,51 +26,71 @@ const (
 
 // LaunchEnvelope is the schema returned when delegate has launched a job.
 type LaunchEnvelope struct {
-	Schema       int     `json:"schema"`
-	JobID        string  `json:"job_id"`
-	Status       string  `json:"status"`
-	ResultSHA256 *string `json:"result_sha256"`
-	SHA256       string  `json:"sha256"`
+	Schema       int                        `json:"schema"`
+	JobID        string                     `json:"job_id"`
+	Status       string                     `json:"status"`
+	Model        config.DimensionResolution `json:"model"`
+	Effort       config.DimensionResolution `json:"effort"`
+	ResultSHA256 *string                    `json:"result_sha256"`
+	SHA256       string                     `json:"sha256"`
 }
 
 // TerminalEnvelope is the schema returned by delegate result and task --wait.
 type TerminalEnvelope struct {
-	Schema                  int                  `json:"schema"`
-	JobID                   string               `json:"job_id"`
-	Status                  engine.JobState      `json:"status"`
-	Kind                    string               `json:"kind"`
-	ContractKind            string               `json:"contractKind"`
-	Contract                engine.ContractStamp `json:"contract"`
-	ResultSHA256            *string              `json:"result_sha256"`
-	ResultUnavailableReason string               `json:"result_unavailable_reason,omitempty"`
-	BackendError            string               `json:"backend_error,omitempty"`
-	SHA256                  string               `json:"sha256"`
+	Schema                         int                        `json:"schema"`
+	JobID                          string                     `json:"job_id"`
+	Status                         engine.JobState            `json:"status"`
+	Kind                           string                     `json:"kind"`
+	ContractKind                   string                     `json:"contractKind"`
+	Contract                       engine.ContractStamp       `json:"contract"`
+	ResultSHA256                   *string                    `json:"result_sha256"`
+	ResultUnavailableReason        string                     `json:"result_unavailable_reason,omitempty"`
+	BackendError                   string                     `json:"backend_error,omitempty"`
+	Model                          config.DimensionResolution `json:"model"`
+	Effort                         config.DimensionResolution `json:"effort"`
+	ModelReported                  string                     `json:"model_reported,omitempty"`
+	ModelReportedUnavailableReason string                     `json:"model_reported_unavailable_reason,omitempty"`
+	SHA256                         string                     `json:"sha256"`
+}
+
+type terminalEnvelopeOptions struct {
+	ModelEffort           config.ModelEffortResolution
+	ModelReported         string
+	ModelsReportedCapable bool
 }
 
 func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 	type terminalEnvelopeJSON struct {
-		Schema                  int             `json:"schema"`
-		JobID                   string          `json:"job_id"`
-		Status                  engine.JobState `json:"status"`
-		Kind                    string          `json:"kind"`
-		ContractKind            string          `json:"contractKind"`
-		Contract                map[string]any  `json:"contract"`
-		ResultSHA256            *string         `json:"result_sha256"`
-		ResultUnavailableReason string          `json:"result_unavailable_reason,omitempty"`
-		BackendError            string          `json:"backend_error,omitempty"`
-		SHA256                  string          `json:"sha256"`
+		Schema                         int                        `json:"schema"`
+		JobID                          string                     `json:"job_id"`
+		Status                         engine.JobState            `json:"status"`
+		Kind                           string                     `json:"kind"`
+		ContractKind                   string                     `json:"contractKind"`
+		Contract                       map[string]any             `json:"contract"`
+		ResultSHA256                   *string                    `json:"result_sha256"`
+		ResultUnavailableReason        string                     `json:"result_unavailable_reason,omitempty"`
+		BackendError                   string                     `json:"backend_error,omitempty"`
+		Model                          config.DimensionResolution `json:"model"`
+		Effort                         config.DimensionResolution `json:"effort"`
+		ModelReported                  string                     `json:"model_reported,omitempty"`
+		ModelReportedUnavailableReason string                     `json:"model_reported_unavailable_reason,omitempty"`
+		SHA256                         string                     `json:"sha256"`
 	}
 	return json.Marshal(terminalEnvelopeJSON{
-		Schema:                  e.Schema,
-		JobID:                   e.JobID,
-		Status:                  e.Status,
-		Kind:                    e.Kind,
-		ContractKind:            e.ContractKind,
-		Contract:                contractStampEnvelopeValue(e.Contract),
-		ResultSHA256:            e.ResultSHA256,
-		ResultUnavailableReason: e.ResultUnavailableReason,
-		BackendError:            e.BackendError,
-		SHA256:                  e.SHA256,
+		Schema:                         e.Schema,
+		JobID:                          e.JobID,
+		Status:                         e.Status,
+		Kind:                           e.Kind,
+		ContractKind:                   e.ContractKind,
+		Contract:                       contractStampEnvelopeValue(e.Contract),
+		ResultSHA256:                   e.ResultSHA256,
+		ResultUnavailableReason:        e.ResultUnavailableReason,
+		BackendError:                   e.BackendError,
+		Model:                          e.Model,
+		Effort:                         e.Effort,
+		ModelReported:                  e.ModelReported,
+		ModelReportedUnavailableReason: e.ModelReportedUnavailableReason,
+		SHA256:                         e.SHA256,
 	})
 }
 
@@ -94,11 +115,14 @@ func contractStampEnvelopeValue(stamp engine.ContractStamp) map[string]any {
 	return out
 }
 
-func newLaunchEnvelope(jobID string, state engine.JobState) (LaunchEnvelope, error) {
+func newLaunchEnvelope(jobID string, state engine.JobState, resolutions ...config.ModelEffortResolution) (LaunchEnvelope, error) {
+	modelEffort := normalizedModelEffort(resolutions...)
 	env := LaunchEnvelope{
 		Schema: envelopeSchema,
 		JobID:  jobID,
 		Status: launchStatus(state),
+		Model:  modelEffort.Model,
+		Effort: modelEffort.Effort,
 	}
 	sum, err := envelopeSHA256(env)
 	if err != nil {
@@ -108,16 +132,25 @@ func newLaunchEnvelope(jobID string, state engine.JobState) (LaunchEnvelope, err
 	return env, nil
 }
 
-func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind string, stamp engine.ContractStamp, resultSHA256, backendError string) (TerminalEnvelope, error) {
+func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind string, stamp engine.ContractStamp, resultSHA256, backendError string, options ...terminalEnvelopeOptions) (TerminalEnvelope, error) {
 	stamp = normalizeContractStamp(stamp)
+	option := terminalEnvelopeOptions{}
+	if len(options) > 0 {
+		option = options[0]
+	}
+	modelEffort := normalizedModelEffort(option.ModelEffort)
 	env := TerminalEnvelope{
-		Schema:       envelopeSchema,
-		JobID:        jobID,
-		Status:       state,
-		Kind:         kind,
-		ContractKind: contractKind,
-		Contract:     stamp,
-		BackendError: backendError,
+		Schema:                         envelopeSchema,
+		JobID:                          jobID,
+		Status:                         state,
+		Kind:                           kind,
+		ContractKind:                   contractKind,
+		Contract:                       stamp,
+		BackendError:                   backendError,
+		Model:                          modelEffort.Model,
+		Effort:                         modelEffort.Effort,
+		ModelReported:                  option.ModelReported,
+		ModelReportedUnavailableReason: modelReportedUnavailableReason(option.ModelsReportedCapable, option.ModelReported),
 	}
 	if resultSHA256 != "" {
 		env.ResultSHA256 = &resultSHA256
@@ -130,6 +163,30 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 	}
 	env.SHA256 = sum
 	return env, nil
+}
+
+func normalizedModelEffort(values ...config.ModelEffortResolution) config.ModelEffortResolution {
+	resolved := config.ModelEffortResolution{}
+	if len(values) > 0 {
+		resolved = values[0]
+	}
+	if resolved.Model.Source == "" {
+		resolved.Model.Source = "default"
+	}
+	if resolved.Effort.Source == "" {
+		resolved.Effort.Source = "default"
+	}
+	return resolved
+}
+
+func modelReportedUnavailableReason(capable bool, modelReported string) string {
+	if modelReported != "" {
+		return ""
+	}
+	if !capable {
+		return "agentbus_capability_missing"
+	}
+	return "backend_did_not_report"
 }
 
 func launchStatus(state engine.JobState) string {

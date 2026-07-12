@@ -36,6 +36,12 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	if err != nil {
 		return 0, err
 	}
+	taskDefaults := taskOptions{Backend: opts.Backend, Model: opts.Model, Effort: opts.Effort}
+	if err := resolveTaskModelEffort(&taskDefaults); err != nil {
+		return 0, err
+	}
+	opts.Model = taskDefaults.Model
+	opts.Effort = taskDefaults.Effort
 	assembled, err := reviewpkg.Assemble(context.Background(), reviewpkg.Options{
 		CWD:               opts.CWD,
 		Base:              opts.Base,
@@ -73,6 +79,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		StateDir:        assembled.StateDir,
 		Kind:            kind,
 		ReviewWorkspace: assembled.Workspace,
+		ModelEffort:     taskDefaults.ModelEffort,
 	}
 	result, err := executeTask(taskOpts, handoff.ResolvedPrompt{Prompt: prompt, Source: handoff.SourcePrompt}, turnPolicy)
 	if result.Submitted {

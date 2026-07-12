@@ -1,7 +1,7 @@
 ---
 name: claude:rescue
 description: Delegate a rescue task from Codex to Claude Code through delegate and return the launch envelope verbatim.
-version: v0.2.0
+version: v0.3.0
 ---
 
 # claude:rescue
@@ -20,6 +20,8 @@ Superseding escape hatch: if the requester explicitly asks you to perform the ta
 - repo+state write access: the target repo and delegate/agentbus state roots are writable when the task needs writes.
 - stdin handoff: sensitive prompt text can be piped to "delegate handoff create --json".
 - backend reachability: "delegate setup --json" shows agentbus capabilities and claude backend availability.
+
+The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
 ## Launch
 

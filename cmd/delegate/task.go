@@ -11,6 +11,7 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/delegate/internal/config"
 	"github.com/charlesnpx/delegate/internal/handoff"
 	"github.com/charlesnpx/delegate/internal/policy"
 )
@@ -37,7 +38,9 @@ type taskOptions struct {
 	ResumeSession     string
 	Fresh             bool
 	Model             string
+	ModelSet          bool
 	Effort            string
+	EffortSet         bool
 	Timeout           time.Duration
 	Write             bool
 	StrictContract    bool
@@ -52,6 +55,7 @@ type taskOptions struct {
 	StateDir          string
 	Kind              string
 	ReviewWorkspace   string
+	ModelEffort       config.ModelEffortResolution
 }
 
 type taskRunResult struct {
@@ -66,6 +70,9 @@ const provisionalJobIDTag = "delegate.provisional_job_id"
 func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	opts, err := parseTaskOptions(args, stdin, stderr)
 	if err != nil {
+		return 0, err
+	}
+	if err := resolveTaskModelEffort(&opts); err != nil {
 		return 0, err
 	}
 	turnPolicy, err := policy.ResolveTurnPolicy(policy.Flags{
@@ -94,6 +101,27 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 		return 0, err
 	}
 	return writeTaskRunResult(result, stdout, stderr)
+}
+
+func resolveTaskModelEffort(opts *taskOptions) error {
+	if opts.ResumeSession != "" {
+		if opts.ModelSet || opts.EffortSet {
+			return fmt.Errorf("model/effort cannot be changed when resuming a session; the session keeps the values it was started with")
+		}
+		opts.Model = ""
+		opts.Effort = ""
+		opts.ModelEffort = sessionModelEffortResolution()
+		return nil
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	resolved := config.ResolveModelEffort(opts.Backend, opts.Model, opts.Effort, cfg)
+	opts.ModelEffort = resolved
+	opts.Model = resolved.Model.Effective
+	opts.Effort = resolved.Effort.Effective
+	return nil
 }
 
 func executeTask(opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy) (taskRunResult, error) {
@@ -154,6 +182,14 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 		return taskOptions{}, err
 	}
 	opts.Positional = fs.Args()
+	fs.Visit(func(flag *flag.Flag) {
+		switch flag.Name {
+		case "model":
+			opts.ModelSet = true
+		case "effort":
+			opts.EffortSet = true
+		}
+	})
 	if opts.Backend == "" {
 		return taskOptions{}, fmt.Errorf("delegate task requires --backend")
 	}
@@ -171,6 +207,9 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	}
 	if (opts.Resume || opts.ResumeSession != "") && !opts.Wait {
 		return taskOptions{}, fmt.Errorf("--resume and --resume-session require --wait in v0.1.0; background resume lands post-v0.1.0")
+	}
+	if (opts.Resume || opts.ResumeSession != "") && (opts.ModelSet || opts.EffortSet) {
+		return taskOptions{}, fmt.Errorf("model/effort cannot be changed when resuming a session; the session keeps the values it was started with")
 	}
 	if opts.Embedded && !opts.Wait {
 		return taskOptions{}, fmt.Errorf("--embedded requires --wait; background supervision is daemon-only")
@@ -230,7 +269,7 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 		TimeoutMs: timeoutMillis(opts.Timeout),
 	}
 	if opts.ResumeSession != "" {
-		return runDaemonSessionTask(ctx, c, opts, resolved, turnPolicy)
+		return runDaemonSessionTask(ctx, c, opts, resolved, turnPolicy, hello.Capabilities["models.reported"])
 	}
 	input, err := persistPreLaunchJobInput(opts, resolved)
 	if err != nil {
@@ -253,7 +292,7 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 	input, warnings = reassociateSubmittedJobInput(input, submitted.JobID, warnings)
 	if warning, err := persistLaunchedJobMetadata(opts, input, submitted.JobID, contractKind); err != nil {
 		warnings = append(warnings, err.Error())
-		env, envelopeErr := newLaunchEnvelope(submitted.JobID, submitted.State)
+		env, envelopeErr := newLaunchEnvelope(submitted.JobID, submitted.State, taskModelEffort(opts))
 		if envelopeErr != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, envelopeErr
 		}
@@ -275,20 +314,24 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
-		env, err := terminalEnvelopeFromJobResult(opts.StateDir, jobResult)
+		env, err := terminalEnvelopeFromJobResult(opts.StateDir, jobResult, hello.Capabilities["models.reported"])
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
 		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
 	}
-	env, err := newLaunchEnvelope(submitted.JobID, submitted.State)
+	env, err := newLaunchEnvelope(submitted.JobID, submitted.State, taskModelEffort(opts))
 	if err != nil {
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
 	return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
 }
 
-func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy) (taskRunResult, error) {
+func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy, modelsReportedCapabilities ...bool) (taskRunResult, error) {
+	modelsReportedCapable := false
+	if len(modelsReportedCapabilities) > 0 {
+		modelsReportedCapable = modelsReportedCapabilities[0]
+	}
 	target, err := resumableSessionInfo(ctx, c, opts.StateDir, opts.ResumeSession)
 	if err != nil {
 		return taskRunResult{}, err
@@ -330,7 +373,7 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 	input, warnings = reassociateSubmittedJobInput(input, started.JobID, warnings)
 	if warning, err := persistLaunchedJobMetadata(opts, input, started.JobID, contractKind); err != nil {
 		warnings = append(warnings, err.Error())
-		env, envelopeErr := newLaunchEnvelope(started.JobID, engine.StateRunning)
+		env, envelopeErr := newLaunchEnvelope(started.JobID, engine.StateRunning, taskModelEffort(opts))
 		if envelopeErr != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, envelopeErr
 		}
@@ -352,13 +395,13 @@ func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOption
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
-		env, err := terminalEnvelopeFromJobResult(opts.StateDir, jobResult)
+		env, err := terminalEnvelopeFromJobResult(opts.StateDir, jobResult, modelsReportedCapable)
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
 		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
 	}
-	env, err := newLaunchEnvelope(started.JobID, engine.StateRunning)
+	env, err := newLaunchEnvelope(started.JobID, engine.StateRunning, taskModelEffort(opts))
 	if err != nil {
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
@@ -458,6 +501,7 @@ func persistProvisionalJobAdoption(stateDir, provisionalID, jobID string) error 
 }
 
 func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) jobMetadata {
+	modelEffort := normalizedModelEffort(taskModelEffort(opts))
 	return jobMetadata{
 		Schema:          envelopeSchema,
 		JobID:           jobID,
@@ -468,6 +512,22 @@ func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contra
 		NoContract:      opts.NoContract,
 		JobInputPath:    input.Path,
 		ReviewWorkspace: opts.ReviewWorkspace,
+		Model:           modelEffort.Model,
+		Effort:          modelEffort.Effort,
+	}
+}
+
+func taskModelEffort(opts taskOptions) config.ModelEffortResolution {
+	if opts.ResumeSession != "" {
+		return sessionModelEffortResolution()
+	}
+	return opts.ModelEffort
+}
+
+func sessionModelEffortResolution() config.ModelEffortResolution {
+	return config.ModelEffortResolution{
+		Model:  config.DimensionResolution{Source: "session"},
+		Effort: config.DimensionResolution{Source: "session"},
 	}
 }
 
