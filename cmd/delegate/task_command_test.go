@@ -31,7 +31,7 @@ func TestEnvelopeSchemasAndHashes(t *testing.T) {
 	if !bytes.Contains(raw, []byte(`"result_sha256":null`)) {
 		t.Fatalf("launch envelope = %s, want null result_sha256", raw)
 	}
-	wantLaunchHash := sha256.Sum256([]byte(`{"job_id":"job_envelope","result_sha256":null,"schema":1,"status":"queued"}`))
+	wantLaunchHash := sha256.Sum256([]byte(`{"effort":{"source":"default"},"job_id":"job_envelope","model":{"source":"default"},"result_sha256":null,"schema":1,"status":"queued"}`))
 	if launch.SHA256 != hex.EncodeToString(wantLaunchHash[:]) {
 		t.Fatalf("launch sha256 = %q, want %q", launch.SHA256, hex.EncodeToString(wantLaunchHash[:]))
 	}
@@ -70,7 +70,7 @@ func TestEnvelopeSchemasAndHashes(t *testing.T) {
 	if terminal.SHA256 == "" || terminal.SHA256 == strings.Repeat("a", 64) {
 		t.Fatalf("terminal envelope sha256 = %q, want distinct envelope hash", terminal.SHA256)
 	}
-	canonicalTerminal := `{"contract":{"attempts":1,"missing":[],"reason":"","retryUsed":false,"status":"compliant","validatedAt":"1970-01-01T00:00:01Z"},"contractKind":"shape","job_id":"job_envelope","kind":"task","result_sha256":"` + strings.Repeat("a", 64) + `","schema":1,"status":"completed"}`
+	canonicalTerminal := `{"contract":{"attempts":1,"missing":[],"reason":"","retryUsed":false,"status":"compliant","validatedAt":"1970-01-01T00:00:01Z"},"contractKind":"shape","effort":{"source":"default"},"job_id":"job_envelope","kind":"task","model":{"source":"default"},"model_reported_unavailable_reason":"agentbus_capability_missing","result_sha256":"` + strings.Repeat("a", 64) + `","schema":1,"status":"completed"}`
 	wantTerminalHash := sha256.Sum256([]byte(canonicalTerminal))
 	if terminal.SHA256 != hex.EncodeToString(wantTerminalHash[:]) {
 		t.Fatalf("terminal sha256 = %q, want independent canonical JSON digest %q", terminal.SHA256, hex.EncodeToString(wantTerminalHash[:]))
@@ -109,6 +109,9 @@ func TestSetupOutputIncludesStopReviewGateLine(t *testing.T) {
 	if !strings.Contains(stdout.String(), stopReviewGateLine) {
 		t.Fatalf("setup stdout = %q, want %q", stdout.String(), stopReviewGateLine)
 	}
+	if !strings.Contains(stdout.String(), "agentbus models.reported: true") || !strings.Contains(stdout.String(), "config file:") || !strings.Contains(stdout.String(), "config overridable: true") {
+		t.Fatalf("setup stdout = %q, want model-reporting and config lines", stdout.String())
+	}
 }
 
 func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
@@ -133,11 +136,14 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	if !result.Agentbus.CapabilitiesOK || !result.Agentbus.Capabilities["policy.shape"] || !result.Agentbus.Capabilities["policy.retry"] {
 		t.Fatalf("agentbus capabilities = %#v, want required capabilities passing", result.Agentbus)
 	}
+	if !result.Agentbus.Capabilities["models.reported"] || result.Config.Path == "" || !result.Config.Overridable {
+		t.Fatalf("setup config/model capability = %#v / %#v", result.Config, result.Agentbus.Capabilities)
+	}
 	if result.StopReviewGate != "not available (planned v0.2)" {
 		t.Fatalf("stop_review_gate = %q", result.StopReviewGate)
 	}
-	if len(result.Skills) != 14 {
-		t.Fatalf("skill statuses = %d, want 14: %#v", len(result.Skills), result.Skills)
+	if len(result.Skills) != 16 {
+		t.Fatalf("skill statuses = %d, want 16: %#v", len(result.Skills), result.Skills)
 	}
 	for _, skill := range result.Skills {
 		if skill.Target == "" || skill.Name == "" || skill.Path == "" {
@@ -232,11 +238,12 @@ func TestEmbeddedAndDaemonTaskParity(t *testing.T) {
 			fakeClient := &fakeAgentbusClient{
 				hello: helloWithCapabilities(),
 				result: client.JobResult{
-					JobID:     fixedJobID,
-					SessionID: "session_parity",
-					State:     engine.StateCompleted,
-					Result:    &engine.ResultInfo{Text: report, SHA256: rawHash, Bytes: int64(len(report))},
-					Contract:  tc.contract,
+					JobID:         fixedJobID,
+					SessionID:     "session_parity",
+					State:         engine.StateCompleted,
+					Result:        &engine.ResultInfo{Text: report, SHA256: rawHash, Bytes: int64(len(report)), ModelReported: "parity-model"},
+					ModelReported: "parity-model",
+					Contract:      tc.contract,
 				},
 			}
 			restoreClient := stubAgentbusGlobals(t, fakeClient)
@@ -267,6 +274,9 @@ func TestEmbeddedAndDaemonTaskParity(t *testing.T) {
 			}
 			if env.ContractKind != tc.wantContractKind {
 				t.Fatalf("contractKind = %q, want %q", env.ContractKind, tc.wantContractKind)
+			}
+			if env.ModelReported != "parity-model" || env.ModelReportedUnavailableReason != "" {
+				t.Fatalf("parity model_reported = %q (reason %q), want parity-model", env.ModelReported, env.ModelReportedUnavailableReason)
 			}
 			if env.Contract.Status != tc.wantStatus {
 				t.Fatalf("contract status = %q, want %q", env.Contract.Status, tc.wantStatus)
@@ -860,6 +870,8 @@ func stubAgentbusGlobals(t *testing.T, fake *fakeAgentbusClient) func() {
 
 func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	oldConnect := connectAgentbus
 	oldLookPath := lookPath
 	oldCommandOutput := commandOutput
@@ -908,6 +920,7 @@ func helloWithCapabilities() client.HelloResult {
 			"policy.jsonSchema": true,
 			"policy.named":      true,
 			"policy.retry":      true,
+			"models.reported":   true,
 		},
 	}
 }
@@ -1054,7 +1067,8 @@ type fakeSession struct {
 func (s fakeSession) ID() string { return s.id }
 
 func (s fakeSession) Turn(context.Context, engine.TurnInput) (<-chan engine.Event, error) {
-	ch := make(chan engine.Event, 1)
+	ch := make(chan engine.Event, 2)
+	ch <- engine.Event{Type: engine.EventModelReported, ModelReported: "parity-model"}
 	ch <- engine.Event{Type: engine.EventResultMessage, Text: s.result, RawText: s.result}
 	close(ch)
 	return ch, nil

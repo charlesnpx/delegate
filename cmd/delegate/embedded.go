@@ -95,7 +95,10 @@ func runEmbeddedTask(ctx context.Context, opts taskOptions, resolved handoff.Res
 	if err != nil {
 		return taskRunResult{}, err
 	}
+	var modelReported string
 	if err := transitionEmbeddedJob(store, jobID, state, func(record *engine.JobRecord) {
+		modelReported = record.ModelReported
+		resultInfo.ModelReported = record.ModelReported
 		record.Result = &resultInfo
 		record.Contract = stamp
 		record.ResolvedContract = resolvedContract
@@ -106,13 +109,14 @@ func runEmbeddedTask(ctx context.Context, opts taskOptions, resolved handoff.Res
 		return taskRunResult{}, err
 	}
 	jobResult := client.JobResult{
-		JobID:     jobID,
-		SessionID: session.ID(),
-		State:     state,
-		Result:    &resultInfo,
-		Contract:  stamp,
+		JobID:         jobID,
+		SessionID:     session.ID(),
+		State:         state,
+		Result:        &resultInfo,
+		ModelReported: modelReported,
+		Contract:      stamp,
 	}
-	env, err := terminalEnvelopeFromJobResult(opts.StateDir, jobResult)
+	env, err := terminalEnvelopeFromJobResult(opts.StateDir, jobResult, true)
 	if err != nil {
 		return taskRunResult{}, err
 	}
@@ -209,6 +213,16 @@ func collectEmbeddedTurn(ctx context.Context, store *engine.Store, session engin
 	var final []byte
 	for event := range events {
 		switch event.Type {
+		case engine.EventModelReported:
+			if event.ModelReported != "" {
+				_, _ = store.Update(jobID, func(record *engine.JobRecord) (bool, error) {
+					if record.ModelReported == event.ModelReported {
+						return false, nil
+					}
+					record.ModelReported = event.ModelReported
+					return true, nil
+				})
+			}
 		case engine.EventResultMessage:
 			text := event.RawText
 			if text == "" {

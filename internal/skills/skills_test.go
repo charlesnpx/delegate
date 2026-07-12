@@ -15,11 +15,11 @@ func TestTargetMatrices(t *testing.T) {
 	}{
 		{
 			target: TargetClaude,
-			want:   []string{"codex:rescue", "codex:review", "codex:adversarial-review", "codex:status", "codex:result", "codex:cancel", "delegate:setup"},
+			want:   []string{"codex:rescue", "codex:review", "codex:adversarial-review", "codex:status", "codex:result", "codex:cancel", "delegate:setup", "delegate:config"},
 		},
 		{
 			target: TargetCodex,
-			want:   []string{"claude:rescue", "claude:review", "claude:adversarial-review", "claude:status", "claude:result", "claude:cancel", "delegate:setup"},
+			want:   []string{"claude:rescue", "claude:review", "claude:adversarial-review", "claude:status", "claude:result", "claude:cancel", "delegate:setup", "delegate:config"},
 		},
 	} {
 		t.Run(tc.target, func(t *testing.T) {
@@ -39,6 +39,9 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 	for _, skill := range all {
 		if strings.Contains(skill.Content, "--no-contract") {
 			t.Fatalf("%s contains forbidden --no-contract", skill.Name)
+		}
+		if strings.Contains(strings.ToLower(skill.Content), "opus") || strings.Contains(strings.ToLower(skill.Content), "terra") {
+			t.Fatalf("%s hardcodes a model name", skill.Name)
 		}
 		if DecodeName(skill.EscapedName) != skill.Name {
 			t.Fatalf("DecodeName(%q) = %q, want %q", skill.EscapedName, DecodeName(skill.EscapedName), skill.Name)
@@ -99,6 +102,13 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"agentbus reports the policy capabilities",
 				"stop-review-gate",
 			})
+		case KindConfig:
+			requireFragments(t, skill, []string{
+				"delegate config list --json",
+				"delegate config set <key> <value>",
+				"all delegated tasks",
+				"ergonomics control, not a security boundary",
+			})
 		default:
 			t.Fatalf("%s kind = %q", skill.Name, skill.Kind)
 		}
@@ -146,8 +156,8 @@ func TestSourceFixturesMatchGeneratedTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 13 {
-		t.Fatalf("SourceFiles count = %d, want 13", len(files))
+	if len(files) != 14 {
+		t.Fatalf("SourceFiles count = %d, want 14", len(files))
 	}
 	for _, rel := range SortedSourcePaths(files) {
 		if !strings.Contains(filepath.Dir(rel), "__colon__") {

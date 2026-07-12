@@ -12,6 +12,7 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/delegate/internal/config"
 	"github.com/charlesnpx/delegate/internal/handoff"
 	"github.com/charlesnpx/delegate/internal/policy"
 )
@@ -41,7 +42,7 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("use only one of --probe or --wait")
 	}
 	ctx := context.Background()
-	c, _, err := connectAgentbusCommand(ctx, setupRequiredCapabilities())
+	c, hello, err := connectAgentbusCommand(ctx, setupRequiredCapabilities())
 	if err != nil {
 		return 0, err
 	}
@@ -63,7 +64,7 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 			if resultErr != nil {
 				result = terminalJobResultFromStatus(job)
 			}
-			env, envelopeErr := terminalEnvelopeFromJobResult("", result)
+			env, envelopeErr := terminalEnvelopeFromJobResult("", result, hello.Capabilities["models.reported"])
 			if envelopeErr != nil {
 				return 0, envelopeErr
 			}
@@ -148,7 +149,7 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("delegate result requires --job")
 	}
 	ctx := context.Background()
-	c, _, err := connectAgentbusCommand(ctx, setupRequiredCapabilities())
+	c, hello, err := connectAgentbusCommand(ctx, setupRequiredCapabilities())
 	if err != nil {
 		return 0, err
 	}
@@ -167,7 +168,7 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	_ = sweepTerminalJobInputs(ctx, c, "")
 	_ = cleanupJobInput("", result.JobID, result.SessionID, result.State)
-	env, err := terminalEnvelopeFromJobResult("", result)
+	env, err := terminalEnvelopeFromJobResult("", result, hello.Capabilities["models.reported"])
 	if err != nil {
 		return 0, err
 	}
@@ -217,11 +218,12 @@ func waitForTurnResult(ctx context.Context, c agentbusClient, stateDir, jobID st
 			continue
 		}
 		result := client.JobResult{
-			JobID:     notification.Result.JobID,
-			SessionID: notification.Result.SessionID,
-			State:     notification.Result.State,
-			Result:    notification.Result.Result,
-			Contract:  notification.Result.Contract,
+			JobID:         notification.Result.JobID,
+			SessionID:     notification.Result.SessionID,
+			State:         notification.Result.State,
+			Result:        notification.Result.Result,
+			ModelReported: notification.Result.ModelReported,
+			Contract:      notification.Result.Contract,
 		}
 		if err := cleanupJobInput(stateDir, result.JobID, result.SessionID, result.State); err != nil {
 			return client.JobResult{}, err
@@ -277,7 +279,7 @@ func terminalJobResultFallback(ctx context.Context, c agentbusClient, stateDir, 
 }
 
 func terminalJobResultFromStatus(job client.JobStatus) client.JobResult {
-	return client.JobResult{JobID: job.JobID, SessionID: job.SessionID, State: job.State}
+	return client.JobResult{JobID: job.JobID, SessionID: job.SessionID, State: job.State, ModelReported: job.ModelReported}
 }
 
 func waitForJobStatus(ctx context.Context, c agentbusClient, stateDir, jobID string) (client.JobStatusResult, error) {
@@ -427,7 +429,7 @@ func sweepTerminalJobInputs(ctx context.Context, c agentbusClient, stateDir stri
 	return sweepErr
 }
 
-func terminalEnvelopeFromJobResult(stateDir string, result client.JobResult) (TerminalEnvelope, error) {
+func terminalEnvelopeFromJobResult(stateDir string, result client.JobResult, modelsReportedCapable ...bool) (TerminalEnvelope, error) {
 	meta, found, err := loadJobMetadata(stateDir, result.JobID)
 	if err != nil {
 		return TerminalEnvelope{}, err
@@ -456,13 +458,20 @@ func terminalEnvelopeFromJobResult(stateDir string, result client.JobResult) (Te
 		resultSHA256 = result.Result.SHA256
 	}
 	backendError := ""
+	modelEffort := config.ModelEffortResolution{}
 	if found {
 		backendError = meta.BackendError
+		modelEffort.Model = meta.Model
+		modelEffort.Effort = meta.Effort
 	}
 	if result.Result == nil && backendError != "" && !(found && meta.NoContract) {
 		stamp = skippedDelegateContractStamp(engine.SkipBackendError)
 	}
-	return newTerminalEnvelope(result.JobID, result.State, kind, contractKind, stamp, resultSHA256, backendError)
+	capable := false
+	if len(modelsReportedCapable) > 0 {
+		capable = modelsReportedCapable[0]
+	}
+	return newTerminalEnvelope(result.JobID, result.State, kind, contractKind, stamp, resultSHA256, backendError, terminalEnvelopeOptions{ModelEffort: modelEffort, ModelReported: result.ModelReported, ModelsReportedCapable: capable})
 }
 
 func skippedDelegateContractStamp(reason engine.SkippedReason) engine.ContractStamp {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/delegate/internal/config"
 	"github.com/charlesnpx/delegate/internal/handoff"
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
 )
@@ -23,21 +24,23 @@ const (
 )
 
 type jobMetadata struct {
-	Schema          int       `json:"schema"`
-	JobID           string    `json:"job_id"`
-	Kind            string    `json:"kind"`
-	Backend         string    `json:"backend,omitempty"`
-	CWD             string    `json:"cwd,omitempty"`
-	SessionID       string    `json:"session_id,omitempty"`
-	ContractKind    string    `json:"contractKind"`
-	NoContract      bool      `json:"no_contract,omitempty"`
-	JobInputPath    string    `json:"job_input_path,omitempty"`
-	ReviewWorkspace string    `json:"review_workspace,omitempty"`
-	Provisional     bool      `json:"provisional,omitempty"`
-	AdoptedJobID    string    `json:"adopted_job_id,omitempty"`
-	BackendError    string    `json:"backend_error,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	Schema          int                        `json:"schema"`
+	JobID           string                     `json:"job_id"`
+	Kind            string                     `json:"kind"`
+	Backend         string                     `json:"backend,omitempty"`
+	CWD             string                     `json:"cwd,omitempty"`
+	SessionID       string                     `json:"session_id,omitempty"`
+	ContractKind    string                     `json:"contractKind"`
+	NoContract      bool                       `json:"no_contract,omitempty"`
+	JobInputPath    string                     `json:"job_input_path,omitempty"`
+	ReviewWorkspace string                     `json:"review_workspace,omitempty"`
+	Provisional     bool                       `json:"provisional,omitempty"`
+	AdoptedJobID    string                     `json:"adopted_job_id,omitempty"`
+	BackendError    string                     `json:"backend_error,omitempty"`
+	Model           config.DimensionResolution `json:"model,omitempty"`
+	Effort          config.DimensionResolution `json:"effort,omitempty"`
+	CreatedAt       time.Time                  `json:"created_at"`
+	UpdatedAt       time.Time                  `json:"updated_at"`
 }
 
 func captureBackendError(stateDir string, job client.JobStatus) error {

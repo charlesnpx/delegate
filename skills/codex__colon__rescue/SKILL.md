@@ -21,6 +21,8 @@ Superseding escape hatch: if the requester explicitly asks you to perform the ta
 - stdin handoff: sensitive prompt text can be piped to "delegate handoff create --json".
 - backend reachability: "delegate setup --json" shows agentbus capabilities and codex backend availability.
 
+The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
+
 ## Launch
 
 1. Create a prompt for the delegated task. Include the acceptance criteria, repo path, current state, constraints, and what the subagent must report back.

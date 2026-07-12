@@ -21,6 +21,8 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 - cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
 - backend reachability: "delegate setup --json" shows agentbus capabilities and codex backend availability.
 
+The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
+
 Threat model: v0.1 is accident prevention, not a security boundary against an adversarial repository or history. Deliberate history shuffles such as delete-and-recreate sequences intended to evade the heuristics are out of scope. v0.2 OS isolation is the boundary fix for that class.
 
 Do not add "--allow-live-repo-read" unless the user explicitly requests live-repository access after being told that using the repository as backend cwd makes backend file reads easier. It does not change OS filesystem permissions. A container/sandbox profile for OS-level isolation is planned for v0.2.

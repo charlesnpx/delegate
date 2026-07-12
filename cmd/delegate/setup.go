@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/charlesnpx/agentbus/client"
+	delegateconfig "github.com/charlesnpx/delegate/internal/config"
 	skillpkg "github.com/charlesnpx/delegate/internal/skills"
 )
 
@@ -22,8 +23,15 @@ type setupJSON struct {
 	Schema         int           `json:"schema"`
 	Delegate       string        `json:"delegate"`
 	Agentbus       setupAgentbus `json:"agentbus"`
+	Config         setupConfig   `json:"config"`
 	Skills         []setupSkill  `json:"skills"`
 	StopReviewGate string        `json:"stop_review_gate"`
+}
+
+type setupConfig struct {
+	Path        string                  `json:"path"`
+	Overridable bool                    `json:"overridable"`
+	Defaults    delegateconfig.Backends `json:"defaults"`
 }
 
 type setupAgentbus struct {
@@ -71,6 +79,14 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, err
 	}
 	defer c.Close()
+	cfg, err := delegateconfig.Load()
+	if err != nil {
+		return 0, err
+	}
+	configPath, err := delegateconfig.Path()
+	if err != nil {
+		return 0, err
+	}
 	skills, err := installedSkills()
 	if err != nil {
 		return 0, err
@@ -90,6 +106,11 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 				Required:        setupRequiredCapabilities(),
 				CapabilitiesOK:  true,
 			},
+			Config: setupConfig{
+				Path:        configPath,
+				Overridable: cfg.Overridable,
+				Defaults:    cfg.Backend,
+			},
 			Skills:         skills,
 			StopReviewGate: "not available (planned v0.2)",
 		})
@@ -103,6 +124,9 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 	}
 	if _, err := fmt.Fprintf(stdout, "agentbus discovery: found\nagentbus protocol: %d\ncapabilities: ok\n", hello.ProtocolVersion); err != nil {
+		return 0, err
+	}
+	if _, err := fmt.Fprintf(stdout, "agentbus models.reported: %t\nconfig file: %s\nconfig overridable: %t\nconfig backend claude: model=%s effort=%s\nconfig backend codex: model=%s effort=%s\n", hello.Capabilities["models.reported"], configPath, cfg.Overridable, cfg.Backend.Claude.Model, cfg.Backend.Claude.Effort, cfg.Backend.Codex.Model, cfg.Backend.Codex.Effort); err != nil {
 		return 0, err
 	}
 	for _, backend := range hello.Backends {

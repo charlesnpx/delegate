@@ -12,6 +12,7 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	delegateconfig "github.com/charlesnpx/delegate/internal/config"
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
 )
 
@@ -46,6 +47,10 @@ func TestReviewCommandsUseReadOnlySanitizedTaskPipelineAndEnvelopeKinds(t *testi
 			restore := stubAgentbusGlobals(t, fake)
 			defer restore()
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			if err := delegateconfig.Save(delegateconfig.Config{Overridable: true, Backend: delegateconfig.Backends{Codex: delegateconfig.Defaults{Model: "review-default-model", Effort: "review-default-effort"}}}); err != nil {
+				t.Fatal(err)
+			}
 
 			var stdout, stderr bytes.Buffer
 			code := run([]string{tc.command, "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--wait", "--json"}, nil, &stdout, &stderr)
@@ -65,6 +70,9 @@ func TestReviewCommandsUseReadOnlySanitizedTaskPipelineAndEnvelopeKinds(t *testi
 			if spec.Tags["delegate.kind"] != tc.wantKind {
 				t.Fatalf("delegate.kind=%q, want %q", spec.Tags["delegate.kind"], tc.wantKind)
 			}
+			if spec.Model != "review-default-model" || spec.Effort != "review-default-effort" {
+				t.Fatalf("review defaults model=%q effort=%q", spec.Model, spec.Effort)
+			}
 			for _, required := range []string{tc.framing, "PUBLIC_CHANGE", "REDACTED\tM\t\".env.local\""} {
 				if !strings.Contains(spec.Prompt, required) {
 					t.Fatalf("prompt missing %q: %q", required, spec.Prompt)
@@ -81,6 +89,9 @@ func TestReviewCommandsUseReadOnlySanitizedTaskPipelineAndEnvelopeKinds(t *testi
 			}
 			if env.Kind != tc.wantKind {
 				t.Fatalf("envelope kind=%q, want %q", env.Kind, tc.wantKind)
+			}
+			if env.Model.Effective != "review-default-model" || env.Model.Source != "config" || env.Effort.Effective != "review-default-effort" || env.Effort.Source != "config" {
+				t.Fatalf("review model/effort envelope model=%#v effort=%#v", env.Model, env.Effort)
 			}
 			if _, err := os.Stat(spec.CWD); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("terminal review workspace still exists or stat failed: %v", err)
