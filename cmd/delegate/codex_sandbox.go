@@ -534,6 +534,15 @@ func atomicWriteCodexConfig(path string, original, replacement []byte, mode os.F
 	if !bytes.Equal(current, original) {
 		return errCodexConfigChangedConcurrently
 	}
+	// Topology must also be unchanged: a symlink swapped in after resolution
+	// (with identical bytes) would otherwise be replaced by the rename instead
+	// of its target being updated. path here is already the resolved canonical
+	// destination, so it must still be a regular file (or absent) at rename time.
+	if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return errCodexConfigChangedConcurrently
+	} else if lerr != nil && !errors.Is(lerr, os.ErrNotExist) {
+		return fmt.Errorf("inspect Codex config before replacement: %w", lerr)
+	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("replace Codex config: %w", err)
 	}

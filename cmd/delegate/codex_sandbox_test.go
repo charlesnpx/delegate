@@ -177,6 +177,58 @@ func TestConfigureCodexSandboxUpdatesSymlinkTargetWithoutReplacingLink(t *testin
 	}
 }
 
+func TestConfigureCodexSandboxDetectsSymlinkSwappedInBeforeRename(t *testing.T) {
+	paths := testCodexSandboxPaths(t)
+	initial := []byte("model = \"before\"\n")
+	if err := os.MkdirAll(filepath.Dir(paths.ConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.ConfigPath, initial, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// Swap the resolved regular file for a symlink to an identical-bytes target
+	// between validation and rename: the byte compare alone cannot see this, so
+	// the topology check must trigger a retry, and the retry must resolve the
+	// NEW symlink and update its target while preserving the link.
+	sideTarget := filepath.Join(filepath.Dir(paths.ConfigPath), "swapped-target.toml")
+	calls := 0
+	result := configureCodexSandboxAtWithBeforeRename(paths, func(path string) {
+		calls++
+		if calls == 1 {
+			if err := os.WriteFile(sideTarget, initial, 0o640); err != nil {
+				t.Errorf("write side target: %v", err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Errorf("remove config for swap: %v", err)
+			}
+			if err := os.Symlink(sideTarget, path); err != nil {
+				t.Errorf("swap in symlink: %v", err)
+			}
+		}
+	})
+	if result.Action != codexSandboxConfigured {
+		t.Fatalf("action = %q, want configured; warning=%q", result.Action, result.Warning)
+	}
+	info, err := os.Lstat(paths.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("swapped-in symlink was replaced by a regular file")
+	}
+	raw, err := os.ReadFile(sideTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := decodeCodexSandboxConfig(raw)
+	if err != nil {
+		t.Fatalf("updated target does not parse: %v\n%s", err, raw)
+	}
+	if !allWritableRootsPresent(parsed.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots) {
+		t.Fatalf("symlink target missing writable roots:\n%s", raw)
+	}
+}
+
 func TestConfigureCodexSandboxRetriesConcurrentConfigChangeOnce(t *testing.T) {
 	paths := testCodexSandboxPaths(t)
 	initial := []byte("model = \"before\"\n")
