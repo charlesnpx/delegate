@@ -2,7 +2,7 @@
 ## explicit; go 1.18
 github.com/BurntSushi/toml
 github.com/BurntSushi/toml/internal
-# github.com/charlesnpx/agentbus v0.3.0
+# github.com/charlesnpx/agentbus v0.4.0
 ## explicit; go 1.26
 github.com/charlesnpx/agentbus/client
 github.com/charlesnpx/agentbus/engine
