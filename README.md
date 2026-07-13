@@ -1,6 +1,6 @@
 # delegate
 
-`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.4.0 ships `task`, rescue, sanitized review, adversarial-review, job-control workflows, and parent-session audit linkage.
+`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.4.2 ships `task`, rescue, sanitized review, adversarial-review, job-control workflows, and parent-session audit linkage.
 
 agentbus owns execution, supervision, and generic policy enforcement. delegate owns the delegation-specific data and decisions it passes to agentbus: the embedded `delegate-report` contract, the delegate-contract digest, policy tiers, handoff lifecycle, skill matrix, and result envelopes.
 
@@ -25,6 +25,8 @@ The delegated installers build from source, so Go must be on `PATH`. `delegate` 
 ```
 
 `agentbus` must be installed before using delegate skills; installing it first also ensures that `delegate setup --json` can discover its binary and validate required capabilities.
+
+On a live Codex install, delegate minimally updates `${CODEX_HOME:-~/.codex}/config.toml` so the default `workspace-write` sandbox can write both agentbus and delegate state directories. It adds only missing values under `[sandbox_workspace_write].writable_roots`, preserving unrelated TOML text and comments. The roots are `${XDG_STATE_HOME:-~/.local/state}/agentbus` and `${XDG_STATE_HOME:-~/.local/state}/delegate`. `--plan` reports the intended change without writing it; staged `--install-root` invocations do not touch the live Codex config. Uninstall intentionally leaves these security settings in place rather than trying to remove possibly user-managed entries.
 
 ## CLI
 
@@ -98,7 +100,7 @@ The source directories escape `:` as `__colon__`; the installer decodes the name
 
 Launch skills preflight shared filesystem and state access, no-fork execution, agentbus capabilities, and target-backend reachability. Rescue skills launch through `delegate task`; review skills launch through the sanitized `delegate review` commands. All return the launch envelope verbatim and never add `--no-contract`. Job-control skills use the same status, result, cancellation, evidence-preservation, and no-substitute-answer discipline. Review prose requires findings ordered by severity, preservation of evidence labels, and no automatic fixes after review.
 
-v0.4.0 is a breaking namespace rename. On install or upgrade, the managed installer removes the legacy `codex:{rescue,review,adversarial-review,status,result,cancel}` names from Claude Code and the corresponding `claude:{...}` names from Codex; `--plan --json`, `--install --json`, and `--uninstall --json` report them in each target's additive `removed` array (entries of `{"path": ...}`); the `files` array contains only installed skill files.
+v0.4.2 retains the breaking namespace rename. On install or upgrade, the managed installer removes the legacy `codex:{rescue,review,adversarial-review,status,result,cancel}` names from Claude Code and the corresponding `claude:{...}` names from Codex; `--plan --json`, `--install --json`, and `--uninstall --json` report them in each target's additive `removed` array (entries of `{"path": ...}`); the `files` array contains only installed skill files.
 
 ## Contract tiers
 
@@ -157,6 +159,7 @@ Possible contract statuses are `compliant`, `retried`, `noncompliant`, `skipped`
 
 - agentbus discovery (`found`, path, version, protocol, and advertised backends);
 - the full capability map, required delegate capabilities, and `capabilitiesOK` result;
+- `stateRootWritable`, `agentbusStateRootWritable`, and `daemonReachable` preflight booleans;
 - a status for every managed skill (`installed`, `missing`, `outdated`, or `unreadable`); and
 - `stop_review_gate: "not available (planned v0.2)"`.
 
@@ -166,7 +169,7 @@ The non-JSON setup output always includes this exact line:
 stop-review-gate: not available (planned v0.2)
 ```
 
-While a job is outstanding, poll `delegate status --job <id>` every 2–5 minutes rather than blocking indefinitely. An expired heartbeat lease is an immediate stall signal. Otherwise run `delegate status --job <id> --probe`: it samples child-process CPU/elapsed state twice, checks established TCP sockets twice, and compares captured-log size over 60 seconds. Only cancel after all three probes are flat. Report the job ID and last phase, then cancel and relaunch (fresh or `--resume-session`) or continue waiting; never silently drop the job or replace it with an orchestrator-authored answer. Escalate after 30 minutes without progress.
+Launch with `--background`, then poll `delegate status --job <id>` every 2–5 minutes while a job is outstanding. Long `--wait` calls can block a host agent loop for 100+ seconds; reserve them for short, explicitly bounded terminal checks. An expired heartbeat lease is an immediate stall signal. Otherwise run `delegate status --job <id> --probe`: it samples child-process CPU/elapsed state twice, checks established TCP sockets twice, and compares captured-log size over 60 seconds. Only cancel after all three probes are flat. Report the job ID and last phase, then cancel and relaunch (fresh or `--resume-session`) or continue waiting; never silently drop the job or replace it with an orchestrator-authored answer. Escalate after 30 minutes without progress.
 
 ## Development and release
 
@@ -174,7 +177,7 @@ While a job is outstanding, poll `delegate status --job <id>` every 2–5 minute
 GOCACHE=/private/tmp/delegate-gocache go test -race ./...
 GOCACHE=/private/tmp/delegate-gocache go vet ./...
 bash -n install-skill.sh scripts/*.sh
-scripts/release-check.sh v0.4.0
+scripts/release-check.sh v0.4.2
 ```
 
 The release check requires a clean worktree, including no modified tracked files and no untracked files outside ignored paths. Manually inspect the same gate with `git status --short --untracked-files=all`. It also requires the requested tag to point exactly at `HEAD`, requires `VERSION` to match `v<version>`, JSON-decodes installer and CLI output, verifies every staged binary/skill hash, and confirms the staged binary reports the release version. `--allow-dirty` is an unsafe escape hatch and always prints a loud warning when used.

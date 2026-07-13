@@ -53,6 +53,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "install-skills":
 		code, err := runInstallSkills(args[1:], stdout, stderr)
 		return finishCommand(code, err, stderr)
+	case "configure-codex-sandbox":
+		code, err := runConfigureCodexSandbox(args[1:], stdout, stderr)
+		return finishCommand(code, err, stderr)
 	}
 	if len(args) >= 2 && args[0] == "handoff" && args[1] == "create" {
 		if err := runHandoffCreate(args[2:], stdin, stdout, stderr); err != nil {

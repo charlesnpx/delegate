@@ -1,7 +1,7 @@
 ---
 name: delegate:result
 description: Fetch and present a delegated job result through delegate.
-version: v0.4.1
+version: v0.4.2
 ---
 
 # delegate:result
@@ -15,6 +15,8 @@ Set "JOB_ID" to the delegated job id, then run:
 ~~~bash
 delegate result --job "$JOB_ID" --json
 ~~~
+
+For a non-terminal job, do not use "delegate result --wait" as the normal host-agent-loop control flow. Long "--wait" calls can hold a host tool call for 100+ seconds and block the host agent loop. Use "--wait" only for a short, explicitly bounded terminal check; otherwise poll "delegate status --job <id>" and fetch the result after the job is terminal.
 
 For result handling, preserve the helper's verdict, summary, findings, and next steps structure. For review-style output, present findings first and keep them ordered by severity. Preserve file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. If there are no findings, say that explicitly and keep residual risk brief. If the run failed or returned malformed output, include the actionable stderr or envelope fields and stop instead of guessing. After presenting review findings, do not auto-fix; ask the user which issues to address.
 

@@ -295,6 +295,74 @@ build_delegate() {
   exit 1
 }
 
+live_install_root() {
+  [[ -n "${HOME:-}" && "$HOME" == /* && -d "$HOME" ]] || return 1
+  canonical_existing_dir "$HOME"
+}
+
+record_codex_sandbox_action() {
+  codex_requested || return 0
+
+  local config_path agentbus_state delegate_state codex_home state_home
+  case "$OPERATION" in
+    plan)
+      if [[ -n "${HOME:-}" && "$HOME" == /* ]]; then
+        codex_home=${CODEX_HOME:-"$HOME/.codex"}
+        state_home=${XDG_STATE_HOME:-"$HOME/.local/state"}
+        if [[ "$codex_home" == /* && "$state_home" == /* ]]; then
+          config_path="$codex_home/config.toml"
+          agentbus_state="$state_home/agentbus"
+          delegate_state="$state_home/delegate"
+        add_warning "codex sandbox writable_roots would-configure: $agentbus_state, $delegate_state (config $config_path)"
+        else
+          add_warning "codex sandbox writable_roots skipped: HOME, CODEX_HOME, and XDG_STATE_HOME must resolve to absolute paths"
+        fi
+      else
+        add_warning "codex sandbox writable_roots skipped: HOME, CODEX_HOME, and XDG_STATE_HOME must resolve to absolute paths"
+      fi
+      ;;
+    uninstall)
+      add_warning "codex sandbox writable_roots entries left in place; uninstall does not remove security configuration automatically"
+      ;;
+    install)
+      local live_root
+      live_root=$(live_install_root) || {
+        add_warning "codex sandbox writable_roots skipped: live HOME directory is unavailable"
+        return 0
+      }
+      # mise-en-place invokes delegated installers with a temporary
+      # --install-root, then copies staged files into the live destination.
+      # Configuring from that staged invocation would mutate the user's Codex
+      # sandbox even though the staged skills have not been installed live.
+      if [[ "$ROOT" != "$live_root" ]]; then
+        add_warning "codex sandbox writable_roots skipped: staged install root $ROOT is not the live home directory"
+        return 0
+      fi
+
+      local configure_bin temp_bin="" result
+      if tools_requested; then
+        configure_bin=$TOOL_PATH
+      else
+        if ! command -v go >/dev/null 2>&1; then
+          add_warning "codex sandbox writable_roots skipped: go is required to run the Go TOML configurator"
+          return 0
+        fi
+        temp_bin=$(mktemp "${TMPDIR:-/tmp}/delegate-codex-sandbox.XXXXXX")
+        build_delegate "$temp_bin"
+        configure_bin=$temp_bin
+      fi
+      if result=$("$configure_bin" configure-codex-sandbox 2>&1); then
+        add_warning "$result"
+      else
+        add_warning "codex sandbox writable_roots skipped: $result"
+      fi
+      if [[ -n "$temp_bin" ]]; then
+        rm -f -- "$temp_bin"
+      fi
+      ;;
+  esac
+}
+
 install_skills_for_target() {
   local target=$1
   local escaped src dest
@@ -370,6 +438,8 @@ case "$OPERATION" in
     die "unsupported operation: $OPERATION"
     ;;
 esac
+
+record_codex_sandbox_action
 
 print_warnings() {
   printf '[%s]' "$WARNINGS_JSON"

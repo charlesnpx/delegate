@@ -1,7 +1,7 @@
 ---
 name: delegate:cancel
 description: Cancel a delegated job after confirming it is stalled through delegate.
-version: v0.4.1
+version: v0.4.2
 ---
 
 # delegate:cancel

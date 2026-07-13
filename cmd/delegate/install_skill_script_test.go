@@ -171,6 +171,66 @@ func TestDelegatedInstallerPlanShowsLegacyRemovals(t *testing.T) {
 	}
 }
 
+func TestDelegatedInstallerLiveCodexInstallConfiguresSandbox(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	codexHome := filepath.Join(home, "codex-home")
+	stateHome := filepath.Join(home, "state")
+	gocache := privateTmpDir(t, "delegate-gocache-*")
+	gomodcache := privateTmpDir(t, "delegate-gomodcache-*")
+	env := []string{
+		"HOME=" + home,
+		"CODEX_HOME=" + codexHome,
+		"XDG_STATE_HOME=" + stateHome,
+		"GOCACHE=" + gocache,
+		"GOMODCACHE=" + gomodcache,
+		"GOPROXY=off",
+		"GOSUMDB=off",
+	}
+
+	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "codex", "--json"}, env)
+	if !containsInstallerWarning(installed.Warnings, "codex sandbox writable_roots configured") {
+		t.Fatalf("install warnings = %#v, want configured sandbox", installed.Warnings)
+	}
+	configPath := filepath.Join(codexHome, "config.toml")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := decodeCodexSandboxConfig(raw)
+	if err != nil {
+		t.Fatalf("configured config does not parse: %v\n%s", err, raw)
+	}
+	wantRoots := []string{filepath.Join(stateHome, "agentbus"), filepath.Join(stateHome, "delegate")}
+	if !allWritableRootsPresent(parsed.SandboxWorkspaceWrite.WritableRoots, wantRoots) {
+		t.Fatalf("writable roots = %#v, want %#v", parsed.SandboxWorkspaceWrite.WritableRoots, wantRoots)
+	}
+
+	beforeUninstall := append([]byte(nil), raw...)
+	uninstalled := runDelegatedInstallerScript(t, []string{"--uninstall", "--target", "codex", "--json"}, env)
+	if !containsInstallerWarning(uninstalled.Warnings, "entries left in place") {
+		t.Fatalf("uninstall warnings = %#v, want leave-in-place note", uninstalled.Warnings)
+	}
+	afterUninstall, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterUninstall) != string(beforeUninstall) {
+		t.Fatal("uninstall changed Codex sandbox configuration")
+	}
+}
+
+func containsInstallerWarning(warnings []string, want string) bool {
+	for _, warning := range warnings {
+		if strings.Contains(warning, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestDelegatedInstallerToolsInstallBuildsDelegate(t *testing.T) {
 	tmp, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

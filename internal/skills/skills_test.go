@@ -92,6 +92,7 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				`--handoff-prompt-file "$HANDOFF_PATH"`,
 				"Return the launch envelope verbatim",
 			})
+			requireNonBlockingWaitGuidance(t, skill)
 			requireStallGuidance(t, skill)
 		case KindReview:
 			requireFragments(t, skill, []string{
@@ -114,6 +115,7 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 			if !strings.Contains(skill.Content, "delegate "+action+" --backend") {
 				t.Fatalf("%s missing review command", skill.Name)
 			}
+			requireNonBlockingWaitGuidance(t, skill)
 			requireStallGuidance(t, skill)
 		case KindJobControl:
 			requireFragments(t, skill, []string{
@@ -125,6 +127,9 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"do not auto-fix",
 				"Do not replace the job with a local answer",
 			})
+			if skill.Name == "delegate:result" {
+				requireNonBlockingWaitGuidance(t, skill)
+			}
 			requireStallGuidance(t, skill)
 		case KindSetup:
 			requireFragments(t, skill, []string{
@@ -142,6 +147,20 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 			})
 		default:
 			t.Fatalf("%s kind = %q", skill.Name, skill.Kind)
+		}
+	}
+}
+
+func requireNonBlockingWaitGuidance(t *testing.T, skill GeneratedSkill) {
+	t.Helper()
+	for _, fragment := range []string{
+		"host agent loop",
+		"100+ seconds",
+		"short, explicitly bounded terminal check",
+		"delegate status --job <id>",
+	} {
+		if !strings.Contains(skill.Content, fragment) {
+			t.Fatalf("%s lacks non-blocking wait guidance %q", skill.Name, fragment)
 		}
 	}
 }
