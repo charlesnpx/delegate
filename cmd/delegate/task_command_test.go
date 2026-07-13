@@ -441,9 +441,7 @@ func TestBackgroundJobInputIsReassociatedAndSweptByNextStatus(t *testing.T) {
 	if _, err := os.Stat(matches[0]); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("job input remains after terminal status sweep: %v", err)
 	}
-	if len(fake.statuses) < 2 {
-		t.Fatalf("JobStatus calls = %d, want primary lookup plus sweep lookup", len(fake.statuses))
-	}
+	assertOnlyRequestedStatusCall(t, fake.statuses, "job_background_reap")
 }
 
 func TestBackgroundJobInputIsSweptByNextResult(t *testing.T) {

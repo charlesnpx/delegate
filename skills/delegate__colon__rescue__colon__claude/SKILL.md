@@ -45,13 +45,13 @@ Launch with "--background" and keep the host agent loop free to continue useful 
 
 ## Stall Monitoring
 
-While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call.
+While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call. Plain "delegate status --json --job <id>" is the cheap call; "--probe" blocks for roughly two sampling intervals (default ~10s+, configurable with "--probe-interval").
 
 An expired heartbeat lease in "delegate status" is an immediate stall signal. Otherwise, distinguish a long agent turn from a genuine stall before cancelling: run "delegate status --job <id> --probe" before any cancel. The probe automates all three checks and reports per-probe results:
 
 - "ps -p <pid> -o %cpu,etime,stat" sampled twice for child process activity.
 - "lsof -p <pid> -iTCP -sTCP:ESTABLISHED" to confirm a live API socket.
-- captured log file size watched over 60 seconds, because progress can land without a command event.
+- captured log file size watched over the probe interval, because progress can land without a command event.
 
 Only if all three probes are flat is the job stalled. On confirmed stall, report the job id and last-known phase, then either "delegate cancel --job <id>" and relaunch fresh or with "--resume-session", or keep waiting. Never silently drop the job, never substitute your own answer for the delegated run, and escalate after a 30-minute patience cap without progress.
 

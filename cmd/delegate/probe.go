@@ -15,6 +15,9 @@ import (
 )
 
 const (
+	defaultProbeInterval = 10 * time.Second
+	minimumProbeInterval = time.Second
+
 	probeStatusActive  = "active"
 	probeStatusFlat    = "flat"
 	probeStatusUnknown = "unknown"
@@ -96,7 +99,7 @@ type probeOps struct {
 }
 
 var (
-	probeInterval = 60 * time.Second
+	probeInterval = defaultProbeInterval
 	livenessOps   = probeOps{
 		ProcessIdentity: realProcessIdentityObservation,
 		Process:         realProcessObservation,
@@ -110,6 +113,10 @@ var (
 )
 
 func probeJobStatus(ctx context.Context, job client.JobStatus) (statusProbeResult, error) {
+	return probeJobStatusWithInterval(ctx, job, probeInterval)
+}
+
+func probeJobStatusWithInterval(ctx context.Context, job client.JobStatus, interval time.Duration) (statusProbeResult, error) {
 	pid := job.BackendChildPID
 	if pid == 0 {
 		pid = job.WorkerPID
@@ -136,13 +143,17 @@ func probeJobStatus(ctx context.Context, job client.JobStatus) (statusProbeResul
 		result.Verdict = probeVerdictStalledExpiredLease
 		return result, nil
 	}
-	probes, err := runLivenessProbes(ctx, job, livenessOps, probeInterval)
+	probes, err := runLivenessProbes(ctx, job, livenessOps, interval)
 	if err != nil {
 		return statusProbeResult{}, err
 	}
 	result.Probes = probes
 	result.Verdict, result.VerdictReason = livenessVerdictReason(probes)
 	return result, nil
+}
+
+func probeRuntimeNotice(interval time.Duration) string {
+	return fmt.Sprintf("probing liveness over 2 samples ~%s apart; total runtime ~%s-%s", interval, interval, 3*interval)
 }
 
 func skippedLeaseProbes() []livenessProbe {
