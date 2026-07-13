@@ -4,8 +4,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	skillpkg "github.com/charlesnpx/delegate/internal/skills"
 )
@@ -60,8 +62,9 @@ func runInstallSkills(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	warnings := codexSandboxInstallerWarnings(operation, *target, *installRoot)
 	if *jsonOut {
-		return 0, writeJSONLine(stdout, installSkillsJSON(operation, results))
+		return 0, writeJSONLine(stdout, installSkillsJSON(operation, results, warnings))
 	}
 	names := make([]string, 0, len(results))
 	for name := range results {
@@ -70,6 +73,11 @@ func runInstallSkills(args []string, stdout, stderr io.Writer) (int, error) {
 	sort.Strings(names)
 	for _, name := range names {
 		if _, err := fmt.Fprintf(stdout, "%s %s %d file(s)\n", operation, name, len(results[name].Files)); err != nil {
+			return 0, err
+		}
+	}
+	for _, warning := range warnings {
+		if _, err := fmt.Fprintf(stderr, "warning: %s\n", warning); err != nil {
 			return 0, err
 		}
 	}
@@ -89,7 +97,7 @@ func applySkillOperation(operation, target, installRoot string) (map[string]skil
 	}
 }
 
-func installSkillsJSON(operation string, results map[string]skillpkg.Result) installSkillsResult {
+func installSkillsJSON(operation string, results map[string]skillpkg.Result, warnings []string) installSkillsResult {
 	targets := make(map[string]installSkillTarget, len(results))
 	for name, result := range results {
 		targets[name] = installSkillTarget{Files: result.Files, Removed: result.Removed}
@@ -101,6 +109,58 @@ func installSkillsJSON(operation string, results map[string]skillpkg.Result) ins
 		Operation: operation,
 		Kind:      "delegate-skills",
 		Targets:   targets,
-		Warnings:  []string{},
+		Warnings:  warnings,
 	}
+}
+
+func codexSandboxInstallerWarnings(operation, target, installRoot string) []string {
+	if target != skillpkg.TargetCodex && target != skillpkg.TargetAll {
+		return []string{}
+	}
+	paths, err := resolveCodexSandboxPaths(os.Getenv, os.UserHomeDir)
+	if err != nil {
+		return []string{fmt.Sprintf("codex sandbox writable_roots skipped: %v", err)}
+	}
+	rootList := strings.Join(paths.WritableRoots, ", ")
+	switch operation {
+	case "plan":
+		return []string{fmt.Sprintf("codex sandbox writable_roots would-configure: %s (config %s)", rootList, paths.ConfigPath)}
+	case "uninstall":
+		return []string{"codex sandbox writable_roots entries left in place; uninstall does not remove security configuration automatically"}
+	case "install":
+		if !isLiveSkillInstallRoot(installRoot) {
+			return []string{fmt.Sprintf("codex sandbox writable_roots skipped: staged install root %q is not the live home directory", installRoot)}
+		}
+		result := configureCodexSandboxAt(paths)
+		switch result.Action {
+		case codexSandboxConfigured, codexSandboxAlreadyConfigured:
+			return []string{fmt.Sprintf("codex sandbox writable_roots %s at %s", result.Action, result.ConfigPath)}
+		default:
+			return []string{fmt.Sprintf("codex sandbox writable_roots skipped: %s", result.Warning)}
+		}
+	default:
+		return []string{fmt.Sprintf("codex sandbox writable_roots skipped: unsupported operation %q", operation)}
+	}
+}
+
+// isLiveSkillInstallRoot mirrors agentbus's installer guard: delegated
+// installers commonly pass a temporary --install-root and must not mutate the
+// real Codex configuration from that staging run.
+func isLiveSkillInstallRoot(installRoot string) bool {
+	if installRoot == "" {
+		return true
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	liveRoot, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return false
+	}
+	root, err := filepath.EvalSymlinks(installRoot)
+	if err != nil {
+		return false
+	}
+	return filepath.Clean(root) == filepath.Clean(liveRoot)
 }

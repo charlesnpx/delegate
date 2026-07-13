@@ -13,19 +13,24 @@ import (
 	"time"
 
 	"github.com/charlesnpx/agentbus/client"
+	"github.com/charlesnpx/agentbus/engine"
 	delegateconfig "github.com/charlesnpx/delegate/internal/config"
+	"github.com/charlesnpx/delegate/internal/handoff"
 	skillpkg "github.com/charlesnpx/delegate/internal/skills"
 )
 
 const stopReviewGateLine = "stop-review-gate: not available (planned v0.2)"
 
 type setupJSON struct {
-	Schema         int           `json:"schema"`
-	Delegate       string        `json:"delegate"`
-	Agentbus       setupAgentbus `json:"agentbus"`
-	Config         setupConfig   `json:"config"`
-	Skills         []setupSkill  `json:"skills"`
-	StopReviewGate string        `json:"stop_review_gate"`
+	Schema                    int           `json:"schema"`
+	Delegate                  string        `json:"delegate"`
+	Agentbus                  setupAgentbus `json:"agentbus"`
+	Config                    setupConfig   `json:"config"`
+	Skills                    []setupSkill  `json:"skills"`
+	StateRootWritable         bool          `json:"stateRootWritable"`
+	AgentbusStateRootWritable bool          `json:"agentbusStateRootWritable"`
+	DaemonReachable           bool          `json:"daemonReachable"`
+	StopReviewGate            string        `json:"stop_review_gate"`
 }
 
 type setupConfig struct {
@@ -79,6 +84,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, err
 	}
 	defer c.Close()
+	preflight := setupStatePreflight()
 	cfg, err := delegateconfig.Load()
 	if err != nil {
 		return 0, err
@@ -111,8 +117,11 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 				Overridable: cfg.Overridable,
 				Defaults:    cfg.Backend,
 			},
-			Skills:         skills,
-			StopReviewGate: "not available (planned v0.2)",
+			Skills:                    skills,
+			StateRootWritable:         preflight.StateRootWritable,
+			AgentbusStateRootWritable: preflight.AgentbusStateRootWritable,
+			DaemonReachable:           true,
+			StopReviewGate:            "not available (planned v0.2)",
 		})
 	}
 	if _, err := fmt.Fprintf(stdout, "%s\nagentbus: %s\n", versionLine(), path); err != nil {
@@ -124,6 +133,9 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 	}
 	if _, err := fmt.Fprintf(stdout, "agentbus discovery: found\nagentbus protocol: %d\ncapabilities: ok\n", hello.ProtocolVersion); err != nil {
+		return 0, err
+	}
+	if _, err := fmt.Fprintf(stdout, "stateRootWritable: %t\nagentbusStateRootWritable: %t\ndaemonReachable: true\n", preflight.StateRootWritable, preflight.AgentbusStateRootWritable); err != nil {
 		return 0, err
 	}
 	if _, err := fmt.Fprintf(stdout, "agentbus models.reported: %t\nconfig file: %s\nconfig overridable: %t\nconfig backend claude: model=%s effort=%s\nconfig backend codex: model=%s effort=%s\n", hello.Capabilities["models.reported"], configPath, cfg.Overridable, cfg.Backend.Claude.Model, cfg.Backend.Claude.Effort, cfg.Backend.Codex.Model, cfg.Backend.Codex.Effort); err != nil {
@@ -149,6 +161,50 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, err
 	}
 	return 0, nil
+}
+
+type setupStatePreflightResult struct {
+	StateRootWritable         bool
+	AgentbusStateRootWritable bool
+}
+
+func setupStatePreflight() setupStatePreflightResult {
+	result := setupStatePreflightResult{}
+	delegateRoot, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err == nil {
+		if err := handoff.EnsureStateDir(delegateRoot); err == nil {
+			result.StateRootWritable = directoryWritable(delegateRoot)
+		}
+	}
+	agentbusRoot, err := engine.ResolveStateRoot()
+	if err == nil {
+		result.AgentbusStateRootWritable = directoryWritable(agentbusRoot)
+	}
+	return result
+}
+
+// directoryWritable proves both create and write access without leaving a
+// probe file behind. The state directory itself is intentionally retained: a
+// successful preflight is allowed to create the directory it reports usable.
+func directoryWritable(path string) bool {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return false
+	}
+	file, err := os.CreateTemp(path, ".delegate-setup-*")
+	if err != nil {
+		return false
+	}
+	name := file.Name()
+	defer os.Remove(name)
+	if _, err := file.WriteString("setup preflight\n"); err != nil {
+		_ = file.Close()
+		return false
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return false
+	}
+	return file.Close() == nil
 }
 
 func installedSkills() ([]setupSkill, error) {

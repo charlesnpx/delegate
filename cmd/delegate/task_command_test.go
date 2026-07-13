@@ -118,6 +118,7 @@ func TestSetupCapabilityGateReportsStaleAgentbus(t *testing.T) {
 func TestSetupOutputIncludesStopReviewGateLine(t *testing.T) {
 	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
 	defer restore()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"setup"}, nil, &stdout, &stderr)
@@ -129,6 +130,11 @@ func TestSetupOutputIncludesStopReviewGateLine(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "agentbus models.reported: true") || !strings.Contains(stdout.String(), "config file:") || !strings.Contains(stdout.String(), "config overridable: true") {
 		t.Fatalf("setup stdout = %q, want model-reporting and config lines", stdout.String())
+	}
+	for _, line := range []string{"stateRootWritable: true", "agentbusStateRootWritable: true", "daemonReachable: true"} {
+		if !strings.Contains(stdout.String(), line) {
+			t.Fatalf("setup stdout = %q, want %q", stdout.String(), line)
+		}
 	}
 }
 
@@ -159,6 +165,9 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	}
 	if result.StopReviewGate != "not available (planned v0.2)" {
 		t.Fatalf("stop_review_gate = %q", result.StopReviewGate)
+	}
+	if !result.StateRootWritable || !result.AgentbusStateRootWritable || !result.DaemonReachable {
+		t.Fatalf("setup preflight fields = stateRootWritable=%t agentbusStateRootWritable=%t daemonReachable=%t, want all true", result.StateRootWritable, result.AgentbusStateRootWritable, result.DaemonReachable)
 	}
 	if len(result.Skills) != 22 {
 		t.Fatalf("skill statuses = %d, want 22: %#v", len(result.Skills), result.Skills)

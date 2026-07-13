@@ -1,7 +1,7 @@
 ---
 name: delegate:adversarial-review:codex
 description: Delegate a refute-first adversarial code review to codex through sanitized delegate review context and return the launch envelope verbatim.
-version: v0.4.1
+version: v0.4.2
 ---
 
 # delegate:adversarial-review:codex
@@ -42,6 +42,8 @@ delegate adversarial-review --backend codex --origin delegate:adversarial-review
 ~~~
 
 Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "result_sha256", or "sha256" fields.
+
+Launch with "--background" and keep the host agent loop free to continue useful work. Long "--wait" calls can hold a host tool call for 100+ seconds and block that loop; use "--wait" only for a short, explicitly bounded terminal check. For an outstanding job, poll "delegate status --job <id>" instead.
 
 ## Stall Monitoring
 
