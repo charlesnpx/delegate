@@ -1030,6 +1030,50 @@ func TestTaskFreshIsDefaultAndExplicit(t *testing.T) {
 	}
 }
 
+func TestTaskPassesThroughUnadvertisedCatalogModelAndEffort(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: client.HelloResult{
+		ProtocolVersion: 1,
+		Backends:        []string{"claude"},
+		Capabilities:    helloWithCapabilities().Capabilities,
+		BackendMetadata: []client.BackendInfo{{Name: "claude", Models: []string{"sonnet"}, Efforts: []string{"medium"}}},
+	}}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"task", "--backend", "claude", "--cwd", t.TempDir(),
+		"--model", "claude-sonnet-4-6", "--effort", "high",
+		"--prompt", "pass these values through", "--background", "--json",
+	}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("task code = %d stderr=%q", code, stderr.String())
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("JobSubmit calls = %d, want 1", len(fake.submits))
+	}
+	// Warnings must never contaminate the JSON stdout channel: stdout must be
+	// exactly one decodable launch envelope with no warning text.
+	var launch LaunchEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &launch); err != nil {
+		t.Fatalf("stdout is not a single launch envelope: %v; raw=%q", err, stdout.String())
+	}
+	if strings.Contains(stdout.String(), "warning:") {
+		t.Fatalf("stdout contains warning text: %q", stdout.String())
+	}
+	spec := fake.submits[0].TaskSpec
+	if spec.Model != "claude-sonnet-4-6" || spec.Effort != "high" {
+		t.Fatalf("TaskSpec model/effort = %q/%q, want claude-sonnet-4-6/high", spec.Model, spec.Effort)
+	}
+	for _, want := range []string{
+		`warning: model "claude-sonnet-4-6" is not advertised by agentbus for backend "claude" (advertised: sonnet); passing through — the backend is authoritative`,
+		`warning: effort "high" is not advertised by agentbus for backend "claude" (advertised: medium); passing through — the backend is authoritative`,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want substring %q", stderr.String(), want)
+		}
+	}
+}
+
 func stubAgentbusGlobals(t *testing.T, fake *fakeAgentbusClient) func() {
 	return stubAgentbusClientGlobals(t, fake)
 }

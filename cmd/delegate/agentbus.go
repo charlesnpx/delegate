@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"sort"
 	"strings"
@@ -26,7 +27,7 @@ type agentbusClient interface {
 	JobCancel(context.Context, client.JobCancelParams) (client.JobCancelResult, error)
 }
 
-func validateBackend(hello client.HelloResult, backend, model, effort string) error {
+func validateBackend(hello client.HelloResult, backend, model, effort string, stderr io.Writer) error {
 	available := append([]string(nil), hello.Backends...)
 	sort.Strings(available)
 	found := false
@@ -44,13 +45,22 @@ func validateBackend(hello client.HelloResult, backend, model, effort string) er
 			continue
 		}
 		if model != "" && len(meta.Models) > 0 && !containsString(meta.Models, model) {
-			return fmt.Errorf("unknown model %q for backend %q; available models: %s", model, backend, strings.Join(meta.Models, ", "))
+			if _, err := fmt.Fprintf(stderr, "warning: %s\n", unadvertisedBackendValueWarning("model", model, backend, meta.Models)); err != nil {
+				return err
+			}
 		}
 		if effort != "" && len(meta.Efforts) > 0 && !containsString(meta.Efforts, effort) {
-			return fmt.Errorf("unknown effort %q for backend %q; available efforts: %s", effort, backend, strings.Join(meta.Efforts, ", "))
+			if _, err := fmt.Fprintf(stderr, "warning: %s\n", unadvertisedBackendValueWarning("effort", effort, backend, meta.Efforts)); err != nil {
+				return err
+			}
 		}
+		return nil
 	}
 	return nil
+}
+
+func unadvertisedBackendValueWarning(dimension, value, backend string, advertised []string) string {
+	return fmt.Sprintf("%s %q is not advertised by agentbus for backend %q (advertised: %s); passing through — the backend is authoritative", dimension, value, backend, strings.Join(advertised, ", "))
 }
 
 func containsString(values []string, want string) bool {
