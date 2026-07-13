@@ -3,6 +3,7 @@ package policy
 import (
 	_ "embed"
 	"encoding/json"
+	"fmt"
 
 	"github.com/charlesnpx/agentbus/engine"
 )
@@ -31,6 +32,7 @@ type Flags struct {
 	Write          bool
 	StrictContract bool
 	NoContract     bool
+	JSONSchema     json.RawMessage
 }
 
 // DelegateReportSpec returns a fresh copy of the embedded concrete report contract.
@@ -64,7 +66,30 @@ func RegisterDelegateReport(registry *engine.PolicyRegistry) (string, error) {
 // ResolveTurnPolicy converts CLI policy flags into the engine policy for a task turn.
 func ResolveTurnPolicy(flags Flags) (*engine.TurnPolicy, error) {
 	if flags.NoContract {
+		if flags.JSONSchema != nil {
+			return nil, fmt.Errorf("--no-contract cannot be used with a JSON Schema contract")
+		}
 		return nil, nil
+	}
+	if flags.JSONSchema != nil {
+		schema := make(json.RawMessage, len(flags.JSONSchema))
+		copy(schema, flags.JSONSchema)
+		spec := engine.ContractSpec{JSONSchema: schema}
+		if _, err := engine.ValidateContract("", spec); err != nil {
+			return nil, err
+		}
+		resolved, _, _, err := engine.ResolveContract(spec, engine.NewPolicyRegistry())
+		if err != nil {
+			return nil, err
+		}
+		return &engine.TurnPolicy{
+			Prologue: jsonSchemaPrologue(resolved.JSONSchema),
+			Contract: &resolved,
+			Retry: &engine.RetryPolicy{
+				Max:      1,
+				Template: CorrectiveRetryTemplate,
+			},
+		}, nil
 	}
 	spec, err := DelegateReportSpec()
 	if err != nil {
@@ -81,6 +106,10 @@ func ResolveTurnPolicy(flags Flags) (*engine.TurnPolicy, error) {
 		}
 	}
 	return policy, nil
+}
+
+func jsonSchemaPrologue(schema json.RawMessage) string {
+	return "Your final response must be a single JSON document that conforms to this JSON Schema:\n\n" + string(schema)
 }
 
 // DisabledStamp returns the engine-compatible contract stamp for --no-contract envelopes.
