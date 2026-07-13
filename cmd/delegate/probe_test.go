@@ -125,6 +125,72 @@ func TestRunStatusProbeRequiresJob(t *testing.T) {
 	}
 }
 
+func TestRunStatusProbeIntervalAndJSONNotice(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		interval time.Duration
+		notice   string
+	}{
+		{name: "default", args: nil, interval: 10 * time.Second, notice: "2 samples ~10s apart; total runtime ~10s-30s"},
+		{name: "custom", args: []string{"--probe-interval", "3s"}, interval: 3 * time.Second, notice: "2 samples ~3s apart; total runtime ~3s-9s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sampled time.Duration
+			restoreProbe := stubProbeOps(t, probeOps{
+				ProcessIdentity: matchingProcessIdentity(200, "backend-start"),
+				Process:         sequenceProcess(processObservation{Alive: true}, processObservation{Alive: true}),
+				Socket:          sequenceSocket(socketObservation{}, socketObservation{}),
+				LogSize:         sequenceLog(logObservation{Available: true}, logObservation{Available: true}),
+				Sleep: func(_ context.Context, interval time.Duration) error {
+					sampled = interval
+					return nil
+				},
+			})
+			defer restoreProbe()
+			fake := &fakeAgentbusClient{
+				hello: helloWithCapabilities(),
+				status: client.JobStatusResult{Jobs: []client.JobStatus{{
+					JobID:                 "job_probe_interval",
+					State:                 engine.StateRunning,
+					BackendChildPID:       200,
+					BackendChildStartTime: "backend-start",
+					LogPaths:              engine.LogPaths{Stdout: "/tmp/out.log"},
+				}}},
+			}
+			restoreAgentbus := stubAgentbusGlobals(t, fake)
+			defer restoreAgentbus()
+
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"status", "--job", "job_probe_interval", "--probe", "--json"}, tc.args...)
+			if code := run(args, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("status probe code = %d, stderr = %q", code, stderr.String())
+			}
+			if sampled != tc.interval {
+				t.Fatalf("probe interval = %s, want %s", sampled, tc.interval)
+			}
+			if !strings.Contains(stderr.String(), tc.notice) {
+				t.Fatalf("stderr = %q, want notice %q", stderr.String(), tc.notice)
+			}
+			var result statusProbeResult
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+				t.Fatalf("probe stdout is not pure JSON: %v; raw = %q", err, stdout.String())
+			}
+		})
+	}
+}
+
+func TestRunStatusProbeIntervalRejectsSubsecondValues(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status", "--job", "job_probe", "--probe-interval", "500ms"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("subsecond probe interval succeeded")
+	}
+	if !strings.Contains(stderr.String(), "--probe-interval must be at least 1s") {
+		t.Fatalf("stderr = %q, want minimum-interval error", stderr.String())
+	}
+}
+
 func TestRunStatusProbeMissingLsofIsInconclusive(t *testing.T) {
 	restoreCommand := stubProbeCommandOutput(t, func(context.Context, string, ...string) ([]byte, error) {
 		return nil, errors.New("exec: lsof: executable file not found")

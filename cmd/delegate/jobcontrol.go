@@ -19,13 +19,21 @@ import (
 
 const provisionalMetadataAdoptionThreshold = time.Minute
 
+const (
+	initialJobPollInterval = 100 * time.Millisecond
+	maximumJobPollInterval = 2 * time.Second
+)
+
+var jobPollSleep = sleepContext
+
 func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	fs := flag.NewFlagSet("delegate status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	jobID := fs.String("job", "", "job id")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	wait := fs.Bool("wait", false, "wait for terminal status")
-	probe := fs.Bool("probe", false, "run process/socket/log liveness probes for the job")
+	probe := fs.Bool("probe", false, "run process/socket/log liveness probes for the job (takes ~10-30s by default)")
+	probeInterval := fs.Duration("probe-interval", defaultProbeInterval, "duration between liveness samples (minimum 1s)")
 	if err := fs.Parse(args); err != nil {
 		return 0, err
 	}
@@ -40,6 +48,9 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	if *probe && *wait {
 		return 0, fmt.Errorf("use only one of --probe or --wait")
+	}
+	if *probeInterval < minimumProbeInterval {
+		return 0, fmt.Errorf("--probe-interval must be at least %s", minimumProbeInterval)
 	}
 	ctx := context.Background()
 	c, hello, err := connectAgentbusCommand(ctx, setupRequiredCapabilities())
@@ -56,27 +67,28 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	_ = sweepTerminalJobInputs(ctx, c, "")
-	cleanupStatuses("", status)
 	if *jobID != "" {
-		if job, ok := findJobStatus(status, *jobID); ok && engine.IsTerminal(job.State) && !*probe {
-			result, resultErr := c.JobResult(ctx, client.JobResultParams{JobID: *jobID})
-			if resultErr != nil {
-				result = terminalJobResultFromStatus(job)
+		if job, ok := findJobStatus(status, *jobID); ok {
+			cleanupStatus("", job)
+			if engine.IsTerminal(job.State) && !*probe {
+				result, resultErr := c.JobResult(ctx, client.JobResultParams{JobID: *jobID})
+				if resultErr != nil {
+					result = terminalJobResultFromStatus(job)
+				}
+				env, envelopeErr := terminalEnvelopeFromJobResult("", result, hello.Capabilities["models.reported"])
+				if envelopeErr != nil {
+					return 0, envelopeErr
+				}
+				if *jsonOut {
+					return engine.ExitCodeForState(env.Status), writeJSONLine(stdout, env)
+				}
+				if env.BackendError != "" {
+					_, envelopeErr = fmt.Fprintf(stdout, "%s %s backend_error=%s\n", env.JobID, env.Status, env.BackendError)
+				} else {
+					_, envelopeErr = fmt.Fprintf(stdout, "%s %s\n", env.JobID, env.Status)
+				}
+				return engine.ExitCodeForState(env.Status), envelopeErr
 			}
-			env, envelopeErr := terminalEnvelopeFromJobResult("", result, hello.Capabilities["models.reported"])
-			if envelopeErr != nil {
-				return 0, envelopeErr
-			}
-			if *jsonOut {
-				return engine.ExitCodeForState(env.Status), writeJSONLine(stdout, env)
-			}
-			if env.BackendError != "" {
-				_, envelopeErr = fmt.Fprintf(stdout, "%s %s backend_error=%s\n", env.JobID, env.Status, env.BackendError)
-			} else {
-				_, envelopeErr = fmt.Fprintf(stdout, "%s %s\n", env.JobID, env.Status)
-			}
-			return engine.ExitCodeForState(env.Status), envelopeErr
 		}
 	}
 	if *probe {
@@ -84,7 +96,10 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		if !ok {
 			return 0, fmt.Errorf("job %q not found", *jobID)
 		}
-		probeResult, err := probeJobStatus(ctx, job)
+		if _, err := fmt.Fprintln(stderr, probeRuntimeNotice(*probeInterval)); err != nil {
+			return 0, err
+		}
+		probeResult, err := probeJobStatusWithInterval(ctx, job, *probeInterval)
 		if err != nil {
 			return 0, err
 		}
@@ -166,7 +181,7 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	_ = sweepTerminalJobInputs(ctx, c, "")
+	cleanupRequestedJobStatus(ctx, c, "", result.JobID)
 	_ = cleanupJobInput("", result.JobID, result.SessionID, result.State)
 	env, err := terminalEnvelopeFromJobResult("", result, hello.Capabilities["models.reported"])
 	if err != nil {
@@ -234,8 +249,7 @@ func waitForTurnResult(ctx context.Context, c agentbusClient, stateDir, jobID st
 }
 
 func waitForJobResult(ctx context.Context, c agentbusClient, stateDir, jobID string) (client.JobResult, error) {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	interval := initialJobPollInterval
 	for {
 		result, err := c.JobResult(ctx, client.JobResultParams{JobID: jobID})
 		if err == nil && engine.IsTerminal(result.State) {
@@ -244,25 +258,25 @@ func waitForJobResult(ctx context.Context, c agentbusClient, stateDir, jobID str
 			}
 			return result, nil
 		}
-		status, statusErr := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
-		if statusErr == nil {
-			cleanupStatuses(stateDir, status)
-			for _, job := range status.Jobs {
-				if job.JobID == jobID && engine.IsTerminal(job.State) {
-					result := terminalJobResultFromStatus(job)
-					if err := cleanupJobInput(stateDir, result.JobID, result.SessionID, result.State); err != nil {
-						return client.JobResult{}, err
-					}
-					return result, nil
-				}
+		if err != nil {
+			result, fallbackErr := terminalJobResultFallback(ctx, c, stateDir, jobID, err)
+			if fallbackErr == nil {
+				return result, nil
 			}
 		}
-		select {
-		case <-ctx.Done():
-			return client.JobResult{}, ctx.Err()
-		case <-ticker.C:
+		if err := jobPollSleep(ctx, interval); err != nil {
+			return client.JobResult{}, err
 		}
+		interval = nextJobPollInterval(interval)
 	}
+}
+
+func nextJobPollInterval(interval time.Duration) time.Duration {
+	next := time.Duration(float64(interval) * 1.5)
+	if next > maximumJobPollInterval {
+		return maximumJobPollInterval
+	}
+	return next
 }
 
 func terminalJobResultFallback(ctx context.Context, c agentbusClient, stateDir, jobID string, resultErr error) (client.JobResult, error) {
@@ -283,8 +297,7 @@ func terminalJobResultFromStatus(job client.JobStatus) client.JobResult {
 }
 
 func waitForJobStatus(ctx context.Context, c agentbusClient, stateDir, jobID string) (client.JobStatusResult, error) {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	interval := initialJobPollInterval
 	for {
 		status, err := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
 		if err != nil {
@@ -296,18 +309,31 @@ func waitForJobStatus(ctx context.Context, c agentbusClient, stateDir, jobID str
 				return status, nil
 			}
 		}
-		select {
-		case <-ctx.Done():
-			return client.JobStatusResult{}, ctx.Err()
-		case <-ticker.C:
+		if err := jobPollSleep(ctx, interval); err != nil {
+			return client.JobStatusResult{}, err
 		}
+		interval = nextJobPollInterval(interval)
 	}
 }
 
 func cleanupStatuses(stateDir string, status client.JobStatusResult) {
 	for _, job := range status.Jobs {
-		_ = captureBackendError(stateDir, job)
-		_ = cleanupJobInput(stateDir, job.JobID, job.SessionID, job.State)
+		cleanupStatus(stateDir, job)
+	}
+}
+
+func cleanupStatus(stateDir string, job client.JobStatus) {
+	_ = captureBackendError(stateDir, job)
+	_ = cleanupJobInput(stateDir, job.JobID, job.SessionID, job.State)
+}
+
+func cleanupRequestedJobStatus(ctx context.Context, c agentbusClient, stateDir, jobID string) {
+	status, err := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
+	if err != nil {
+		return
+	}
+	if job, found := findJobStatus(status, jobID); found {
+		cleanupStatus(stateDir, job)
 	}
 }
 
