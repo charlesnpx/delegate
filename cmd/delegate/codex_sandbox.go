@@ -44,9 +44,11 @@ type codexSandboxResult struct {
 }
 
 var (
-	sandboxTableHeaderRE = regexp.MustCompile(`(?m)^[\t ]*\[[\t ]*sandbox_workspace_write[\t ]*\][\t ]*(?:#.*)?$`)
-	tomlTableHeaderRE    = regexp.MustCompile(`(?m)^[\t ]*\[`)
-	writableRootsRE      = regexp.MustCompile(`(?m)^[\t ]*writable_roots[\t ]*=[\t ]*\[`)
+	sandboxTableHeaderRE = regexp.MustCompile(`(?m)^[\t ]*\[[\t ]*sandbox_workspace_write[\t ]*\][\t ]*(?:#[^\r\n]*)?\r?$`)
+	tomlTableHeaderRE    = regexp.MustCompile(`(?m)^[\t ]*\[[^\r\n]*\][\t ]*(?:#[^\r\n]*)?\r?$`)
+	writableRootsRE      = regexp.MustCompile(`(?m)^[\t ]*writable_roots[\t ]*=[\t ]*\[(?:[^\r\n]*)?\r?$`)
+
+	errCodexConfigChangedConcurrently = errors.New("config changed concurrently")
 )
 
 // runConfigureCodexSandbox is an internal command used by the shell installer.
@@ -128,58 +130,114 @@ func absoluteCleanPath(label, path string) (string, error) {
 }
 
 func configureCodexSandboxAt(paths codexSandboxPaths) codexSandboxResult {
+	return configureCodexSandboxAtWithBeforeRename(paths, nil)
+}
+
+// configureCodexSandboxAtWithBeforeRename provides a narrow test seam for a
+// configuration change that occurs after candidate generation but before the
+// destination is replaced.
+func configureCodexSandboxAtWithBeforeRename(paths codexSandboxPaths, beforeRename func(string)) codexSandboxResult {
 	result := codexSandboxResult{
 		ConfigPath:    paths.ConfigPath,
 		WritableRoots: append([]string(nil), paths.WritableRoots...),
 	}
-	raw, err := os.ReadFile(paths.ConfigPath)
-	exists := err == nil
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return codexSandboxSkippedResult(result, fmt.Sprintf("read Codex config %q: %v", paths.ConfigPath, err))
-	}
-	if !exists {
-		raw = nil
-	}
+	for attempt := 0; attempt < 2; attempt++ {
+		destination, exists, err := resolveCodexSandboxDestination(paths.ConfigPath)
+		if err != nil {
+			return codexSandboxSkippedResult(result, err.Error())
+		}
+		raw, exists, err := readCodexSandboxConfig(destination, exists)
+		if err != nil {
+			return codexSandboxSkippedResult(result, fmt.Sprintf("read Codex config %q: %v", paths.ConfigPath, err))
+		}
 
-	parsed, err := decodeCodexSandboxConfig(raw)
-	if err != nil {
-		return codexSandboxSkippedResult(result, fmt.Sprintf("TOML parse failed for Codex config %q: %v", paths.ConfigPath, err))
-	}
-	if allWritableRootsPresent(parsed.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots) {
-		result.Action = codexSandboxAlreadyConfigured
+		parsed, hasSandboxWorkspaceWrite, err := decodeCodexSandboxConfigWithContext(raw)
+		if err != nil {
+			return codexSandboxSkippedResult(result, fmt.Sprintf("TOML parse failed for Codex config %q: %v", paths.ConfigPath, err))
+		}
+		if allWritableRootsPresent(parsed.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots) {
+			result.Action = codexSandboxAlreadyConfigured
+			return result
+		}
+
+		missing := missingWritableRoots(parsed.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots)
+		candidate, err := spliceCodexSandboxRoots(raw, missing)
+		if err != nil {
+			return codexSandboxSkippedResultWithContext(result, fmt.Sprintf("could not minimally update Codex config %q: %v", paths.ConfigPath, err), hasSandboxWorkspaceWrite)
+		}
+		validated, err := decodeCodexSandboxConfig(candidate)
+		if err != nil {
+			return codexSandboxSkippedResultWithContext(result, fmt.Sprintf("generated TOML did not parse for Codex config %q: %v", paths.ConfigPath, err), hasSandboxWorkspaceWrite)
+		}
+		if !allWritableRootsPresent(validated.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots) {
+			return codexSandboxSkippedResultWithContext(result, fmt.Sprintf("generated TOML for Codex config %q did not contain both writable roots", paths.ConfigPath), hasSandboxWorkspaceWrite)
+		}
+
+		mode := os.FileMode(0o600)
+		if exists {
+			info, statErr := os.Stat(destination)
+			if statErr != nil {
+				return codexSandboxSkippedResultWithContext(result, fmt.Sprintf("stat Codex config %q: %v", paths.ConfigPath, statErr), hasSandboxWorkspaceWrite)
+			}
+			mode = info.Mode().Perm()
+		}
+		err = atomicWriteCodexConfig(destination, raw, candidate, mode, beforeRename)
+		if errors.Is(err, errCodexConfigChangedConcurrently) {
+			if attempt == 0 {
+				continue
+			}
+			return codexSandboxSkippedResultWithContext(result, errCodexConfigChangedConcurrently.Error(), hasSandboxWorkspaceWrite)
+		}
+		if err != nil {
+			return codexSandboxSkippedResultWithContext(result, fmt.Sprintf("write Codex config %q: %v", paths.ConfigPath, err), hasSandboxWorkspaceWrite)
+		}
+		result.Action = codexSandboxConfigured
 		return result
 	}
+	return codexSandboxSkippedResult(result, errCodexConfigChangedConcurrently.Error())
+}
 
-	missing := missingWritableRoots(parsed.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots)
-	candidate, err := spliceCodexSandboxRoots(raw, missing)
+// resolveCodexSandboxDestination keeps a config.toml symlink in place by
+// replacing its resolved target rather than the symlink itself.
+func resolveCodexSandboxDestination(path string) (string, bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return path, false, nil
+	}
 	if err != nil {
-		return codexSandboxSkippedResult(result, fmt.Sprintf("could not minimally update Codex config %q: %v", paths.ConfigPath, err))
+		return "", false, fmt.Errorf("lstat Codex config %q: %w", path, err)
 	}
-	validated, err := decodeCodexSandboxConfig(candidate)
+	if info.Mode()&os.ModeSymlink == 0 {
+		return path, true, nil
+	}
+	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return codexSandboxSkippedResult(result, fmt.Sprintf("generated TOML did not parse for Codex config %q: %v", paths.ConfigPath, err))
+		return "", false, fmt.Errorf("resolve symlinked Codex config %q: %w", path, err)
 	}
-	if !allWritableRootsPresent(validated.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots) {
-		return codexSandboxSkippedResult(result, fmt.Sprintf("generated TOML for Codex config %q did not contain both writable roots", paths.ConfigPath))
-	}
+	return resolved, true, nil
+}
 
-	mode := os.FileMode(0o600)
-	if exists {
-		info, statErr := os.Stat(paths.ConfigPath)
-		if statErr != nil {
-			return codexSandboxSkippedResult(result, fmt.Sprintf("stat Codex config %q: %v", paths.ConfigPath, statErr))
-		}
-		mode = info.Mode().Perm()
+func readCodexSandboxConfig(path string, exists bool) ([]byte, bool, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
 	}
-	if err := atomicWriteCodexConfig(paths.ConfigPath, candidate, mode); err != nil {
-		return codexSandboxSkippedResult(result, fmt.Sprintf("write Codex config %q: %v", paths.ConfigPath, err))
+	if err != nil {
+		return nil, exists, err
 	}
-	result.Action = codexSandboxConfigured
-	return result
+	return raw, true, nil
 }
 
 func codexSandboxSkippedResult(result codexSandboxResult, reason string) codexSandboxResult {
+	return codexSandboxSkippedResultWithContext(result, reason, false)
+}
+
+func codexSandboxSkippedResultWithContext(result codexSandboxResult, reason string, hasSandboxWorkspaceWrite bool) codexSandboxResult {
 	result.Action = codexSandboxSkipped
+	if hasSandboxWorkspaceWrite {
+		result.Warning = reason + ". Merge these paths into the existing sandbox_workspace_write.writable_roots array:\n" + codexSandboxRootEntries(result.WritableRoots)
+		return result
+	}
 	result.Warning = reason + ". Add this snippet manually:\n" + codexSandboxSnippet(result.WritableRoots)
 	return result
 }
@@ -188,19 +246,32 @@ func codexSandboxSnippet(roots []string) string {
 	var b strings.Builder
 	b.WriteString("[sandbox_workspace_write]\n")
 	b.WriteString("writable_roots = [\n")
-	for _, root := range roots {
-		fmt.Fprintf(&b, "  %s,\n", strconv.Quote(root))
-	}
+	b.WriteString(codexSandboxRootEntries(roots))
 	b.WriteString("]")
 	return b.String()
 }
 
-func decodeCodexSandboxConfig(raw []byte) (codexSandboxConfig, error) {
-	var config codexSandboxConfig
-	if _, err := toml.Decode(string(raw), &config); err != nil {
-		return codexSandboxConfig{}, err
+func codexSandboxRootEntries(roots []string) string {
+	var b strings.Builder
+	for _, root := range roots {
+		fmt.Fprintf(&b, "  %s,\n", strconv.Quote(root))
 	}
-	return config, nil
+	return b.String()
+}
+
+func decodeCodexSandboxConfig(raw []byte) (codexSandboxConfig, error) {
+	config, _, err := decodeCodexSandboxConfigWithContext(raw)
+	return config, err
+}
+
+func decodeCodexSandboxConfigWithContext(raw []byte) (codexSandboxConfig, bool, error) {
+	var config codexSandboxConfig
+	metadata, err := toml.Decode(string(raw), &config)
+	if err != nil {
+		return codexSandboxConfig{}, false, err
+	}
+	hasSandboxWorkspaceWrite := metadata.IsDefined("sandbox_workspace_write") || metadata.IsDefined("sandbox_workspace_write", "writable_roots") || len(config.SandboxWorkspaceWrite.WritableRoots) > 0
+	return config, hasSandboxWorkspaceWrite, nil
 }
 
 func allWritableRootsPresent(current, required []string) bool {
@@ -236,7 +307,12 @@ func spliceCodexSandboxRoots(raw []byte, missing []string) ([]byte, error) {
 	if assignment == nil {
 		return insertWritableRootsInSandboxTable(raw, end, missing), nil
 	}
-	arrayStart := start + assignment[1] - 1 // The expression is anchored on the opening '['.
+	assignmentRaw := raw[start+assignment[0] : start+assignment[1]]
+	arrayOffset := bytes.IndexByte(assignmentRaw, '[')
+	if arrayOffset < 0 {
+		return nil, errors.New("writable_roots opening bracket was not found")
+	}
+	arrayStart := start + assignment[0] + arrayOffset
 	arrayEnd, err := tomlArrayEnd(raw, arrayStart)
 	if err != nil || arrayEnd >= end {
 		if err == nil {
@@ -265,23 +341,30 @@ func sandboxWorkspaceWriteTable(raw []byte) (int, int, bool) {
 
 func appendSandboxWorkspaceWriteTable(raw []byte, roots []string) []byte {
 	out := append([]byte(nil), raw...)
+	lineEnding := codexSandboxLineEnding(raw)
 	if len(out) > 0 && !bytes.HasSuffix(out, []byte("\n")) {
-		out = append(out, '\n')
+		out = appendCodexSandboxLineEnding(out, lineEnding)
 	}
-	if len(out) > 0 && !bytes.HasSuffix(out, []byte("\n\n")) {
-		out = append(out, '\n')
+	if len(out) > 0 && !bytes.HasSuffix(out, []byte(lineEnding+lineEnding)) {
+		out = append(out, lineEnding...)
 	}
-	out = append(out, []byte(codexSandboxSnippet(roots)+"\n")...)
+	out = append(out, []byte(codexSandboxWithLineEnding(codexSandboxSnippet(roots), lineEnding)+lineEnding)...)
 	return out
 }
 
 func insertWritableRootsInSandboxTable(raw []byte, at int, roots []string) []byte {
+	lineEnding := codexSandboxLineEnding(raw)
 	addition := codexSandboxSnippet(roots)
 	addition = strings.TrimPrefix(addition, "[sandbox_workspace_write]\n")
+	addition = codexSandboxWithLineEnding(addition, lineEnding)
 	if at > 0 && raw[at-1] != '\n' {
-		addition = "\n" + addition
+		if raw[at-1] == '\r' && lineEnding == "\r\n" {
+			addition = "\n" + addition
+		} else {
+			addition = lineEnding + addition
+		}
 	}
-	addition += "\n"
+	addition += lineEnding
 	out := make([]byte, 0, len(raw)+len(addition))
 	out = append(out, raw[:at]...)
 	out = append(out, addition...)
@@ -333,15 +416,17 @@ func tomlArrayEnd(raw []byte, start int) (int, error) {
 
 func appendRootsToTOMLArray(raw []byte, start, end int, roots []string) []byte {
 	var addition strings.Builder
+	lineEnding := codexSandboxLineEnding(raw)
 	if tomlArrayHasValuesWithoutTrailingComma(raw, start, end) {
 		addition.WriteByte(',')
 	}
 	for _, root := range roots {
-		addition.WriteString("\n  ")
+		addition.WriteString(lineEnding)
+		addition.WriteString("  ")
 		addition.WriteString(strconv.Quote(root))
 		addition.WriteByte(',')
 	}
-	addition.WriteByte('\n')
+	addition.WriteString(lineEnding)
 	out := make([]byte, 0, len(raw)+addition.Len())
 	out = append(out, raw[:end]...)
 	out = append(out, addition.String()...)
@@ -387,7 +472,28 @@ func tomlArrayHasValuesWithoutTrailingComma(raw []byte, start, end int) bool {
 	return len(trimmed) > 0 && trimmed[len(trimmed)-1] != ','
 }
 
-func atomicWriteCodexConfig(path string, raw []byte, mode os.FileMode) error {
+func codexSandboxLineEnding(raw []byte) string {
+	if bytes.Contains(raw, []byte("\r\n")) {
+		return "\r\n"
+	}
+	return "\n"
+}
+
+func codexSandboxWithLineEnding(value, lineEnding string) string {
+	if lineEnding == "\n" {
+		return value
+	}
+	return strings.ReplaceAll(value, "\n", lineEnding)
+}
+
+func appendCodexSandboxLineEnding(raw []byte, lineEnding string) []byte {
+	if len(raw) > 0 && raw[len(raw)-1] == '\r' && lineEnding == "\r\n" {
+		return append(raw, '\n')
+	}
+	return append(raw, lineEnding...)
+}
+
+func atomicWriteCodexConfig(path string, original, replacement []byte, mode os.FileMode, beforeRename func(string)) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create Codex config directory %q: %w", dir, err)
@@ -407,7 +513,7 @@ func atomicWriteCodexConfig(path string, raw []byte, mode os.FileMode) error {
 	if err := tmp.Chmod(mode); err != nil {
 		return fmt.Errorf("preserve Codex config mode: %w", err)
 	}
-	if _, err := tmp.Write(raw); err != nil {
+	if _, err := tmp.Write(replacement); err != nil {
 		return fmt.Errorf("write temporary Codex config: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
@@ -415,6 +521,18 @@ func atomicWriteCodexConfig(path string, raw []byte, mode os.FileMode) error {
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temporary Codex config: %w", err)
+	}
+	if beforeRename != nil {
+		beforeRename(path)
+	}
+	current, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		current = nil
+	} else if err != nil {
+		return fmt.Errorf("re-read Codex config before replacement: %w", err)
+	}
+	if !bytes.Equal(current, original) {
+		return errCodexConfigChangedConcurrently
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("replace Codex config: %w", err)

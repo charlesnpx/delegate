@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -15,6 +16,7 @@ func TestConfigureCodexSandboxFixtures(t *testing.T) {
 		wantAction        string
 		wantRawFragments  []string
 		wantByteIdentical bool
+		wantCRLF          bool
 	}{
 		{
 			name:             "missing file",
@@ -48,6 +50,12 @@ func TestConfigureCodexSandboxFixtures(t *testing.T) {
 			wantAction:        codexSandboxAlreadyConfigured,
 			wantByteIdentical: true,
 		},
+		{
+			name:       "CRLF existing section",
+			initial:    stringPtr("[sandbox_workspace_write]\r\nwritable_roots = [\r\n  \"STATE/agentbus\",\r\n]\r\n[profiles.default]\r\nsandbox_mode = \"workspace-write\"\r\n"),
+			wantAction: codexSandboxConfigured,
+			wantCRLF:   true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tmp := t.TempDir()
@@ -80,6 +88,9 @@ func TestConfigureCodexSandboxFixtures(t *testing.T) {
 			if tc.wantByteIdentical && !bytes.Equal(raw, []byte(initial)) {
 				t.Fatalf("already-configured config changed:\n got %q\nwant %q", raw, initial)
 			}
+			if tc.wantCRLF && bytes.Contains(bytes.ReplaceAll(raw, []byte("\r\n"), nil), []byte("\n")) {
+				t.Fatalf("CRLF config gained a bare LF:\n%s", raw)
+			}
 			if tc.initial != nil {
 				info, err := os.Stat(paths.ConfigPath)
 				if err != nil {
@@ -100,6 +111,213 @@ func TestConfigureCodexSandboxFixtures(t *testing.T) {
 			}
 			if !allWritableRootsPresent(parsed.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots) {
 				t.Fatalf("writable_roots = %#v, want both %#v", parsed.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots)
+			}
+		})
+	}
+}
+
+func TestConfigureCodexSandboxUpdatesSymlinkTargetWithoutReplacingLink(t *testing.T) {
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "target", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("model = \"gpt-5\"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	paths := codexSandboxPaths{
+		ConfigPath: filepath.Join(tmp, ".codex", "config.toml"),
+		WritableRoots: []string{
+			filepath.Join(tmp, "state", "agentbus"),
+			filepath.Join(tmp, "state", "delegate"),
+		},
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.ConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, paths.ConfigPath); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	result := configureCodexSandboxAt(paths)
+	if result.Action != codexSandboxConfigured {
+		t.Fatalf("action = %q, want configured; warning=%q", result.Action, result.Warning)
+	}
+	info, err := os.Lstat(paths.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("config path mode = %v, want symlink", info.Mode())
+	}
+	linkTarget, err := os.Readlink(paths.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkTarget != target {
+		t.Fatalf("symlink target = %q, want %q", linkTarget, target)
+	}
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := decodeCodexSandboxConfig(raw)
+	if err != nil {
+		t.Fatalf("target does not parse: %v\n%s", err, raw)
+	}
+	if !allWritableRootsPresent(parsed.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots) {
+		t.Fatalf("target writable_roots = %#v, want %#v", parsed.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots)
+	}
+	targetInfo, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := targetInfo.Mode().Perm(), os.FileMode(0o640); got != want {
+		t.Fatalf("target mode = %o, want %o", got, want)
+	}
+}
+
+func TestConfigureCodexSandboxRetriesConcurrentConfigChangeOnce(t *testing.T) {
+	paths := testCodexSandboxPaths(t)
+	initial := []byte("model = \"before\"\n")
+	if err := os.MkdirAll(filepath.Dir(paths.ConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.ConfigPath, initial, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	result := configureCodexSandboxAtWithBeforeRename(paths, func(path string) {
+		calls++
+		if calls == 1 {
+			if err := os.WriteFile(path, []byte("model = \"concurrent\"\n"), 0o640); err != nil {
+				t.Errorf("mutate config before rename: %v", err)
+			}
+		}
+	})
+	if result.Action != codexSandboxConfigured {
+		t.Fatalf("action = %q, want configured; warning=%q", result.Action, result.Warning)
+	}
+	if calls != 2 {
+		t.Fatalf("before-rename calls = %d, want retry with 2 calls", calls)
+	}
+	raw, err := os.ReadFile(paths.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte("model = \"concurrent\"")) {
+		t.Fatalf("concurrent edit was lost:\n%s", raw)
+	}
+	parsed, err := decodeCodexSandboxConfig(raw)
+	if err != nil {
+		t.Fatalf("updated config does not parse: %v\n%s", err, raw)
+	}
+	if !allWritableRootsPresent(parsed.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots) {
+		t.Fatalf("writable_roots = %#v, want %#v", parsed.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots)
+	}
+}
+
+func TestConfigureCodexSandboxSkipsAfterSecondConcurrentChange(t *testing.T) {
+	paths := testCodexSandboxPaths(t)
+	if err := os.MkdirAll(filepath.Dir(paths.ConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.ConfigPath, []byte("model = \"before\"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	result := configureCodexSandboxAtWithBeforeRename(paths, func(path string) {
+		calls++
+		content := "model = \"first change\"\n"
+		if calls == 2 {
+			content = "model = \"second change\"\n"
+		}
+		if err := os.WriteFile(path, []byte(content), 0o640); err != nil {
+			t.Errorf("mutate config before rename: %v", err)
+		}
+	})
+	if result.Action != codexSandboxSkipped {
+		t.Fatalf("action = %q, want skipped; warning=%q", result.Action, result.Warning)
+	}
+	if !strings.Contains(result.Warning, "config changed concurrently") || !strings.Contains(result.Warning, "Add this snippet manually:") {
+		t.Fatalf("warning = %q, want concurrent-change warning and snippet", result.Warning)
+	}
+	if calls != 2 {
+		t.Fatalf("before-rename calls = %d, want 2", calls)
+	}
+	raw, err := os.ReadFile(paths.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "model = \"second change\"\n" {
+		t.Fatalf("config after second concurrent change = %q", raw)
+	}
+}
+
+func TestConfigureCodexSandboxSkippedSnippetRespectsExistingTable(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		existingTable bool
+	}{
+		{name: "inline table", existingTable: true},
+		{name: "absent table"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			paths := testCodexSandboxPaths(t)
+			if tc.existingTable {
+				if err := os.MkdirAll(filepath.Dir(paths.ConfigPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(paths.ConfigPath, []byte("sandbox_workspace_write = { writable_roots = [] }\n"), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				blocker := filepath.Join(filepath.Dir(filepath.Dir(paths.ConfigPath)), "not-a-directory")
+				if err := os.WriteFile(blocker, []byte("blocker"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				paths.ConfigPath = filepath.Join(blocker, "config.toml")
+			}
+
+			result := configureCodexSandboxAt(paths)
+			if result.Action != codexSandboxSkipped {
+				t.Fatalf("action = %q, want skipped; warning=%q", result.Action, result.Warning)
+			}
+			for _, root := range paths.WritableRoots {
+				if !strings.Contains(result.Warning, strconv.Quote(root)) {
+					t.Fatalf("warning = %q, missing root %q", result.Warning, root)
+				}
+			}
+			if tc.existingTable {
+				if !strings.Contains(result.Warning, "Merge these paths into the existing sandbox_workspace_write.writable_roots array:") || strings.Contains(result.Warning, "[sandbox_workspace_write]") {
+					t.Fatalf("existing-table warning = %q, want merge-only guidance", result.Warning)
+				}
+				return
+			}
+			if !strings.Contains(result.Warning, "Add this snippet manually:\n[sandbox_workspace_write]") {
+				t.Fatalf("absent-table warning = %q, want full-table snippet", result.Warning)
+			}
+		})
+	}
+}
+
+func TestDecodeCodexSandboxConfigDetectsExistingTableForms(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "standard table", raw: "[sandbox_workspace_write]\nwritable_roots = []\n"},
+		{name: "inline table", raw: "sandbox_workspace_write = { writable_roots = [] }\n"},
+		{name: "dotted key", raw: "sandbox_workspace_write.writable_roots = []\n"},
+		{name: "CRLF table", raw: "[sandbox_workspace_write]\r\nwritable_roots = []\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, hasSandboxWorkspaceWrite, err := decodeCodexSandboxConfigWithContext([]byte(tc.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !hasSandboxWorkspaceWrite {
+				t.Fatalf("sandbox_workspace_write was not detected in %q", tc.raw)
 			}
 		})
 	}
@@ -157,6 +375,18 @@ func TestResolveCodexSandboxPathsUsesXDGStateHome(t *testing.T) {
 	}
 	if got, want := strings.Join(paths.WritableRoots, ","), "/var/state/agentbus,/var/state/delegate"; got != want {
 		t.Fatalf("writable roots = %q, want %q", got, want)
+	}
+}
+
+func testCodexSandboxPaths(t *testing.T) codexSandboxPaths {
+	t.Helper()
+	tmp := t.TempDir()
+	return codexSandboxPaths{
+		ConfigPath: filepath.Join(tmp, ".codex", "config.toml"),
+		WritableRoots: []string{
+			filepath.Join(tmp, "state", "agentbus"),
+			filepath.Join(tmp, "state", "delegate"),
+		},
 	}
 }
 

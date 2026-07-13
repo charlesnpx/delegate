@@ -31,6 +31,7 @@ type setupJSON struct {
 	AgentbusStateRootWritable bool          `json:"agentbusStateRootWritable"`
 	DaemonReachable           bool          `json:"daemonReachable"`
 	StopReviewGate            string        `json:"stop_review_gate"`
+	Warnings                  []string      `json:"warnings,omitempty"`
 }
 
 type setupConfig struct {
@@ -122,6 +123,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 			AgentbusStateRootWritable: preflight.AgentbusStateRootWritable,
 			DaemonReachable:           true,
 			StopReviewGate:            "not available (planned v0.2)",
+			Warnings:                  preflight.Warnings,
 		})
 	}
 	if _, err := fmt.Fprintf(stdout, "%s\nagentbus: %s\n", versionLine(), path); err != nil {
@@ -137,6 +139,11 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	if _, err := fmt.Fprintf(stdout, "stateRootWritable: %t\nagentbusStateRootWritable: %t\ndaemonReachable: true\n", preflight.StateRootWritable, preflight.AgentbusStateRootWritable); err != nil {
 		return 0, err
+	}
+	for _, warning := range preflight.Warnings {
+		if _, err := fmt.Fprintf(stdout, "warning: %s\n", warning); err != nil {
+			return 0, err
+		}
 	}
 	if _, err := fmt.Fprintf(stdout, "agentbus models.reported: %t\nconfig file: %s\nconfig overridable: %t\nconfig backend claude: model=%s effort=%s\nconfig backend codex: model=%s effort=%s\n", hello.Capabilities["models.reported"], configPath, cfg.Overridable, cfg.Backend.Claude.Model, cfg.Backend.Claude.Effort, cfg.Backend.Codex.Model, cfg.Backend.Codex.Effort); err != nil {
 		return 0, err
@@ -166,6 +173,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 type setupStatePreflightResult struct {
 	StateRootWritable         bool
 	AgentbusStateRootWritable bool
+	Warnings                  []string
 }
 
 func setupStatePreflight() setupStatePreflightResult {
@@ -178,6 +186,14 @@ func setupStatePreflight() setupStatePreflightResult {
 	}
 	agentbusRoot, err := engine.ResolveStateRoot()
 	if err == nil {
+		if !filepath.IsAbs(agentbusRoot) {
+			if xdgStateHome := os.Getenv("XDG_STATE_HOME"); xdgStateHome != "" {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus state root was not probed because XDG_STATE_HOME %q must be absolute", xdgStateHome))
+			} else {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus state root %q must be absolute", agentbusRoot))
+			}
+			return result
+		}
 		result.AgentbusStateRootWritable = directoryWritable(agentbusRoot)
 	}
 	return result
