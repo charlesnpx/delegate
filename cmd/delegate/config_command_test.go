@@ -25,7 +25,7 @@ func TestConfigCommandRoundTripAndValidationWarning(t *testing.T) {
 	if code := run([]string{"config", "set", delegateconfig.KeyClaudeModel, "unadvertised-model"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("set code = %d stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "warning:") || !strings.Contains(stderr.String(), "saving it anyway") {
+	if !strings.Contains(stderr.String(), `warning: model "unadvertised-model" is not advertised by agentbus for backend "claude" (advertised: known-model); passing through — the backend is authoritative`) {
 		t.Fatalf("set warning = %q", stderr.String())
 	}
 	cfg, err := delegateconfig.Load()

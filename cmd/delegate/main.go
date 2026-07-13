@@ -61,8 +61,33 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
+	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+		printUsage(stdout)
+		return 0
+	}
 	fmt.Fprintf(stderr, "unknown command %q\n", args[0])
+	printUsage(stderr)
 	return 2
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprint(w, `usage: delegate <command> [flags]
+
+commands:
+  version         print the delegate version
+  setup           verify delegate, agentbus, backends, config, and skills
+  config          list/get/set/unset user model and effort defaults
+  task            run one backend turn (foreground or --background)
+  review          delegate a sanitized code review
+  adversarial-review  delegate a refute-first review
+  status          check a delegated job (--probe for liveness)
+  result          fetch a delegated job result (--wait to block)
+  cancel          cancel a delegated job
+  handoff create  create a private prompt handoff file from stdin
+  install-skills  plan/install/uninstall the managed skill matrices
+
+run 'delegate <command> -h' for command flags.
+`)
 }
 
 func finishCommand(code int, err error, stderr io.Writer) int {

@@ -99,7 +99,7 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 	if err != nil {
 		return 0, err
 	}
-	result, err := executeTask(opts, resolved, turnPolicy)
+	result, err := executeTask(opts, resolved, turnPolicy, stderr)
 	if err != nil {
 		return 0, err
 	}
@@ -127,12 +127,12 @@ func resolveTaskModelEffort(opts *taskOptions) error {
 	return nil
 }
 
-func executeTask(opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy) (taskRunResult, error) {
+func executeTask(opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy, stderr io.Writer) (taskRunResult, error) {
 	ctx := context.Background()
 	if opts.Embedded {
 		return runEmbeddedTask(ctx, opts, resolved, turnPolicy)
 	}
-	return runDaemonTask(ctx, opts, resolved, turnPolicy)
+	return runDaemonTask(ctx, opts, resolved, turnPolicy, stderr)
 }
 
 func writeTaskRunResult(result taskRunResult, stdout, stderr io.Writer) (int, error) {
@@ -254,13 +254,13 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	return opts, nil
 }
 
-func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy) (taskRunResult, error) {
+func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy, stderr io.Writer) (taskRunResult, error) {
 	c, hello, err := connectAgentbusCommand(ctx, requiredCapabilitiesForPolicy(turnPolicy))
 	if err != nil {
 		return taskRunResult{}, err
 	}
 	defer c.Close()
-	if err := validateBackend(hello, opts.Backend, opts.Model, opts.Effort); err != nil {
+	if err := validateBackend(hello, opts.Backend, opts.Model, opts.Effort, stderr); err != nil {
 		return taskRunResult{}, err
 	}
 	spec := client.TaskSpec{

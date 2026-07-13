@@ -361,6 +361,7 @@ func fakeAdapterResult(backend, report string) string {
 
 func runEmbeddedTier(t *testing.T, backendName string, backend engine.Backend, flags []string) (TerminalEnvelope, int) {
 	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	restore := stubEmbeddedGlobals(t, "job_tier_"+backendName, backend)
 	defer restore()

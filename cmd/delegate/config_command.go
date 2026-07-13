@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"strings"
 
 	delegateconfig "github.com/charlesnpx/delegate/internal/config"
 )
@@ -129,7 +128,7 @@ func warnUnknownConfigValue(ctx context.Context, key, value string, stderr io.Wr
 			advertised = metadata.Efforts
 		}
 		if len(advertised) > 0 && !containsString(advertised, value) {
-			_, _ = fmt.Fprintf(stderr, "warning: %s value %q is not advertised by agentbus for backend %q (available: %s); saving it anyway\n", dimension, value, backend, strings.Join(advertised, ", "))
+			_, _ = fmt.Fprintf(stderr, "warning: %s\n", unadvertisedBackendValueWarning(dimension, value, backend, advertised))
 		}
 		return
 	}
