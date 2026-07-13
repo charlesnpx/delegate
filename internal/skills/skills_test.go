@@ -90,6 +90,9 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"delegate handoff create --json",
 				`--cwd "$PWD"`,
 				`--handoff-prompt-file "$HANDOFF_PATH"`,
+				"--output-schema-file",
+				"<json-pointer>: <message>",
+				"one corrective retry",
 				"Return the launch envelope verbatim",
 			})
 			requireNonBlockingWaitGuidance(t, skill)

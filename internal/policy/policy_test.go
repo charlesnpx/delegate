@@ -71,6 +71,30 @@ func TestResolveTurnPolicyFlagMatrix(t *testing.T) {
 	}
 }
 
+func TestResolveTurnPolicyJSONSchemaContract(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","required":["schema_version"],"properties":{"schema_version":{"const":"1"}}}`)
+	got, err := ResolveTurnPolicy(Flags{JSONSchema: schema})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Contract == nil {
+		t.Fatalf("policy = %#v, want JSON Schema policy", got)
+	}
+	if got.Contract.Shape != nil || got.Contract.Named != "" || !reflect.DeepEqual(got.Contract.JSONSchema, schema) {
+		t.Fatalf("contract = %#v, want JSON Schema only", got.Contract)
+	}
+	if got.Retry == nil || got.Retry.Max != 1 || got.Retry.Template != CorrectiveRetryTemplate {
+		t.Fatalf("retry = %#v, want default corrective retry", got.Retry)
+	}
+	if !strings.Contains(got.Prologue, string(schema)) || strings.Contains(got.Prologue, DelegateContractDigest()) {
+		t.Fatalf("prologue = %q, want JSON Schema instruction without delegate-report digest", got.Prologue)
+	}
+
+	if _, err := ResolveTurnPolicy(Flags{JSONSchema: json.RawMessage(`{"type":`)}); err == nil || !strings.Contains(err.Error(), "jsonSchema must be valid JSON") {
+		t.Fatalf("invalid schema error = %v, want engine JSON Schema validation error", err)
+	}
+}
+
 func TestDisabledStamp(t *testing.T) {
 	stamp := DisabledStamp()
 	if stamp.Status != engine.ContractDisabled {

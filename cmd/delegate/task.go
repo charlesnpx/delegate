@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -54,6 +55,9 @@ type taskOptions struct {
 	PromptFile        string
 	PromptStdin       bool
 	HandoffPromptFile string
+	OutputSchema      optionalStringFlag
+	OutputSchemaFile  optionalStringFlag
+	OutputSchemaStdin bool
 	Positional        []string
 	StateDir          string
 	Kind              string
@@ -78,10 +82,15 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 	if err := resolveTaskModelEffort(&opts); err != nil {
 		return 0, err
 	}
+	outputSchema, err := resolveTaskOutputSchema(opts, stdin)
+	if err != nil {
+		return 0, err
+	}
 	turnPolicy, err := policy.ResolveTurnPolicy(policy.Flags{
 		Write:          opts.Write,
 		StrictContract: opts.StrictContract,
 		NoContract:     opts.NoContract,
+		JSONSchema:     outputSchema,
 	})
 	if err != nil {
 		return 0, err
@@ -173,8 +182,8 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
 	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout")
 	fs.BoolVar(&opts.Write, "write", false, "allow backend writes")
-	fs.BoolVar(&opts.StrictContract, "strict-contract", false, "enable corrective retry")
-	fs.BoolVar(&opts.NoContract, "no-contract", false, "disable contract enforcement")
+	fs.BoolVar(&opts.StrictContract, "strict-contract", false, "enable corrective retry (JSON Schema contracts retry by default)")
+	fs.BoolVar(&opts.NoContract, "no-contract", false, "disable contract enforcement (cannot be used with --output-schema*)")
 	fs.StringVar(&opts.Origin, "origin", "", "originating skill")
 	fs.Var(&opts.ParentClient, "parent-client", "explicit parent client for audit linkage")
 	fs.Var(&opts.ParentSession, "parent-session", "explicit parent session id for audit linkage")
@@ -183,6 +192,9 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	fs.StringVar(&opts.PromptFile, "prompt-file", "", "read prompt from file")
 	fs.BoolVar(&opts.PromptStdin, "prompt-stdin", false, "read prompt from stdin")
 	fs.StringVar(&opts.HandoffPromptFile, "handoff-prompt-file", "", "read prompt from a delegate handoff file")
+	fs.Var(&opts.OutputSchema, "output-schema", "inline JSON Schema output contract")
+	fs.Var(&opts.OutputSchemaFile, "output-schema-file", "read JSON Schema output contract from file")
+	fs.BoolVar(&opts.OutputSchemaStdin, "output-schema-stdin", false, "read JSON Schema output contract from stdin")
 	if err := fs.Parse(args); err != nil {
 		return taskOptions{}, err
 	}
@@ -203,6 +215,25 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	}
 	if opts.StrictContract && opts.NoContract {
 		return taskOptions{}, fmt.Errorf("use only one of --strict-contract or --no-contract")
+	}
+	outputSchemaSources := 0
+	if opts.OutputSchema.set {
+		outputSchemaSources++
+	}
+	if opts.OutputSchemaFile.set {
+		outputSchemaSources++
+	}
+	if opts.OutputSchemaStdin {
+		outputSchemaSources++
+	}
+	if outputSchemaSources > 1 {
+		return taskOptions{}, fmt.Errorf("use only one of --output-schema, --output-schema-file, or --output-schema-stdin")
+	}
+	if opts.NoContract && outputSchemaSources > 0 {
+		return taskOptions{}, fmt.Errorf("--no-contract cannot be used with --output-schema, --output-schema-file, or --output-schema-stdin")
+	}
+	if opts.OutputSchemaStdin && opts.PromptStdin {
+		return taskOptions{}, fmt.Errorf("--output-schema-stdin cannot be used with --prompt-stdin")
 	}
 	if opts.Resume && opts.ResumeSession != "" {
 		return taskOptions{}, fmt.Errorf("use only one of --resume or --resume-session")
@@ -252,6 +283,30 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	}
 	opts.AuditOrigin = captureTaskOrigin(opts.Origin, opts.ParentClient, opts.ParentSession, nil)
 	return opts, nil
+}
+
+func resolveTaskOutputSchema(opts taskOptions, stdin io.Reader) (json.RawMessage, error) {
+	if opts.OutputSchema.set {
+		return append(json.RawMessage{}, []byte(opts.OutputSchema.value)...), nil
+	}
+	if opts.OutputSchemaFile.set {
+		raw, err := os.ReadFile(opts.OutputSchemaFile.value)
+		if err != nil {
+			return nil, fmt.Errorf("read --output-schema-file %q: %w", opts.OutputSchemaFile.value, err)
+		}
+		return append(json.RawMessage{}, raw...), nil
+	}
+	if opts.OutputSchemaStdin {
+		if stdin == nil {
+			stdin = os.Stdin
+		}
+		raw, err := io.ReadAll(stdin)
+		if err != nil {
+			return nil, fmt.Errorf("read --output-schema-stdin: %w", err)
+		}
+		return append(json.RawMessage{}, raw...), nil
+	}
+	return nil, nil
 }
 
 func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy, stderr io.Writer) (taskRunResult, error) {

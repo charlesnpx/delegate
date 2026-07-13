@@ -39,6 +39,8 @@ Delegate records the originating skill plus best-effort parent session identity 
 delegate task --backend codex --origin delegate:rescue:codex --cwd "$PWD" --handoff-prompt-file "$HANDOFF_PATH" --background --json
 ~~~
 
+When the caller has a machine-readable output schema, pass it with "--output-schema-file" instead of embedding it in prompt prose. Violations return as "<json-pointer>: <message>", and one corrective retry runs automatically.
+
 Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "result_sha256", or "sha256" fields.
 
 Launch with "--background" and keep the host agent loop free to continue useful work. Long "--wait" calls can hold a host tool call for 100+ seconds and block that loop; use "--wait" only for a short, explicitly bounded terminal check. For an outstanding job, poll "delegate status --job <id>" instead.

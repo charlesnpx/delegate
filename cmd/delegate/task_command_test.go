@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,6 +94,50 @@ func TestEnvelopeSchemasAndHashes(t *testing.T) {
 	wantOriginHash := sha256.Sum256([]byte(canonicalOrigin))
 	if withOrigin.SHA256 != hex.EncodeToString(wantOriginHash[:]) {
 		t.Fatalf("launch origin sha256 = %q, want %q", withOrigin.SHA256, hex.EncodeToString(wantOriginHash[:]))
+	}
+}
+
+func TestJSONSchemaTerminalEnvelopePreservesContractStamp(t *testing.T) {
+	spec := engine.ContractSpec{JSONSchema: json.RawMessage(`{"type":"object","required":["schema_version"],"properties":{"schema_version":{"const":"1"}}}`)}
+	validation, err := engine.ValidateContract(`{"schema_version":"2"}`, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validation.Valid || len(validation.Missing) == 0 {
+		t.Fatalf("validation = %#v, want schema violation", validation)
+	}
+	if !strings.HasPrefix(validation.Missing[0], "/") || !strings.Contains(validation.Missing[0], ": ") {
+		t.Fatalf("violation = %q, want <json-pointer>: <message>", validation.Missing[0])
+	}
+	stamp := engine.StampValidation(2, true, "", validation, time.Unix(2, 0).UTC())
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveJobMetadata(stateDir, jobMetadata{JobID: "job_schema", Kind: taskKind, ContractKind: contractKindJSONSchema}); err != nil {
+		t.Fatal(err)
+	}
+	env, err := terminalEnvelopeFromJobResult(stateDir, client.JobResult{
+		JobID:    "job_schema",
+		State:    engine.StateCompletedNoncompliant,
+		Result:   &engine.ResultInfo{SHA256: strings.Repeat("b", 64)},
+		Contract: &stamp,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.ContractKind != contractKindJSONSchema || env.Contract.ContractSHA256 != validation.ContractSHA256 {
+		t.Fatalf("terminal envelope = %#v, want JSON Schema kind and contract hash %q", env, validation.ContractSHA256)
+	}
+	if len(env.Contract.Missing) != len(validation.Missing) || env.Contract.Missing[0] != validation.Missing[0] {
+		t.Fatalf("terminal missing = %#v, want schema violations %#v", env.Contract.Missing, validation.Missing)
+	}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`"contractKind":"jsonSchema"`)) || !bytes.Contains(raw, []byte(`"contractSha256":"`+validation.ContractSHA256+`"`)) {
+		t.Fatalf("terminal envelope JSON = %s, want JSON Schema kind and contract hash", raw)
 	}
 }
 
@@ -183,16 +229,20 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 }
 
 func TestTaskPolicyTierWiring(t *testing.T) {
+	schema := `{"type":"object","required":["schema_version"],"properties":{"schema_version":{"const":"1"}}}`
 	for _, tc := range []struct {
-		name      string
-		flags     []string
-		wantNil   bool
-		wantRetry bool
+		name           string
+		flags          []string
+		wantNil        bool
+		wantRetry      bool
+		wantJSONSchema bool
 	}{
 		{name: "default"},
 		{name: "write", flags: []string{"--write"}, wantRetry: true},
 		{name: "strict", flags: []string{"--strict-contract"}, wantRetry: true},
 		{name: "no_contract", flags: []string{"--no-contract"}, wantNil: true},
+		{name: "json_schema", flags: []string{"--output-schema", schema}, wantRetry: true, wantJSONSchema: true},
+		{name: "json_schema_strict", flags: []string{"--output-schema", schema, "--strict-contract"}, wantRetry: true, wantJSONSchema: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
@@ -219,11 +269,18 @@ func TestTaskPolicyTierWiring(t *testing.T) {
 			if got == nil {
 				t.Fatal("policy = nil, want delegate policy")
 			}
-			if got.Prologue == "" {
-				t.Fatal("policy prologue is empty")
+			if got.Contract == nil {
+				t.Fatal("policy contract = nil")
 			}
-			if got.Contract == nil || got.Contract.Shape == nil {
-				t.Fatalf("policy contract = %#v, want shape contract", got.Contract)
+			if tc.wantJSONSchema {
+				if got.Contract.Shape != nil || string(got.Contract.JSONSchema) != schema {
+					t.Fatalf("policy contract = %#v, want JSON Schema only", got.Contract)
+				}
+				if !strings.Contains(got.Prologue, schema) {
+					t.Fatalf("policy prologue = %q, want embedded JSON Schema", got.Prologue)
+				}
+			} else if got.Prologue == "" || got.Contract.Shape == nil {
+				t.Fatalf("policy = %#v, want delegate-report shape contract", got)
 			}
 			if tc.wantRetry {
 				if got.Retry == nil || got.Retry.Max != 1 {
@@ -231,6 +288,162 @@ func TestTaskPolicyTierWiring(t *testing.T) {
 				}
 			} else if got.Retry != nil {
 				t.Fatalf("retry = %#v, want nil", got.Retry)
+			}
+		})
+	}
+}
+
+func TestTaskOutputSchemaInputErrorsDoNotSubmit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "inline_and_file",
+			args: []string{"--output-schema", `{"type":"object"}`, "--output-schema-file", "schema.json"},
+			want: "use only one of --output-schema, --output-schema-file, or --output-schema-stdin",
+		},
+		{
+			name: "inline_and_stdin",
+			args: []string{"--output-schema", `{"type":"object"}`, "--output-schema-stdin"},
+			want: "use only one of --output-schema, --output-schema-file, or --output-schema-stdin",
+		},
+		{
+			name: "file_and_stdin",
+			args: []string{"--output-schema-file", "schema.json", "--output-schema-stdin"},
+			want: "use only one of --output-schema, --output-schema-file, or --output-schema-stdin",
+		},
+		{
+			name: "no_contract_inline",
+			args: []string{"--no-contract", "--output-schema", `{"type":"object"}`},
+			want: "--no-contract cannot be used with --output-schema, --output-schema-file, or --output-schema-stdin",
+		},
+		{
+			name: "no_contract_file",
+			args: []string{"--no-contract", "--output-schema-file", "schema.json"},
+			want: "--no-contract cannot be used with --output-schema, --output-schema-file, or --output-schema-stdin",
+		},
+		{
+			name: "no_contract_stdin",
+			args: []string{"--no-contract", "--output-schema-stdin"},
+			want: "--no-contract cannot be used with --output-schema, --output-schema-file, or --output-schema-stdin",
+		},
+		{
+			name: "schema_stdin_and_prompt_stdin",
+			args: []string{"--output-schema-stdin", "--prompt-stdin"},
+			want: "--output-schema-stdin cannot be used with --prompt-stdin",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+			args := append([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it"}, tc.args...)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, strings.NewReader(`{"type":"object"}`), &stdout, &stderr); code == 0 {
+				t.Fatalf("task code = 0, want error; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.want)
+			}
+			if len(fake.submits) != 0 {
+				t.Fatalf("JobSubmit calls = %d, want 0", len(fake.submits))
+			}
+		})
+	}
+}
+
+func TestTaskOutputSchemaFastFailsBeforeSubmit(t *testing.T) {
+	for _, schema := range []string{`{"type":`, ""} {
+		t.Run(fmt.Sprintf("schema_%q", schema), func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--output-schema", schema}, nil, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("task code = 0, want invalid schema error; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "jsonSchema must be valid JSON") {
+				t.Fatalf("stderr = %q, want engine schema error", stderr.String())
+			}
+			if len(fake.submits) != 0 {
+				t.Fatalf("JobSubmit calls = %d, want 0", len(fake.submits))
+			}
+		})
+	}
+}
+
+func TestTaskOutputSchemaFileNotFoundDoesNotSubmit(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	missing := filepath.Join(t.TempDir(), "missing-schema.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--output-schema-file", missing}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("task code = 0, want missing file error; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "read --output-schema-file") || !strings.Contains(stderr.String(), missing) {
+		t.Fatalf("stderr = %q, want missing output schema file error", stderr.String())
+	}
+	if len(fake.submits) != 0 {
+		t.Fatalf("JobSubmit calls = %d, want 0", len(fake.submits))
+	}
+}
+
+func TestTaskOutputSchemaFileAndStdinReachPolicyAndMetadata(t *testing.T) {
+	schema := `{"type":"object","required":["schema_version"],"properties":{"schema_version":{"const":"1"}}}`
+	for _, tc := range []struct {
+		name  string
+		args  func(t *testing.T) []string
+		stdin io.Reader
+	}{
+		{
+			name: "file",
+			args: func(t *testing.T) []string {
+				path := filepath.Join(t.TempDir(), "schema.json")
+				if err := os.WriteFile(path, []byte(schema), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return []string{"--output-schema-file", path}
+			},
+		},
+		{
+			name:  "stdin",
+			args:  func(*testing.T) []string { return []string{"--output-schema-stdin"} },
+			stdin: strings.NewReader(schema),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+			xdgState := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", xdgState)
+			args := append([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it"}, tc.args(t)...)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, tc.stdin, &stdout, &stderr); code != 0 {
+				t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+			}
+			if len(fake.submits) != 1 {
+				t.Fatalf("JobSubmit calls = %d, want 1", len(fake.submits))
+			}
+			turnPolicy := fake.submits[0].TaskSpec.Policy
+			if turnPolicy == nil || turnPolicy.Contract == nil || string(turnPolicy.Contract.JSONSchema) != schema || turnPolicy.Contract.Shape != nil || turnPolicy.Retry == nil || turnPolicy.Retry.Max != 1 {
+				t.Fatalf("submitted policy = %#v, want JSON Schema contract with retry", turnPolicy)
+			}
+			stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			meta, found, err := loadJobMetadata(stateDir, "job_fake")
+			if err != nil || !found {
+				t.Fatalf("load job metadata = %#v / %t / %v, want schema task metadata", meta, found, err)
+			}
+			if meta.ContractKind != contractKindJSONSchema {
+				t.Fatalf("metadata contractKind = %q, want %q", meta.ContractKind, contractKindJSONSchema)
 			}
 		})
 	}
