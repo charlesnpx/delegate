@@ -369,7 +369,7 @@ func requireStallGuidance(t *testing.T, skill GeneratedSkill) {
 		"delegate status --job <id>",
 		"every 2-5 minutes",
 		"delegate status --json --job <id>",
-		"--probe\" blocks for roughly two sampling intervals",
+		"--probe\" blocks for roughly one to three sampling intervals",
 		"expired heartbeat lease",
 		"immediate stall signal",
 		"delegate status --job <id> --probe",
