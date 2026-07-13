@@ -1044,12 +1044,21 @@ func TestTaskPassesThroughUnadvertisedCatalogModelAndEffort(t *testing.T) {
 	if code := run([]string{
 		"task", "--backend", "claude", "--cwd", t.TempDir(),
 		"--model", "claude-sonnet-4-6", "--effort", "high",
-		"--prompt", "pass these values through", "--background",
+		"--prompt", "pass these values through", "--background", "--json",
 	}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("task code = %d stderr=%q", code, stderr.String())
 	}
 	if len(fake.submits) != 1 {
 		t.Fatalf("JobSubmit calls = %d, want 1", len(fake.submits))
+	}
+	// Warnings must never contaminate the JSON stdout channel: stdout must be
+	// exactly one decodable launch envelope with no warning text.
+	var launch LaunchEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &launch); err != nil {
+		t.Fatalf("stdout is not a single launch envelope: %v; raw=%q", err, stdout.String())
+	}
+	if strings.Contains(stdout.String(), "warning:") {
+		t.Fatalf("stdout contains warning text: %q", stdout.String())
 	}
 	spec := fake.submits[0].TaskSpec
 	if spec.Model != "claude-sonnet-4-6" || spec.Effort != "high" {

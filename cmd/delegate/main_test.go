@@ -58,11 +58,29 @@ func TestRunHandoffCreateRequiresJSON(t *testing.T) {
 	}
 }
 
+func TestRunHelpAliases(t *testing.T) {
+	for _, alias := range []string{"--help", "-h", "help"} {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{alias}, nil, &stdout, &stderr); code != 0 {
+			t.Fatalf("run(%q) code = %d, want 0; stderr=%q", alias, code, stderr.String())
+		}
+		if !bytes.Contains(stdout.Bytes(), []byte("usage: delegate <command>")) {
+			t.Fatalf("run(%q) stdout = %q, want usage text", alias, stdout.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("run(%q) stderr = %q, want empty", alias, stderr.String())
+		}
+	}
+}
+
 func TestRunUnknownCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"nope"}, nil, &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("run() code = 0, want error")
+	if code != 2 {
+		t.Fatalf("run() code = %d, want 2", code)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("usage: delegate <command>")) {
+		t.Fatalf("stderr = %q, want usage text", stderr.String())
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty", stdout.String())
