@@ -56,7 +56,7 @@ func assertOnlyRequestedStatusCall(t *testing.T, calls []client.JobStatusParams,
 	}
 }
 
-func TestWaitForJobResultBacksOffAndOnlyFallsBackToStatusAfterResultError(t *testing.T) {
+func TestWaitForJobResultBacksOffAndChecksStatusForCleanup(t *testing.T) {
 	base := &fakeAgentbusClient{hello: helloWithCapabilities()}
 	fake := &scriptedPollingClient{
 		fakeAgentbusClient: base,
@@ -72,7 +72,10 @@ func TestWaitForJobResultBacksOffAndOnlyFallsBackToStatusAfterResultError(t *tes
 			{result: client.JobResult{JobID: "job_poll", State: engine.StateRunning}},
 			{result: client.JobResult{JobID: "job_poll", State: engine.StateCompleted}},
 		},
-		statuses: []client.JobStatusResult{{Jobs: []client.JobStatus{{JobID: "job_poll", State: engine.StateRunning}}}},
+		statuses: []client.JobStatusResult{
+			{Jobs: []client.JobStatus{{JobID: "job_poll", State: engine.StateRunning}}},
+			{Jobs: []client.JobStatus{{JobID: "job_poll", State: engine.StateCompleted}}},
+		},
 	}
 	oldSleep := jobPollSleep
 	var delays []time.Duration
@@ -93,11 +96,16 @@ func TestWaitForJobResultBacksOffAndOnlyFallsBackToStatusAfterResultError(t *tes
 	if result.State != engine.StateCompleted {
 		t.Fatalf("result state = %q, want completed", result.State)
 	}
-	if want := []string{"result", "result", "status", "result", "result", "result", "result", "result", "result", "result", "result"}; !reflect.DeepEqual(fake.calls, want) {
+	if want := []string{"result", "result", "status", "result", "result", "result", "result", "result", "result", "result", "result", "status"}; !reflect.DeepEqual(fake.calls, want) {
 		t.Fatalf("RPC order = %#v, want %#v", fake.calls, want)
 	}
-	if len(base.statuses) != 1 || base.statuses[0].JobID != "job_poll" || base.statuses[0].All {
-		t.Fatalf("JobStatus calls = %#v, want only fallback for requested job", base.statuses)
+	if len(base.statuses) != 2 {
+		t.Fatalf("JobStatus calls = %#v, want fallback and terminal cleanup calls", base.statuses)
+	}
+	for _, call := range base.statuses {
+		if call.JobID != "job_poll" || call.All {
+			t.Fatalf("JobStatus call = %#v, want JobID %q without All", call, "job_poll")
+		}
 	}
 
 	wantDelays := []time.Duration{

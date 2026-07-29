@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -99,6 +100,83 @@ func TestReviewCommandsUseReadOnlySanitizedTaskPipelineAndEnvelopeKinds(t *testi
 			}
 		})
 	}
+}
+
+func TestReviewWaitCleanupUsesStatusDispositionWhenResultOmitsIt(t *testing.T) {
+	repo := newCommandGitFixture(t)
+	writeCommandFixture(t, repo, "visible.txt", "change\n")
+	report := compliantReport()
+	jobID := "job_review_wait_status_cleanup"
+	sessionID := "session_review_wait_status_cleanup"
+	fake := &reviewWaitStatusCleanupClient{fakeAgentbusClient: fakeAgentbusClient{
+		hello: helloWithCapabilities(),
+		result: client.JobResult{
+			JobID:     jobID,
+			SessionID: sessionID,
+			State:     engine.StateCompleted,
+			Result:    &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
+			Contract:  ptr(compliantContractStamp(t, report)),
+		},
+	}}
+	restore := stubAgentbusClientGlobals(t, fake)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--wait", "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("review code=%d stderr=%q stdout=%q, want success", code, stderr.String(), stdout.String())
+	}
+	if fake.captureErr != nil {
+		t.Fatalf("capture artifacts before status cleanup: %v", fake.captureErr)
+	}
+	if fake.inputPath == "" || fake.workspace == "" {
+		t.Fatalf("captured input=%q workspace=%q, want both paths before cleanup", fake.inputPath, fake.workspace)
+	}
+	assertPathMissing(t, fake.inputPath)
+	assertPathMissing(t, fake.workspace)
+	meta, found, err := loadJobMetadata("", jobID)
+	if err != nil || !found {
+		t.Fatalf("metadata found=%v err=%v", found, err)
+	}
+	if meta.JobInputPath != "" || meta.ReviewWorkspace != "" || meta.CleanupDisposition != cleanupDispositionVerifiedAbsent {
+		t.Fatalf("metadata after cleanup=%#v, want removed artifacts and status fallback disposition", meta)
+	}
+	if strings.Contains(stderr.String(), "retained local job artifacts") {
+		t.Fatalf("stderr=%q, want no retention warning", stderr.String())
+	}
+}
+
+type reviewWaitStatusCleanupClient struct {
+	fakeAgentbusClient
+	inputPath  string
+	workspace  string
+	captureErr error
+}
+
+func (f *reviewWaitStatusCleanupClient) JobStatus(_ context.Context, params client.JobStatusParams) (client.JobStatusResult, error) {
+	f.statuses = append(f.statuses, params)
+	meta, found, err := loadJobMetadata("", params.JobID)
+	if err != nil {
+		f.captureErr = err
+	} else if !found {
+		f.captureErr = errors.New("metadata missing before wait cleanup")
+	} else {
+		f.inputPath = meta.JobInputPath
+		f.workspace = meta.ReviewWorkspace
+		if f.inputPath == "" || f.workspace == "" {
+			f.captureErr = errors.New("metadata missing artifact paths before wait cleanup")
+		} else if _, err := os.Stat(f.inputPath); err != nil {
+			f.captureErr = err
+		} else if _, err := os.Stat(f.workspace); err != nil {
+			f.captureErr = err
+		}
+	}
+	return client.JobStatusResult{Jobs: []client.JobStatus{{
+		JobID:              params.JobID,
+		SessionID:          "session_review_wait_status_cleanup",
+		State:              engine.StateCompleted,
+		CleanupDisposition: cleanupDispositionVerifiedAbsent,
+	}}}, nil
 }
 
 func TestReviewBackgroundArtifactPersistsUntilTerminalResultCleanup(t *testing.T) {

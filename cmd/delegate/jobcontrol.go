@@ -284,7 +284,9 @@ func waitForJobResult(ctx context.Context, c agentbusClient, stateDir, jobID str
 	for {
 		result, err := c.JobResult(ctx, client.JobResultParams{JobID: jobID})
 		if err == nil && engine.IsTerminal(result.State) {
-			if err := cleanupJobInput(stateDir, result.JobID, result.SessionID, result.State, result.CleanupDisposition, cleanupWarnings); err != nil {
+			statusJob, statusFound := requestedJobStatusForCleanup(ctx, c, stateDir, jobID)
+			cleanupDisposition := cleanupDispositionFromResultAndStatus(result, statusJob, statusFound)
+			if err := cleanupJobInput(stateDir, result.JobID, result.SessionID, result.State, cleanupDisposition, cleanupWarnings); err != nil {
 				return client.JobResult{}, err
 			}
 			return result, nil
