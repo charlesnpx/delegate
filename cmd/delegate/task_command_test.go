@@ -448,7 +448,7 @@ func TestTaskOutputSchemaFileAndStdinReachPolicyAndMetadata(t *testing.T) {
 	}
 }
 
-func TestTaskSubmitFailureUnlinksHandoffAndDeletesJobInput(t *testing.T) {
+func TestTaskSubmitFailurePreservesIntentAndHandoffForRecovery(t *testing.T) {
 	fake := &fakeAgentbusClient{hello: helloWithCapabilities(), submitErr: errors.New("submit failed")}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
@@ -471,22 +471,33 @@ func TestTaskSubmitFailureUnlinksHandoffAndDeletesJobInput(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("task code = 0, want submit failure; stdout = %q stderr = %q", stdout.String(), stderr.String())
 	}
-	if len(fake.submits) != 1 {
-		t.Fatalf("JobSubmit calls = %d, want 1", len(fake.submits))
+	if len(fake.submits) != maxSubmissionAttempts {
+		t.Fatalf("JobSubmit calls = %d, want retry attempts %d", len(fake.submits), maxSubmissionAttempts)
 	}
-	if _, err := os.Stat(handoffResult.HandoffPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("handoff file still exists or unexpected stat error: %v", err)
+	requestID := fake.submits[0].RequestID
+	if !strings.Contains(stderr.String(), "delegate task --recover-request "+requestID) {
+		t.Fatalf("stderr = %q, want recovery command for %s", stderr.String(), requestID)
+	}
+	if _, err := os.Stat(handoffResult.HandoffPath); err != nil {
+		t.Fatalf("handoff file was not preserved for unresolved submission: %v", err)
 	}
 	matches, err := filepath.Glob(filepath.Join(stateDir, "job-input.*.prompt"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(matches) != 0 {
-		t.Fatalf("job input cleanup left files: %#v", matches)
+		t.Fatalf("unacknowledged submit created job input files: %#v", matches)
+	}
+	intent, found, err := loadSubmissionIntent(stateDir, requestID)
+	if err != nil || !found {
+		t.Fatalf("submission intent found=%v err=%v", found, err)
+	}
+	if intent.Phase != submissionPhaseBlocked || intent.Params.TaskSpec.Prompt != "durable prompt" || intent.LastError == nil {
+		t.Fatalf("intent = %#v, want blocked durable prompt with last error", intent)
 	}
 }
 
-func TestTaskMetadataPersistFailureBeforeLaunchAborts(t *testing.T) {
+func TestTaskSubmissionIntentPersistFailureBeforeLaunchAborts(t *testing.T) {
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		result: client.JobResult{
@@ -495,11 +506,11 @@ func TestTaskMetadataPersistFailureBeforeLaunchAborts(t *testing.T) {
 	}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
-	oldSave := saveDelegateJobMetadata
-	saveDelegateJobMetadata = func(string, jobMetadata) error {
-		return errors.New("metadata store read-only")
+	oldSave := saveSubmissionIntent
+	saveSubmissionIntent = func(string, submissionIntent) error {
+		return errors.New("intent store read-only")
 	}
-	defer func() { saveDelegateJobMetadata = oldSave }()
+	defer func() { saveSubmissionIntent = oldSave }()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
 	var stdout, stderr bytes.Buffer
@@ -510,7 +521,7 @@ func TestTaskMetadataPersistFailureBeforeLaunchAborts(t *testing.T) {
 	if len(fake.submits) != 0 {
 		t.Fatalf("JobSubmit calls = %d, want 0", len(fake.submits))
 	}
-	if !strings.Contains(stderr.String(), "persist metadata before launch: metadata store read-only") {
+	if !strings.Contains(stderr.String(), "persist submission intent before launch: intent store read-only") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
@@ -533,16 +544,6 @@ func TestBackgroundJobInputIsReassociatedAndSweptByNextStatus(t *testing.T) {
 	}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
-	oldSave := saveDelegateJobMetadata
-	saveCalls := 0
-	saveDelegateJobMetadata = func(string, jobMetadata) error {
-		saveCalls++
-		if saveCalls == 2 {
-			return errors.New("metadata unavailable after launch")
-		}
-		return nil
-	}
-	defer func() { saveDelegateJobMetadata = oldSave }()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
 	if err != nil {
@@ -588,16 +589,6 @@ func TestBackgroundJobInputIsSweptByNextResult(t *testing.T) {
 	}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
-	oldSave := saveDelegateJobMetadata
-	saveCalls := 0
-	saveDelegateJobMetadata = func(string, jobMetadata) error {
-		saveCalls++
-		if saveCalls == 2 {
-			return errors.New("metadata unavailable after launch")
-		}
-		return nil
-	}
-	defer func() { saveDelegateJobMetadata = oldSave }()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
 	if err != nil {
@@ -622,58 +613,6 @@ func TestBackgroundJobInputIsSweptByNextResult(t *testing.T) {
 	}
 	if len(fake.statuses) == 0 {
 		t.Fatal("result did not perform terminal job-input status lookup")
-	}
-}
-
-func TestSweepAdoptsOldProvisionalMetadataBySubmittedJobTag(t *testing.T) {
-	stateDir := filepath.Join(t.TempDir(), "delegate")
-	provisionalID := "job_provisional_adoption"
-	actualID := "job_actual_adoption"
-	input, err := handoff.PersistJobInput(handoff.JobInputOptions{
-		StateDir: stateDir,
-		JobID:    provisionalID,
-		Prompt:   handoff.ResolvedPrompt{Prompt: "review prompt", Source: handoff.SourcePrompt},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	stateDir, err = handoff.ResolveStateDir(handoff.StateConfig{StateDir: stateDir})
-	if err != nil {
-		t.Fatal(err)
-	}
-	workspace, err := os.MkdirTemp(stateDir, "review-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := saveJobMetadata(stateDir, jobMetadata{
-		Schema:          envelopeSchema,
-		JobID:           provisionalID,
-		Kind:            reviewKind,
-		JobInputPath:    input.Path,
-		ReviewWorkspace: workspace,
-		Provisional:     true,
-		CreatedAt:       time.Now().Add(-2 * provisionalMetadataAdoptionThreshold),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	fake := &fakeAgentbusClient{status: client.JobStatusResult{Jobs: []client.JobStatus{{
-		JobID: actualID,
-		State: engine.StateCompleted,
-		Tags:  map[string]string{provisionalJobIDTag: provisionalID},
-	}}}}
-
-	if err := sweepTerminalJobInputs(context.Background(), fake, stateDir); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("adopted terminal workspace remains: %v", err)
-	}
-	if _, found, err := loadJobMetadata(stateDir, provisionalID); err != nil || found {
-		t.Fatalf("provisional metadata found=%v err=%v", found, err)
-	}
-	meta, found, err := loadJobMetadata(stateDir, actualID)
-	if err != nil || !found || meta.Provisional || meta.JobInputPath != "" || meta.ReviewWorkspace != "" {
-		t.Fatalf("adopted metadata=%#v found=%v err=%v", meta, found, err)
 	}
 }
 

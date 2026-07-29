@@ -159,17 +159,17 @@ func TestReviewBackgroundArtifactPersistsUntilTerminalResultCleanup(t *testing.T
 	}
 }
 
-func TestReviewMetadataFailureBeforeLaunchAbortsAndCleansWorkspace(t *testing.T) {
+func TestReviewSubmissionIntentFailureBeforeLaunchAbortsAndCleansWorkspace(t *testing.T) {
 	repo := newCommandGitFixture(t)
 	writeCommandFixture(t, repo, "visible.txt", "change\n")
 	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
-	oldSave := saveDelegateJobMetadata
-	saveDelegateJobMetadata = func(string, jobMetadata) error {
-		return errors.New("metadata unavailable before launch")
+	oldSave := saveSubmissionIntent
+	saveSubmissionIntent = func(string, submissionIntent) error {
+		return errors.New("intent store unavailable before launch")
 	}
-	defer func() { saveDelegateJobMetadata = oldSave }()
+	defer func() { saveSubmissionIntent = oldSave }()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
 	var stdout, stderr bytes.Buffer
@@ -185,7 +185,7 @@ func TestReviewMetadataFailureBeforeLaunchAbortsAndCleansWorkspace(t *testing.T)
 	if err != nil || len(workspaces) != 0 {
 		t.Fatalf("review workspaces after aborted launch=%#v, %v", workspaces, err)
 	}
-	if !strings.Contains(stderr.String(), "persist metadata before launch") {
+	if !strings.Contains(stderr.String(), "persist submission intent before launch") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
@@ -207,13 +207,8 @@ func TestReviewMetadataFailureAfterLaunchUsesDurableFallbackAndPreservesKind(t *
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
 	oldSave := saveDelegateJobMetadata
-	saveCalls := 0
 	saveDelegateJobMetadata = func(string, jobMetadata) error {
-		saveCalls++
-		if saveCalls == 2 {
-			return errors.New("primary metadata write failed after launch")
-		}
-		return nil
+		return errors.New("primary metadata write failed after launch")
 	}
 	defer func() { saveDelegateJobMetadata = oldSave }()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -253,13 +248,8 @@ func TestReviewMetadataFailureAfterSubmitReturnsRealJobEnvelopeAndKeepsWorkspace
 	defer restore()
 	oldPrimary := saveDelegateJobMetadata
 	oldFallback := saveLaunchedJobMetadataFallback
-	primaryCalls := 0
 	saveDelegateJobMetadata = func(stateDir string, meta jobMetadata) error {
-		primaryCalls++
-		if primaryCalls > 1 {
-			return errors.New("primary metadata unavailable after submit")
-		}
-		return saveJobMetadata(stateDir, meta)
+		return errors.New("primary metadata unavailable after submit")
 	}
 	saveLaunchedJobMetadataFallback = func(string, jobMetadata) error {
 		return errors.New("fallback metadata unavailable after submit")
@@ -294,10 +284,16 @@ func TestReviewMetadataFailureAfterSubmitReturnsRealJobEnvelopeAndKeepsWorkspace
 			t.Fatalf("stderr=%q, want warning %q", stderr.String(), warning)
 		}
 	}
-	provisionalID := fake.submits[0].TaskSpec.Tags[provisionalJobIDTag]
-	meta, found, err := loadJobMetadata("", provisionalID)
-	if err != nil || !found || !meta.Provisional || meta.ReviewWorkspace != workspace {
-		t.Fatalf("provisional metadata=%#v found=%v err=%v", meta, found, err)
+	requestID := fake.submits[0].RequestID
+	intent, found, err := loadSubmissionIntent("", requestID)
+	if err != nil || !found {
+		t.Fatalf("submission intent found=%v err=%v", found, err)
+	}
+	if intent.Phase != submissionPhaseInFlight || intent.ReviewWorkspace != workspace || intent.JobID != "" {
+		t.Fatalf("submission intent=%#v, want in-flight intent retaining review workspace and no ack job", intent)
+	}
+	if _, found, err := loadJobMetadata("", "job_review_metadata_orphan"); err != nil || found {
+		t.Fatalf("metadata found=%v err=%v, want absent after primary+fallback failure", found, err)
 	}
 }
 

@@ -6,8 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/charlesnpx/agentbus/client"
@@ -16,8 +14,6 @@ import (
 	"github.com/charlesnpx/delegate/internal/handoff"
 	"github.com/charlesnpx/delegate/internal/policy"
 )
-
-const provisionalMetadataAdoptionThreshold = time.Minute
 
 const (
 	initialJobPollInterval = 100 * time.Millisecond
@@ -151,8 +147,6 @@ func agentbusStateRootForJob(stateDir, jobID string) (string, error) {
 }
 
 func recordedAgentbusStateRootForJob(stateDir, jobID string) (string, bool, error) {
-	// TODO(D3): delegate task --recover-request must load the submission
-	// intent and route to that intent's recorded Agentbus state root.
 	if err := validateDelegateJobID(jobID); err != nil {
 		return "", false, nil
 	}
@@ -363,106 +357,7 @@ func cleanupRequestedJobStatus(ctx context.Context, c agentbusClient, stateDir, 
 	}
 }
 
-func adoptProvisionalJobMetadata(ctx context.Context, c agentbusClient, stateDir string, cutoff time.Time) error {
-	provisional, err := provisionalJobMetadataOlderThan(stateDir, cutoff)
-	if err != nil || len(provisional) == 0 {
-		return err
-	}
-	status, err := c.JobStatus(ctx, client.JobStatusParams{All: true})
-	if err != nil {
-		return fmt.Errorf("list jobs for provisional metadata adoption: %w", err)
-	}
-	jobsByProvisionalID := make(map[string]client.JobStatus, len(status.Jobs))
-	jobsByID := make(map[string]client.JobStatus, len(status.Jobs))
-	for _, job := range status.Jobs {
-		jobsByID[job.JobID] = job
-		if provisionalID := job.Tags[provisionalJobIDTag]; provisionalID != "" {
-			jobsByProvisionalID[provisionalID] = job
-		}
-	}
-	var joined error
-	for _, meta := range provisional {
-		job, ok := jobsByProvisionalID[meta.JobID]
-		if !ok && meta.AdoptedJobID != "" {
-			job, ok = jobsByID[meta.AdoptedJobID]
-		}
-		if !ok {
-			continue
-		}
-		if err := adoptOneProvisionalJobMetadata(stateDir, meta, job); err != nil {
-			joined = errors.Join(joined, fmt.Errorf("adopt provisional metadata %s as %s: %w", meta.JobID, job.JobID, err))
-		}
-	}
-	return joined
-}
-
-func adoptOneProvisionalJobMetadata(stateDir string, provisional jobMetadata, job client.JobStatus) error {
-	inputPath, err := reassociateProvisionalJobInput(stateDir, provisional, job.JobID)
-	if err != nil {
-		return err
-	}
-	meta, found, err := loadJobMetadata(stateDir, job.JobID)
-	if err != nil {
-		return err
-	}
-	if !found {
-		meta = provisional
-		meta.JobID = job.JobID
-		meta.Provisional = false
-	}
-	meta.AdoptedJobID = ""
-	if inputPath != "" {
-		meta.JobInputPath = inputPath
-	}
-	if job.SessionID != "" {
-		meta.SessionID = job.SessionID
-	}
-	if err := saveJobMetadata(stateDir, meta); err != nil {
-		return err
-	}
-	if provisional.JobID != job.JobID {
-		if err := deleteJobMetadata(stateDir, provisional.JobID); err != nil {
-			return err
-		}
-	}
-	if inputPath == "" && engine.IsTerminal(job.State) {
-		return cleanupJobInput(stateDir, job.JobID, job.SessionID, job.State)
-	}
-	return nil
-}
-
-func reassociateProvisionalJobInput(stateDir string, meta jobMetadata, jobID string) (string, error) {
-	resolvedState, err := handoff.ResolveStateDir(handoff.StateConfig{StateDir: stateDir})
-	if err != nil {
-		return "", err
-	}
-	if meta.JobInputPath != "" && filepath.Clean(filepath.Dir(meta.JobInputPath)) != resolvedState {
-		return "", fmt.Errorf("provisional job-input path is outside delegate state: %q", meta.JobInputPath)
-	}
-	if meta.JobInputPath != "" {
-		if _, err := os.Lstat(meta.JobInputPath); err == nil {
-			input := handoff.JobInput{JobID: meta.JobID, Path: meta.JobInputPath}
-			reassociated, err := handoff.ReassociateJobInput(input, jobID, handoff.Hooks{})
-			return reassociated.Path, err
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return "", err
-		}
-	}
-	entries, err := os.ReadDir(resolvedState)
-	if err != nil {
-		return "", err
-	}
-	for _, entry := range entries {
-		input, ok := handoff.ParseJobInputPath(filepath.Join(resolvedState, entry.Name()))
-		if ok && input.JobID == jobID {
-			return input.Path, nil
-		}
-	}
-	return "", nil
-}
-
 func sweepTerminalJobInputs(ctx context.Context, c agentbusClient, stateDir string) error {
-	sweepErr := adoptProvisionalJobMetadata(ctx, c, stateDir, time.Now().Add(-provisionalMetadataAdoptionThreshold))
 	removed, terminalSweepErr := handoff.SweepTerminalJobInputs(stateDir, func(jobID string) (engine.JobState, bool, error) {
 		status, err := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
 		if err != nil {
@@ -474,7 +369,7 @@ func sweepTerminalJobInputs(ctx context.Context, c agentbusClient, stateDir stri
 		}
 		return job.State, true, nil
 	}, handoff.Hooks{})
-	sweepErr = errors.Join(sweepErr, terminalSweepErr)
+	sweepErr := terminalSweepErr
 	for _, input := range removed {
 		sweepErr = errors.Join(sweepErr, cleanupJobInput(stateDir, input.JobID, "", engine.StateCompleted))
 	}

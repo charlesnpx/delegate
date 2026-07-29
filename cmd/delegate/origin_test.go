@@ -98,7 +98,11 @@ func TestTaskOriginTagsAndEnvelopes(t *testing.T) {
 		delegateDepthTag:  "5",
 	}
 	gotTags := fake.submits[0].TaskSpec.Tags
-	delete(gotTags, provisionalJobIDTag)
+	requestID := gotTags[delegateRequestIDTag]
+	if err := validateRequestID(requestID); err != nil {
+		t.Fatalf("delegate.request_id = %q: %v", requestID, err)
+	}
+	delete(gotTags, delegateRequestIDTag)
 	if !reflect.DeepEqual(gotTags, wantTags) {
 		t.Fatalf("TaskSpec tags = %#v, want %#v", gotTags, wantTags)
 	}

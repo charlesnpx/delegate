@@ -26,6 +26,8 @@ const (
 type jobMetadata struct {
 	Schema            int                        `json:"schema"`
 	JobID             string                     `json:"job_id"`
+	RequestID         string                     `json:"request_id,omitempty"`
+	WorkspaceKey      string                     `json:"workspace_key,omitempty"`
 	Kind              string                     `json:"kind"`
 	Backend           string                     `json:"backend,omitempty"`
 	CWD               string                     `json:"cwd,omitempty"`
@@ -35,8 +37,8 @@ type jobMetadata struct {
 	JobInputPath      string                     `json:"job_input_path,omitempty"`
 	ReviewWorkspace   string                     `json:"review_workspace,omitempty"`
 	AgentbusStateRoot string                     `json:"agentbus_state_root,omitempty"`
-	Provisional       bool                       `json:"provisional,omitempty"`
-	AdoptedJobID      string                     `json:"adopted_job_id,omitempty"`
+	SubmissionState   engine.JobState            `json:"submission_state,omitempty"`
+	Deduplicated      bool                       `json:"deduplicated,omitempty"`
 	BackendError      string                     `json:"backend_error,omitempty"`
 	Model             config.DimensionResolution `json:"model,omitempty"`
 	Effort            config.DimensionResolution `json:"effort,omitempty"`
@@ -107,7 +109,7 @@ func saveJobMetadata(stateDir string, meta jobMetadata) error {
 		return err
 	}
 	raw = append(raw, '\n')
-	return atomicWriteMetadata(filepath.Join(dir, meta.JobID+".json"), raw, 0o600)
+	return atomicWriteMetadata(filepath.Join(dir, encodedStateFilename(meta.JobID)), raw, 0o600)
 }
 
 func loadJobMetadata(stateDir, jobID string) (jobMetadata, bool, error) {
@@ -118,7 +120,7 @@ func loadJobMetadata(stateDir, jobID string) (jobMetadata, bool, error) {
 	if err != nil {
 		return jobMetadata{}, false, err
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, jobID+".json"))
+	raw, err := os.ReadFile(filepath.Join(dir, encodedStateFilename(jobID)))
 	if errors.Is(err, os.ErrNotExist) {
 		return jobMetadata{}, false, nil
 	}
@@ -143,7 +145,7 @@ func deleteJobMetadata(stateDir, jobID string) error {
 	if err != nil {
 		return err
 	}
-	err = os.Remove(filepath.Join(dir, jobID+".json"))
+	err = os.Remove(filepath.Join(dir, encodedStateFilename(jobID)))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -194,36 +196,6 @@ func cleanupJobInput(stateDir, jobID, sessionID string, state engine.JobState) e
 	return saveJobMetadata(stateDir, meta)
 }
 
-func provisionalJobMetadataOlderThan(stateDir string, cutoff time.Time) ([]jobMetadata, error) {
-	dir, err := jobMetadataDir(stateDir)
-	if err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	var provisional []jobMetadata
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		jobID := strings.TrimSuffix(entry.Name(), ".json")
-		if err := validateDelegateJobID(jobID); err != nil {
-			continue
-		}
-		meta, found, err := loadJobMetadata(stateDir, jobID)
-		if err != nil {
-			return nil, err
-		}
-		if !found || !meta.Provisional || meta.CreatedAt.IsZero() || meta.CreatedAt.After(cutoff) {
-			continue
-		}
-		provisional = append(provisional, meta)
-	}
-	return provisional, nil
-}
-
 func jobMetadataDir(stateDir string) (string, error) {
 	dir, err := handoff.ResolveStateDir(handoff.StateConfig{StateDir: stateDir})
 	if err != nil {
@@ -243,13 +215,7 @@ func jobMetadataDir(stateDir string) (string, error) {
 }
 
 func validateDelegateJobID(jobID string) error {
-	if !strings.HasPrefix(jobID, "job_") || len(jobID) <= len("job_") || len(jobID) > 128 {
-		return fmt.Errorf("invalid job id %q", jobID)
-	}
-	for _, r := range jobID {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
-			continue
-		}
+	if jobID == "" {
 		return fmt.Errorf("invalid job id %q", jobID)
 	}
 	return nil
