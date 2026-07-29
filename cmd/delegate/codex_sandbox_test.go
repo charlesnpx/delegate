@@ -45,8 +45,8 @@ func TestConfigureCodexSandboxFixtures(t *testing.T) {
 			wantRawFragments: []string{"# Keep this comment.", "# Keep this array comment."},
 		},
 		{
-			name:              "both roots are a byte-identical no-op",
-			initial:           stringPtr("# This file must remain byte-for-byte unchanged.\n[sandbox_workspace_write]\nwritable_roots = [\n  \"STATE/agentbus\",\n  \"STATE/delegate\",\n]\n"),
+			name:              "all roots are a byte-identical no-op",
+			initial:           stringPtr("# This file must remain byte-for-byte unchanged.\n[sandbox_workspace_write]\nwritable_roots = [\n  \"STATE/agentbus\",\n  \"CACHE/agentbus\",\n  \"STATE/delegate\",\n]\n"),
 			wantAction:        codexSandboxAlreadyConfigured,
 			wantByteIdentical: true,
 		},
@@ -63,12 +63,14 @@ func TestConfigureCodexSandboxFixtures(t *testing.T) {
 				ConfigPath: filepath.Join(tmp, ".codex", "config.toml"),
 				WritableRoots: []string{
 					filepath.Join(tmp, "state", "agentbus"),
+					filepath.Join(tmp, "cache", "agentbus"),
 					filepath.Join(tmp, "state", "delegate"),
 				},
 			}
 			initial := ""
 			if tc.initial != nil {
 				initial = strings.ReplaceAll(*tc.initial, "STATE", filepath.Join(tmp, "state"))
+				initial = strings.ReplaceAll(initial, "CACHE", filepath.Join(tmp, "cache"))
 				if err := os.MkdirAll(filepath.Dir(paths.ConfigPath), 0o700); err != nil {
 					t.Fatal(err)
 				}
@@ -110,7 +112,7 @@ func TestConfigureCodexSandboxFixtures(t *testing.T) {
 				t.Fatalf("result does not parse: %v\n%s", err, raw)
 			}
 			if !allWritableRootsPresent(parsed.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots) {
-				t.Fatalf("writable_roots = %#v, want both %#v", parsed.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots)
+				t.Fatalf("writable_roots = %#v, want all %#v", parsed.SandboxWorkspaceWrite.WritableRoots, paths.WritableRoots)
 			}
 		})
 	}
@@ -129,6 +131,7 @@ func TestConfigureCodexSandboxUpdatesSymlinkTargetWithoutReplacingLink(t *testin
 		ConfigPath: filepath.Join(tmp, ".codex", "config.toml"),
 		WritableRoots: []string{
 			filepath.Join(tmp, "state", "agentbus"),
+			filepath.Join(tmp, "cache", "agentbus"),
 			filepath.Join(tmp, "state", "delegate"),
 		},
 	}
@@ -381,6 +384,7 @@ func TestConfigureCodexSandboxMalformedConfigIsUnchanged(t *testing.T) {
 		ConfigPath: filepath.Join(tmp, ".codex", "config.toml"),
 		WritableRoots: []string{
 			filepath.Join(tmp, "state", "agentbus"),
+			filepath.Join(tmp, "cache", "agentbus"),
 			filepath.Join(tmp, "state", "delegate"),
 		},
 	}
@@ -396,8 +400,8 @@ func TestConfigureCodexSandboxMalformedConfigIsUnchanged(t *testing.T) {
 	if result.Action != codexSandboxSkipped {
 		t.Fatalf("action = %q, want skipped", result.Action)
 	}
-	if !strings.Contains(result.Warning, "Add this snippet manually:") || !strings.Contains(result.Warning, paths.WritableRoots[0]) || !strings.Contains(result.Warning, paths.WritableRoots[1]) {
-		t.Fatalf("warning = %q, want manual snippet with both roots", result.Warning)
+	if !strings.Contains(result.Warning, "Add this snippet manually:") || !strings.Contains(result.Warning, paths.WritableRoots[0]) || !strings.Contains(result.Warning, paths.WritableRoots[1]) || !strings.Contains(result.Warning, paths.WritableRoots[2]) {
+		t.Fatalf("warning = %q, want manual snippet with all roots", result.Warning)
 	}
 	raw, err := os.ReadFile(paths.ConfigPath)
 	if err != nil {
@@ -409,7 +413,7 @@ func TestConfigureCodexSandboxMalformedConfigIsUnchanged(t *testing.T) {
 }
 
 func TestResolveCodexSandboxPathsUsesXDGStateHome(t *testing.T) {
-	paths, err := resolveCodexSandboxPaths(func(key string) string {
+	paths, err := resolveCodexSandboxPathsFrom(func(key string) string {
 		switch key {
 		case "CODEX_HOME":
 			return "/opt/codex"
@@ -418,7 +422,7 @@ func TestResolveCodexSandboxPathsUsesXDGStateHome(t *testing.T) {
 		default:
 			return ""
 		}
-	}, func() (string, error) { return "/home/delegate", nil })
+	}, func() (string, error) { return "/home/delegate", nil }, func() (string, error) { return "/var/cache", nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,8 +433,54 @@ func TestResolveCodexSandboxPathsUsesXDGStateHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := strings.Join(paths.WritableRoots, ","), strings.Join([]string{agentbusRoot, "/var/state/delegate"}, ","); got != want {
+	cacheRoot, err := canonicalizeAgentbusStateRoot("test agentbus cache root", "/var/cache/agentbus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(paths.WritableRoots, ","), strings.Join([]string{agentbusRoot, cacheRoot, "/var/state/delegate"}, ","); got != want {
 		t.Fatalf("writable roots = %q, want %q", got, want)
+	}
+}
+
+func TestResolveCodexSandboxPathsUsesConfiguredAgentbusStateRoot(t *testing.T) {
+	tmp := t.TempDir()
+	configuredRoot := filepath.Join(tmp, "configured-agentbus")
+	if err := os.MkdirAll(configuredRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := resolveCodexSandboxPathsFrom(func(key string) string {
+		switch key {
+		case "AGENTBUS_STATE_ROOT":
+			return configuredRoot
+		case "XDG_STATE_HOME":
+			return filepath.Join(tmp, "state")
+		default:
+			return ""
+		}
+	}, func() (string, error) {
+		return filepath.Join(tmp, "home"), nil
+	}, func() (string, error) {
+		return filepath.Join(tmp, "cache"), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoot, err := canonicalizeAgentbusStateRoot("test configured agentbus root", configuredRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paths.WritableRoots[0] != wantRoot {
+		t.Fatalf("agentbus writable root = %q, want configured root %q", paths.WritableRoots[0], wantRoot)
+	}
+	wantCacheRoot, err := canonicalizeAgentbusStateRoot("test cache root", filepath.Join(tmp, "cache", "agentbus"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := paths.WritableRoots[1], wantCacheRoot; got != want {
+		t.Fatalf("agentbus cache writable root = %q, want %q", got, want)
+	}
+	if got, want := paths.WritableRoots[2], filepath.Join(tmp, "state", "delegate"); got != want {
+		t.Fatalf("delegate writable root = %q, want %q", got, want)
 	}
 }
 
@@ -441,6 +491,7 @@ func testCodexSandboxPaths(t *testing.T) codexSandboxPaths {
 		ConfigPath: filepath.Join(tmp, ".codex", "config.toml"),
 		WritableRoots: []string{
 			filepath.Join(tmp, "state", "agentbus"),
+			filepath.Join(tmp, "cache", "agentbus"),
 			filepath.Join(tmp, "state", "delegate"),
 		},
 	}

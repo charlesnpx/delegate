@@ -127,6 +127,33 @@ func resolveAgentbusStateRoot() (string, error) {
 	return resolveAgentbusStateRootFrom(os.Getenv, os.UserHomeDir)
 }
 
+func resolveAgentbusUserCacheRoot() (string, error) {
+	return resolveAgentbusUserCacheRootFrom(os.UserCacheDir)
+}
+
+func resolveAgentbusUserCacheRootFrom(userCacheDir func() (string, error)) (string, error) {
+	cacheDir, err := userCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user cache dir for Agentbus autostart locks: %w", err)
+	}
+	if cacheDir == "" {
+		return "", errors.New("user cache directory is empty")
+	}
+	return canonicalizeAgentbusStateRoot("user cache directory", filepath.Join(cacheDir, "agentbus"))
+}
+
+func resolveAgentbusAutostartLockRoot() (string, error) {
+	return resolveAgentbusAutostartLockRootFrom(os.UserCacheDir)
+}
+
+func resolveAgentbusAutostartLockRootFrom(userCacheDir func() (string, error)) (string, error) {
+	cacheRoot, err := resolveAgentbusUserCacheRootFrom(userCacheDir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(cacheRoot, "start-locks"), nil
+}
+
 func resolveAgentbusStateRootFrom(env func(string) string, userHomeDir func() (string, error)) (string, error) {
 	if root := env("AGENTBUS_STATE_ROOT"); root != "" {
 		return canonicalizeAgentbusStateRoot("AGENTBUS_STATE_ROOT", root)
@@ -209,7 +236,17 @@ func requiredCapabilitiesForPolicy(policy *engine.TurnPolicy) []string {
 }
 
 func setupRequiredCapabilities() []string {
-	return []string{"policy.shape", "policy.retry"}
+	return []string{"admission.strictContainment", "policy.shape", "policy.retry"}
+}
+
+func missingCapabilities(hello client.HelloResult, required []string) []string {
+	var missing []string
+	for _, capName := range required {
+		if !hello.Capabilities[capName] {
+			missing = append(missing, capName)
+		}
+	}
+	return missing
 }
 
 func capabilityMissingError(hello client.HelloResult, version, capName string) error {

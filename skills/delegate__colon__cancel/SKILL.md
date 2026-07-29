@@ -1,7 +1,7 @@
 ---
 name: delegate:cancel
-description: Cancel a delegated job after confirming it is stalled through delegate.
-version: v0.4.2
+description: Cancel a delegated job after an explicit operator decision through delegate.
+version: v0.6.0
 ---
 
 # delegate:cancel
@@ -12,31 +12,31 @@ Run the delegate CLI directly for a delegated job. Do not replace the job with a
 
 Set "JOB_ID" to the delegated job id, then run:
 
-Before running the cancel command, confirm the expired-lease signal or that all three probes are flat:
+Before running the cancel command, inspect the current authority state and probe observations:
 
 ~~~bash
 delegate status --job "$JOB_ID" --probe --json
 ~~~
 
-If the probe is active or inconclusive, report that state instead of cancelling.
+The probe is observational. A "no_activity_observed" or "inconclusive" verdict does not prove backend absence and does not by itself authorize cancellation. Cancel only when the user has asked for cancellation or the operator decision is explicit in context.
 
 ~~~bash
 delegate cancel --job "$JOB_ID" --json
 ~~~
 
-For result handling, preserve the helper's verdict, summary, findings, and next steps structure. For review-style output, present findings first and keep them ordered by severity. Preserve file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. If there are no findings, say that explicitly and keep residual risk brief. If the run failed or returned malformed output, include the actionable stderr or envelope fields and stop instead of guessing. After presenting review findings, do not auto-fix; ask the user which issues to address.
+For result handling, preserve the helper's verdict, summary, findings, and next steps structure. For review-style output, present findings first and keep them ordered by severity. Preserve file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Terminal envelopes may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If there are no findings, say that explicitly and keep residual risk brief. If the run failed or returned malformed output, include the actionable stderr or envelope fields and stop instead of guessing. After presenting review findings, do not auto-fix; ask the user which issues to address.
 
-## Stall Monitoring
+## Monitoring
 
 While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call. Plain "delegate status --json --job <id>" is the cheap call; "--probe" blocks for roughly one to three sampling intervals (~10-30s at the default 10s interval, configurable with "--probe-interval").
 
-An expired heartbeat lease in "delegate status" is an immediate stall signal. Otherwise, distinguish a long agent turn from a genuine stall before cancelling: run "delegate status --job <id> --probe" before any cancel. The probe automates all three checks and reports per-probe results:
+Use "delegate status --job <id> --probe --json" only as an observational diagnostic. Its verdict is one of "activity_observed", "no_activity_observed", "inconclusive", or "terminal", and its output includes "authority_state", "cleanup_disposition", and "authority_warnings". These fields report what Delegate observed; they do not override Agentbus state or prove backend absence.
 
 - "ps -p <pid> -o %cpu,etime,stat" sampled twice for child process activity.
 - "lsof -p <pid> -iTCP -sTCP:ESTABLISHED" to confirm a live API socket.
 - captured log file size watched over the probe interval, because progress can land without a command event.
 
-Only if all three probes are flat is the job stalled. On confirmed stall, report the job id and last-known phase, then either "delegate cancel --job <id>" and launch a new delegated task, or keep waiting. Never silently drop the job, never substitute your own answer for the delegated run, and escalate after a 30-minute patience cap without progress.
+A flat CPU sample, no TCP socket, unchanged log size, or expired lease is not cancellation authority. Report the job id, "authority_state", probe verdict, and any "authority_warnings"; then either keep waiting or ask the user before cancelling. Never silently drop the job or substitute your own answer for the delegated run.
 
 ## Operating Discipline
 

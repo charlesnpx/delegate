@@ -171,8 +171,21 @@ func recordedAgentbusStateRootForJob(stateDir, jobID string) (string, bool, erro
 }
 
 func writeProbeSummary(stdout io.Writer, result statusProbeResult) error {
-	if _, err := fmt.Fprintf(stdout, "%s %s verdict=%s\n", result.JobID, result.State, result.Verdict); err != nil {
+	if _, err := fmt.Fprintf(stdout, "%s %s authority_state=%s verdict=%s", result.JobID, result.State, result.AuthorityState, result.Verdict); err != nil {
 		return err
+	}
+	if result.CleanupDisposition != "" {
+		if _, err := fmt.Fprintf(stdout, " cleanup_disposition=%s", result.CleanupDisposition); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintln(stdout); err != nil {
+		return err
+	}
+	for _, warning := range result.AuthorityWarnings {
+		if _, err := fmt.Fprintf(stdout, "authority_warning: %s\n", warning); err != nil {
+			return err
+		}
 	}
 	for _, probe := range result.Probes {
 		if _, err := fmt.Fprintf(stdout, "%s: %s", probe.Name, probe.Status); err != nil {

@@ -22,26 +22,28 @@ const (
 	probeStatusFlat    = "flat"
 	probeStatusUnknown = "unknown"
 
-	probeVerdictActive              = "active"
-	probeVerdictStalled             = "stalled"
-	probeVerdictStalledExpiredLease = "stalled_expired_lease"
-	probeVerdictInconclusive        = "inconclusive"
-	probeVerdictTerminal            = "terminal"
+	probeVerdictActivityObserved   = "activity_observed"
+	probeVerdictNoActivityObserved = "no_activity_observed"
+	probeVerdictInconclusive       = "inconclusive"
+	probeVerdictTerminal           = "terminal"
 )
 
 type statusProbeResult struct {
-	Schema          int             `json:"schema"`
-	JobID           string          `json:"job_id"`
-	State           engine.JobState `json:"state"`
-	LastKnownPhase  engine.JobState `json:"last_known_phase"`
-	WorkerPID       int             `json:"worker_pid,omitempty"`
-	BackendChildPID int             `json:"backend_child_pid,omitempty"`
-	ProbedPID       int             `json:"probed_pid,omitempty"`
-	LogPaths        engine.LogPaths `json:"log_paths,omitempty"`
-	LeaseExpired    bool            `json:"lease_expired"`
-	Probes          []livenessProbe `json:"probes"`
-	Verdict         string          `json:"verdict"`
-	VerdictReason   string          `json:"verdict_reason,omitempty"`
+	Schema             int             `json:"schema"`
+	JobID              string          `json:"job_id"`
+	State              engine.JobState `json:"state"`
+	LastKnownPhase     engine.JobState `json:"last_known_phase"`
+	AuthorityState     engine.JobState `json:"authority_state"`
+	CleanupDisposition string          `json:"cleanup_disposition,omitempty"`
+	AuthorityWarnings  []string        `json:"authority_warnings,omitempty"`
+	WorkerPID          int             `json:"worker_pid,omitempty"`
+	BackendChildPID    int             `json:"backend_child_pid,omitempty"`
+	ProbedPID          int             `json:"probed_pid,omitempty"`
+	LogPaths           engine.LogPaths `json:"log_paths,omitempty"`
+	LeaseExpired       bool            `json:"lease_expired"`
+	Probes             []livenessProbe `json:"probes"`
+	Verdict            string          `json:"verdict"`
+	VerdictReason      string          `json:"verdict_reason,omitempty"`
 }
 
 type livenessProbe struct {
@@ -122,14 +124,17 @@ func probeJobStatusWithInterval(ctx context.Context, job client.JobStatus, inter
 		pid = job.WorkerPID
 	}
 	result := statusProbeResult{
-		Schema:          commandJSONSchema,
-		JobID:           job.JobID,
-		State:           job.State,
-		LastKnownPhase:  job.State,
-		WorkerPID:       job.WorkerPID,
-		BackendChildPID: job.BackendChildPID,
-		ProbedPID:       pid,
-		LogPaths:        job.LogPaths,
+		Schema:             commandJSONSchema,
+		JobID:              job.JobID,
+		State:              job.State,
+		LastKnownPhase:     job.State,
+		AuthorityState:     job.State,
+		CleanupDisposition: job.CleanupDisposition,
+		AuthorityWarnings:  append([]string(nil), job.Warnings...),
+		WorkerPID:          job.WorkerPID,
+		BackendChildPID:    job.BackendChildPID,
+		ProbedPID:          pid,
+		LogPaths:           job.LogPaths,
 	}
 	if job.Lease != nil {
 		result.LeaseExpired = job.Lease.Expired
@@ -140,7 +145,8 @@ func probeJobStatusWithInterval(ctx context.Context, job client.JobStatus, inter
 	}
 	if result.LeaseExpired {
 		result.Probes = skippedLeaseProbes()
-		result.Verdict = probeVerdictStalledExpiredLease
+		result.Verdict = probeVerdictInconclusive
+		result.VerdictReason = "heartbeat lease is expired; Agentbus authority state remains authoritative"
 		return result, nil
 	}
 	probes, err := runLivenessProbes(ctx, job, livenessOps, interval)
@@ -384,7 +390,7 @@ func livenessVerdictReason(probes []livenessProbe) (string, string) {
 	var unknown []string
 	for _, probe := range probes {
 		if probe.Status == probeStatusActive {
-			return probeVerdictActive, ""
+			return probeVerdictActivityObserved, ""
 		}
 		if probe.Status == probeStatusUnknown {
 			unknown = append(unknown, probe.Name)
@@ -397,9 +403,9 @@ func livenessVerdictReason(probes []livenessProbe) (string, string) {
 		return probeVerdictInconclusive, "unknown probes: " + strings.Join(unknown, ", ")
 	}
 	if allFlat && hasRequiredFlatProbes(probes) {
-		return probeVerdictStalled, ""
+		return probeVerdictNoActivityObserved, "process, network, and log_size probes were flat; Agentbus authority state remains authoritative"
 	}
-	return probeVerdictInconclusive, "stalled verdict requires process, network, and log_size probes to be flat"
+	return probeVerdictInconclusive, "observational verdict requires process, network, and log_size probes"
 }
 
 func hasRequiredFlatProbes(probes []livenessProbe) bool {

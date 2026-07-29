@@ -16,7 +16,7 @@ import (
 
 const (
 	// Version is the content version for the generated skill prose.
-	Version = "v0.4.2"
+	Version = "v0.6.0"
 
 	TargetClaude = "claude"
 	TargetCodex  = "codex"
@@ -343,7 +343,7 @@ func namespaceSpecs(target string) []skillSpec {
 	specs = append(specs,
 		jobSpec(target, "status", "Check a delegated job status", `delegate status --job "$JOB_ID" --json`),
 		jobSpec(target, "result", "Fetch and present a delegated job result", `delegate result --job "$JOB_ID" --json`),
-		jobSpec(target, "cancel", "Cancel a delegated job after confirming it is stalled", `delegate cancel --job "$JOB_ID" --json`),
+		jobSpec(target, "cancel", "Cancel a delegated job after an explicit operator decision", `delegate cancel --job "$JOB_ID" --json`),
 		setupSpec(target),
 		configSpec(target),
 	)
@@ -486,7 +486,7 @@ Superseding escape hatch: if the requester explicitly asks you to perform the ta
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
-When the parent uses the same harness as the selected backend, this launches a fresh supervised session—not a native subagent. It has its own job record, contract stamps, and read-only profile.
+When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id, job record, contract stamps, and read-only profile.
 
 ## Parent Audit Linkage
 
@@ -502,27 +502,29 @@ Delegate records the originating skill plus best-effort parent session identity 
 delegate task --backend {{.Backend}} --origin {{.Name}} --cwd "$PWD" --handoff-prompt-file "$HANDOFF_PATH" --background --json
 ~~~
 
-When the caller has a machine-readable output schema, pass it with "--output-schema-file" instead of embedding it in prompt prose. Violations return as "<json-pointer>: <message>", and one corrective retry runs automatically.
+When the caller has a machine-readable output schema, pass it with "--output-schema-file" instead of placing it in prompt prose. Violations return as "<json-pointer>: <message>", and one corrective retry runs automatically.
 
 Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "result_sha256", or "sha256" fields.
 
+If submission is unresolved after Agentbus accepted or may have accepted the request, preserve the reported "request_id" and run only the exact recovery command "delegate task --recover-request <request_id> --json". Do not create a replacement request unless the user explicitly asks for a new logical task.
+
 Launch with "--background" and keep the host agent loop free to continue useful work. Long "--wait" calls can hold a host tool call for 100+ seconds and block that loop; use "--wait" only for a short, explicitly bounded terminal check. For an outstanding job, poll "delegate status --job <id>" instead.
 
-## Stall Monitoring
+## Monitoring
 
 While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call. Plain "delegate status --json --job <id>" is the cheap call; "--probe" blocks for roughly one to three sampling intervals (~10-30s at the default 10s interval, configurable with "--probe-interval").
 
-An expired heartbeat lease in "delegate status" is an immediate stall signal. Otherwise, distinguish a long agent turn from a genuine stall before cancelling: run "delegate status --job <id> --probe" before any cancel. The probe automates all three checks and reports per-probe results:
+Use "delegate status --job <id> --probe --json" only as an observational diagnostic. Its verdict is one of "activity_observed", "no_activity_observed", "inconclusive", or "terminal", and its output includes "authority_state", "cleanup_disposition", and "authority_warnings". These fields report what Delegate observed; they do not override Agentbus state or prove backend absence.
 
 - "ps -p <pid> -o %cpu,etime,stat" sampled twice for child process activity.
 - "lsof -p <pid> -iTCP -sTCP:ESTABLISHED" to confirm a live API socket.
 - captured log file size watched over the probe interval, because progress can land without a command event.
 
-Only if all three probes are flat is the job stalled. On confirmed stall, report the job id and last-known phase, then either "delegate cancel --job <id>" and launch a new delegated task, or keep waiting. Never silently drop the job, never substitute your own answer for the delegated run, and escalate after a 30-minute patience cap without progress.
+A flat CPU sample, no TCP socket, unchanged log size, or expired lease is not cancellation authority. Report the job id, "authority_state", probe verdict, and any "authority_warnings"; then either keep waiting or ask the user before cancelling. Never silently drop the job or substitute your own answer for the delegated run.
 
 ## Result Discipline
 
-When the delegated run returns, preserve the helper's verdict, summary, findings, and next steps structure. For review-style output, present findings first and keep them ordered by severity. Preserve file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing. After presenting review findings, do not auto-fix; ask the user which issues to address.
+When the delegated run returns, preserve the helper's verdict, summary, findings, and next steps structure. For review-style output, present findings first and keep them ordered by severity. Preserve file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Terminal envelopes may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing. After presenting review findings, do not auto-fix; ask the user which issues to address.
 
 Use delegate-report discipline in your own handoff: score criteria, label evidence as observed/inferred/assumed, separate changed from verified, state scope boundaries, and report divergences instead of hiding them.`
 
@@ -551,7 +553,7 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
-When the parent uses the same harness as the selected backend, this launches a fresh supervised session—not a native subagent. It has its own job record, contract stamps, and read-only profile.
+When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id, job record, contract stamps, and read-only profile.
 
 ## Parent Audit Linkage
 
@@ -571,23 +573,25 @@ delegate {{.Command}} --backend {{.Backend}} --origin {{.Name}} --cwd "$PWD" --b
 
 Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "result_sha256", or "sha256" fields.
 
+If submission is unresolved after Agentbus accepted or may have accepted the request, preserve the reported "request_id" and run only the exact recovery command "delegate task --recover-request <request_id> --json". Do not create a replacement request unless the user explicitly asks for a new logical review.
+
 Launch with "--background" and keep the host agent loop free to continue useful work. Long "--wait" calls can hold a host tool call for 100+ seconds and block that loop; use "--wait" only for a short, explicitly bounded terminal check. For an outstanding job, poll "delegate status --job <id>" instead.
 
-## Stall Monitoring
+## Monitoring
 
 While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call. Plain "delegate status --json --job <id>" is the cheap call; "--probe" blocks for roughly one to three sampling intervals (~10-30s at the default 10s interval, configurable with "--probe-interval").
 
-An expired heartbeat lease in "delegate status" is an immediate stall signal. Otherwise, distinguish a long agent turn from a genuine stall before cancelling: run "delegate status --job <id> --probe" before any cancel. The probe automates all three checks and reports per-probe results:
+Use "delegate status --job <id> --probe --json" only as an observational diagnostic. Its verdict is one of "activity_observed", "no_activity_observed", "inconclusive", or "terminal", and its output includes "authority_state", "cleanup_disposition", and "authority_warnings". These fields report what Delegate observed; they do not override Agentbus state or prove backend absence.
 
 - "ps -p <pid> -o %cpu,etime,stat" sampled twice for child process activity.
 - "lsof -p <pid> -iTCP -sTCP:ESTABLISHED" to confirm a live API socket.
 - captured log file size watched over the probe interval, because progress can land without a command event.
 
-Only if all three probes are flat is the job stalled. On confirmed stall, report the job id and last-known phase, then either "delegate cancel --job <id>" and launch a new delegated task, or keep waiting. Never silently drop the job, never substitute your own answer for the delegated run, and escalate after a 30-minute patience cap without progress.
+A flat CPU sample, no TCP socket, unchanged log size, or expired lease is not cancellation authority. Report the job id, "authority_state", probe verdict, and any "authority_warnings"; then either keep waiting or ask the user before cancelling. Never silently drop the job or substitute your own answer for the delegated review.
 
 ## Review Result Discipline
 
-Present findings first and keep them ordered by severity. Preserve the delegated review's file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Distinguish observed evidence from inferred risk and assumptions. If there are no findings, say so explicitly and keep residual risk brief. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing or substituting a local review.
+Present findings first and keep them ordered by severity. Preserve the delegated review's file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Distinguish observed evidence from inferred risk and assumptions. Terminal envelopes may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If there are no findings, say so explicitly and keep residual risk brief. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing or substituting a local review.
 
 Never auto-fix after presenting review findings. Ask the user which issues, if any, they want addressed.`
 
@@ -606,13 +610,13 @@ Run the delegate CLI directly for a delegated job. Do not replace the job with a
 Set "JOB_ID" to the delegated job id, then run:
 
 {{if eq .Action "cancel" -}}
-Before running the cancel command, confirm the expired-lease signal or that all three probes are flat:
+Before running the cancel command, inspect the current authority state and probe observations:
 
 ~~~bash
 delegate status --job "$JOB_ID" --probe --json
 ~~~
 
-If the probe is active or inconclusive, report that state instead of cancelling.
+The probe is observational. A "no_activity_observed" or "inconclusive" verdict does not prove backend absence and does not by itself authorize cancellation. Cancel only when the user has asked for cancellation or the operator decision is explicit in context.
 
 {{end -}}
 ~~~bash
@@ -624,19 +628,19 @@ For a non-terminal job, do not use "delegate result --wait" as the normal host-a
 
 {{end -}}
 
-For result handling, preserve the helper's verdict, summary, findings, and next steps structure. For review-style output, present findings first and keep them ordered by severity. Preserve file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. If there are no findings, say that explicitly and keep residual risk brief. If the run failed or returned malformed output, include the actionable stderr or envelope fields and stop instead of guessing. After presenting review findings, do not auto-fix; ask the user which issues to address.
+For result handling, preserve the helper's verdict, summary, findings, and next steps structure. For review-style output, present findings first and keep them ordered by severity. Preserve file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Terminal envelopes may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If there are no findings, say that explicitly and keep residual risk brief. If the run failed or returned malformed output, include the actionable stderr or envelope fields and stop instead of guessing. After presenting review findings, do not auto-fix; ask the user which issues to address.
 
-## Stall Monitoring
+## Monitoring
 
 While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call. Plain "delegate status --json --job <id>" is the cheap call; "--probe" blocks for roughly one to three sampling intervals (~10-30s at the default 10s interval, configurable with "--probe-interval").
 
-An expired heartbeat lease in "delegate status" is an immediate stall signal. Otherwise, distinguish a long agent turn from a genuine stall before cancelling: run "delegate status --job <id> --probe" before any cancel. The probe automates all three checks and reports per-probe results:
+Use "delegate status --job <id> --probe --json" only as an observational diagnostic. Its verdict is one of "activity_observed", "no_activity_observed", "inconclusive", or "terminal", and its output includes "authority_state", "cleanup_disposition", and "authority_warnings". These fields report what Delegate observed; they do not override Agentbus state or prove backend absence.
 
 - "ps -p <pid> -o %cpu,etime,stat" sampled twice for child process activity.
 - "lsof -p <pid> -iTCP -sTCP:ESTABLISHED" to confirm a live API socket.
 - captured log file size watched over the probe interval, because progress can land without a command event.
 
-Only if all three probes are flat is the job stalled. On confirmed stall, report the job id and last-known phase, then either "delegate cancel --job <id>" and launch a new delegated task, or keep waiting. Never silently drop the job, never substitute your own answer for the delegated run, and escalate after a 30-minute patience cap without progress.
+A flat CPU sample, no TCP socket, unchanged log size, or expired lease is not cancellation authority. Report the job id, "authority_state", probe verdict, and any "authority_warnings"; then either keep waiting or ask the user before cancelling. Never silently drop the job or substitute your own answer for the delegated run.
 
 ## Operating Discipline
 
@@ -656,7 +660,9 @@ Run:
 {{.Command}}
 ~~~
 
-Use this before launching delegated work. Confirm that "delegate" and "agentbus" are executable, agentbus reports the policy capabilities delegate requires, the intended backend is available, the repo and delegate state are writable when needed, and stdin handoff through "delegate handoff create --json" is viable. Report the "stop-review-gate" line exactly as delegate prints it.
+Use this before launching delegated work. Confirm that "delegate" and "agentbus" are executable, agentbus reports "admission.strictContainment" plus the policy capabilities delegate requires, the intended backend is available, the repo and delegate state are writable when needed, and stdin handoff through "delegate handoff create --json" is viable.
+
+Report these setup fields when they are relevant: "agentbusStateRoot", "agentbusStateRootWritable", "agentbusAutostartLockRoot", "agentbusAutostartLockRootWritable", "pendingSubmissionIntentCount", "unresolvedCleanupArtifactCount", "admissionStrictContainment", and "ready". A nonzero "pendingSubmissionIntentCount" means there may be a recoverable request; use "delegate task --recover-request <request_id> --json" for a known request id rather than creating a replacement request. A nonzero "unresolvedCleanupArtifactCount" means Delegate retained local artifacts because Agentbus did not prove backend absence. Report the "stop-review-gate" line exactly as delegate prints it.
 
 If setup fails, report the failing prerequisite and stop. Do not improvise alternate auth, install, or execution flows.`
 

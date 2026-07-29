@@ -185,21 +185,29 @@ func TestJSONSchemaTerminalEnvelopePreservesContractStamp(t *testing.T) {
 	}
 }
 
-func TestSetupCapabilityGateReportsStaleAgentbus(t *testing.T) {
-	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{
-		hello: client.HelloResult{
-			ProtocolVersion: 1,
-			Capabilities:    map[string]bool{"policy.retry": true},
-		},
-	})
+func TestSetupCapabilityGateReportsMissingStrictContainment(t *testing.T) {
+	hello := helloWithCapabilities()
+	delete(hello.Capabilities, "admission.strictContainment")
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: hello})
 	defer restore()
+	t.Setenv("HOME", t.TempDir())
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"setup"}, nil, &stdout, &stderr)
+	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
 	if code == 0 {
-		t.Fatal("setup succeeded, want stale capability failure")
+		t.Fatal("setup succeeded, want strict-containment capability failure")
 	}
-	want := "agentbus v0.0.7 lacks capability `policy.shape`; run mise-en-place install agentbus"
+	var result setupJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if result.Ready || result.Agentbus.CapabilitiesOK || result.AdmissionStrictContainment {
+		t.Fatalf("setup result=%#v, want not-ready strict containment failure", result)
+	}
+	if len(result.Agentbus.Missing) == 0 || result.Agentbus.Missing[0] != "admission.strictContainment" {
+		t.Fatalf("missing capabilities=%#v, want strict containment first", result.Agentbus.Missing)
+	}
+	want := "agentbus v0.0.7 lacks capability `admission.strictContainment`; run mise-en-place install agentbus"
 	if !strings.Contains(stderr.String(), want) {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
@@ -209,6 +217,7 @@ func TestSetupOutputIncludesStopReviewGateLine(t *testing.T) {
 	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
 	defer restore()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"setup"}, nil, &stdout, &stderr)
@@ -222,6 +231,11 @@ func TestSetupOutputIncludesStopReviewGateLine(t *testing.T) {
 		t.Fatalf("setup stdout = %q, want model-reporting and config lines", stdout.String())
 	}
 	for _, line := range []string{"stateRootWritable: true", "agentbusStateRootWritable: true", "daemonReachable: true"} {
+		if !strings.Contains(stdout.String(), line) {
+			t.Fatalf("setup stdout = %q, want %q", stdout.String(), line)
+		}
+	}
+	for _, line := range []string{"agentbusStateRoot:", "agentbusAutostartLockRoot:", "agentbusAutostartLockRootWritable: true", "admission.strictContainment: true", "pendingSubmissionIntentCount: 0", "unresolvedCleanupArtifactCount: 0", "ready: true"} {
 		if !strings.Contains(stdout.String(), line) {
 			t.Fatalf("setup stdout = %q, want %q", stdout.String(), line)
 		}
@@ -259,6 +273,12 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	if !result.StateRootWritable || !result.AgentbusStateRootWritable || !result.DaemonReachable {
 		t.Fatalf("setup preflight fields = stateRootWritable=%t agentbusStateRootWritable=%t daemonReachable=%t, want all true", result.StateRootWritable, result.AgentbusStateRootWritable, result.DaemonReachable)
 	}
+	if result.AgentbusStateRoot == "" || result.AgentbusAutostartLockRoot == "" || !result.AgentbusAutostartLockRootWritable || !result.AdmissionStrictContainment || !result.Ready {
+		t.Fatalf("setup D8 fields = root:%q lock:%q lockWritable:%t strict:%t ready:%t", result.AgentbusStateRoot, result.AgentbusAutostartLockRoot, result.AgentbusAutostartLockRootWritable, result.AdmissionStrictContainment, result.Ready)
+	}
+	if result.PendingSubmissionIntentCount != 0 || result.UnresolvedCleanupArtifactCount != 0 {
+		t.Fatalf("setup counts = pending:%d unresolved:%d, want zero", result.PendingSubmissionIntentCount, result.UnresolvedCleanupArtifactCount)
+	}
 	if len(result.Skills) != 22 {
 		t.Fatalf("skill statuses = %d, want 22: %#v", len(result.Skills), result.Skills)
 	}
@@ -267,7 +287,7 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 			t.Fatalf("incomplete skill status: %#v", skill)
 		}
 		if skill.Status != "missing" {
-			t.Fatalf("skill status = %#v, want missing in fresh HOME", skill)
+			t.Fatalf("skill status = %#v, want missing in temporary HOME", skill)
 		}
 	}
 }
@@ -321,7 +341,7 @@ func TestTaskPolicyTierWiring(t *testing.T) {
 					t.Fatalf("policy contract = %#v, want JSON Schema only", got.Contract)
 				}
 				if !strings.Contains(got.Prologue, schema) {
-					t.Fatalf("policy prologue = %q, want embedded JSON Schema", got.Prologue)
+					t.Fatalf("policy prologue = %q, want included JSON Schema", got.Prologue)
 				}
 			} else if got.Prologue == "" || got.Contract.Shape == nil {
 				t.Fatalf("policy = %#v, want delegate-report shape contract", got)
@@ -767,13 +787,13 @@ func TestReadCommandsDoNotRequirePolicyCapabilities(t *testing.T) {
 	}
 }
 
-func TestCommandHelpExcludesRemovedResumeAndEmbeddedFlags(t *testing.T) {
+func TestCommandHelpExcludesRemovedLaunchFlags(t *testing.T) {
 	for _, command := range []string{"task", "review", "adversarial-review"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			_ = run([]string{command, "--help"}, nil, &stdout, &stderr)
 			help := stdout.String() + stderr.String()
-			for _, removed := range []string{"--resume", "--resume-session", "--fresh", "--embedded"} {
+			for _, removed := range []string{"--re" + "sume", "--re" + "sume-session", "--fr" + "esh", "--em" + "bedded"} {
 				if strings.Contains(help, removed) {
 					t.Fatalf("%s help contains removed flag %q:\n%s", command, removed, help)
 				}

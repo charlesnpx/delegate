@@ -94,9 +94,11 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"<json-pointer>: <message>",
 				"one corrective retry",
 				"Return the launch envelope verbatim",
+				"--recover-request <request_id>",
+				"cleanup_disposition",
 			})
 			requireNonBlockingWaitGuidance(t, skill)
-			requireStallGuidance(t, skill)
+			requireMonitoringGuidance(t, skill)
 		case KindReview:
 			requireFragments(t, skill, []string{
 				"no-fork support",
@@ -113,13 +115,15 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"accident prevention",
 				"delete-and-recreate",
 				"v0.2 OS isolation is the boundary fix",
+				"--recover-request <request_id>",
+				"cleanup_disposition",
 			})
 			action := strings.Split(skill.Name, ":")[1]
 			if !strings.Contains(skill.Content, "delegate "+action+" --backend") {
 				t.Fatalf("%s missing review command", skill.Name)
 			}
 			requireNonBlockingWaitGuidance(t, skill)
-			requireStallGuidance(t, skill)
+			requireMonitoringGuidance(t, skill)
 		case KindJobControl:
 			requireFragments(t, skill, []string{
 				"Run the delegate CLI directly",
@@ -129,15 +133,19 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"Preserve file paths, line numbers, evidence labels",
 				"do not auto-fix",
 				"Do not replace the job with a local answer",
+				"cleanup_disposition",
 			})
 			if skill.Name == "delegate:result" {
 				requireNonBlockingWaitGuidance(t, skill)
 			}
-			requireStallGuidance(t, skill)
+			requireMonitoringGuidance(t, skill)
 		case KindSetup:
 			requireFragments(t, skill, []string{
 				"delegate setup --json",
-				"agentbus reports the policy capabilities",
+				"admission.strictContainment",
+				"agentbusAutostartLockRoot",
+				"pendingSubmissionIntentCount",
+				"unresolvedCleanupArtifactCount",
 				"stop-review-gate",
 			})
 		case KindConfig:
@@ -344,13 +352,13 @@ func allGeneratedSkills(t *testing.T) []GeneratedSkill {
 	return all
 }
 
-func TestReviewAndRescueSkillsKeepEscapeHatchAndStallDiscipline(t *testing.T) {
+func TestReviewAndRescueSkillsKeepEscapeHatchAndMonitoringDiscipline(t *testing.T) {
 	for _, skill := range allGeneratedSkills(t) {
 		if skill.Kind != KindReview && !strings.HasPrefix(skill.Name, "delegate:rescue:") {
 			continue
 		}
 		requireFragments(t, skill, []string{"Superseding escape hatch", "explicitly asks", "delegate is unavailable", "supersedes this skill's delegation trigger"})
-		requireStallGuidance(t, skill)
+		requireMonitoringGuidance(t, skill)
 		if strings.Contains(skill.Content, "--no-contract") {
 			t.Fatalf("%s contains forbidden --no-contract", skill.Name)
 		}
@@ -366,25 +374,25 @@ func requireFragments(t *testing.T, skill GeneratedSkill, fragments []string) {
 	}
 }
 
-func requireStallGuidance(t *testing.T, skill GeneratedSkill) {
+func requireMonitoringGuidance(t *testing.T, skill GeneratedSkill) {
 	t.Helper()
 	requireFragments(t, skill, []string{
 		"delegate status --job <id>",
 		"every 2-5 minutes",
 		"delegate status --json --job <id>",
 		"--probe\" blocks for roughly one to three sampling intervals",
-		"expired heartbeat lease",
-		"immediate stall signal",
-		"delegate status --job <id> --probe",
-		"before any cancel",
+		"activity_observed",
+		"no_activity_observed",
+		"inconclusive",
+		"terminal",
+		"authority_state",
+		"authority_warnings",
+		"do not override Agentbus state or prove backend absence",
 		"ps -p <pid> -o %cpu,etime,stat",
 		"lsof -p <pid> -iTCP -sTCP:ESTABLISHED",
 		"log file size watched over the probe interval",
-		"Only if all three probes are flat",
-		"delegate cancel --job <id>",
-		"launch a new delegated task",
-		"Never silently drop the job",
-		"never substitute your own answer",
-		"30-minute patience cap",
+		"not cancellation authority",
+		"silently drop the job",
+		"substitute your own answer",
 	})
 }
