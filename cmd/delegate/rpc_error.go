@@ -11,6 +11,7 @@ import (
 const (
 	agentbusErrorBackendUnavailable = "backend_unavailable"
 	agentbusErrorUnknownJob         = "unknown_job"
+	agentbusErrorProtocolMismatch   = "protocol_version_mismatch"
 	agentbusErrorTransport          = "transport_error"
 
 	admissionCauseMissingIdentity               = "missing_identity"
@@ -109,6 +110,9 @@ func agentbusOperationError(err error) error {
 	if errors.As(err, &rpcErr) {
 		return err
 	}
+	if errors.Is(err, client.ErrProtocolVersionMismatch) {
+		return err
+	}
 	var transportErr *agentbusTransportError
 	if errors.As(err, &transportErr) {
 		return err
@@ -123,6 +127,15 @@ func classifyAgentbusError(err error) (agentbusErrorClassification, bool) {
 	var rpcErr *client.RPCError
 	if errors.As(err, &rpcErr) {
 		return classifyAgentbusRPCError(rpcErr), true
+	}
+	if errors.Is(err, client.ErrProtocolVersionMismatch) {
+		return agentbusErrorClassification{
+			Code:       agentbusErrorProtocolMismatch,
+			Message:    err.Error(),
+			Action:     agentbusActionDefinitiveRejection,
+			ExitCode:   agentbusExitDaemonRuntime,
+			Definitive: true,
+		}, true
 	}
 	var transportErr *agentbusTransportError
 	if errors.As(err, &transportErr) {

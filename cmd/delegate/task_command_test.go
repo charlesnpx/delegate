@@ -741,7 +741,10 @@ func TestReadCommandsDoNotRequirePolicyCapabilities(t *testing.T) {
 		{
 			name: "cancel",
 			args: []string{"cancel", "--job", "job_cancel", "--json"},
-			fake: fakeAgentbusClient{cancel: client.JobCancelResult{JobID: "job_cancel", State: engine.StateCanceled}},
+			fake: fakeAgentbusClient{
+				cancel: client.JobCancelResult{JobID: "job_cancel", State: engine.StateRunning},
+				status: client.JobStatusResult{Jobs: []client.JobStatus{{JobID: "job_cancel", State: engine.StateRunning}}},
+			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -876,6 +879,7 @@ type fakeAgentbusClient struct {
 	results      []client.JobResultParams
 	result       client.JobResult
 	resultErr    error
+	cancels      []client.JobCancelParams
 	cancel       client.JobCancelResult
 	cancelErr    error
 }
@@ -937,7 +941,8 @@ func (f *fakeAgentbusClient) JobResult(_ context.Context, params client.JobResul
 	return f.result, nil
 }
 
-func (f *fakeAgentbusClient) JobCancel(context.Context, client.JobCancelParams) (client.JobCancelResult, error) {
+func (f *fakeAgentbusClient) JobCancel(_ context.Context, params client.JobCancelParams) (client.JobCancelResult, error) {
+	f.cancels = append(f.cancels, params)
 	if f.cancelErr != nil {
 		return client.JobCancelResult{}, f.cancelErr
 	}
