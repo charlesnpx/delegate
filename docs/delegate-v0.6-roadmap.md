@@ -42,8 +42,11 @@ Each unit lands with its own behavioral tests. D8 is the black-box closure, not 
 - **D1** ✅ `c3e50f0` — compile cut. gate green (build/vet/gofmt/`go test ./...` all 0 under `-mod=vendor`). review1 SHIP (gpt-5.6-sol, no findings). Provisional path + `TODO(D3)` placeholder retained by design.
 - **D2** ✅ `ce75ba7` — state-root resolver + typed RPC classification. gate green.
 - **D3** ✅ `c7ac49d` — durable submission intents + identities + opaque job IDs + exact timeout. gate green (incl. protocol-v2 socket fake-server replay test running+passing). `TODO(D4)` for dedup/terminal rendering.
-- **Review** 🔄 combined D2+D3 refute-review (gpt-5.6-sol) in progress at `c7ac49d`. (D1 review SHIP'd on iter 1; D2 individual review was blocked by a sustained gpt-5.6-sol capacity outage, so D2 is being reviewed together with D3 in one integration pass — codex is single-active-task, so reviews serialize after workers.)
-- **Next:** D4 ∥ D5 after the combined review clears.
+- **D2+D3** ✅ combined integration review SHIP at `c7ac49d`.
+- **D4** ✅ `76b246b` — dedup/already-terminal + schema-2 envelope base. gate green.
+- **D5** ✅ `87cb872` + fix `99ddc1d` — cleanup-disposition safety gate. D4+D5 combined review: iter1 FIX (1 High: wait-loop cleanup ignored status-disposition fallback → over-retention on `--wait`; accepted+fixed), iter2 SHIP. gate green.
+- **Review-backend note:** gpt-5.6-sol hit a sustained capacity outage mid-campaign; reviews were batched into integration passes (D2+D3, D4+D5) and resumed across capacity retries. Codex is single-active-task → workers and reviews serialize; the D4∥D5 parallel plan was dropped (also overlapping files).
+- **Next:** D6 (envelope schema-2 completion + orphaned exit-14) → D7 → D8.
 
 ---
 
