@@ -583,8 +583,9 @@ func TestBackgroundJobInputIsReassociatedAndSweptByNextStatus(t *testing.T) {
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		result: client.JobResult{
-			JobID: "job_background_reap",
-			State: engine.StateCompleted,
+			JobID:              "job_background_reap",
+			State:              engine.StateCompleted,
+			CleanupDisposition: cleanupDispositionVerifiedAbsent,
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)
@@ -625,8 +626,9 @@ func TestBackgroundJobInputIsSweptByNextResult(t *testing.T) {
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		result: client.JobResult{
-			JobID: "job_result_reap",
-			State: engine.StateCompleted,
+			JobID:              "job_result_reap",
+			State:              engine.StateCompleted,
+			CleanupDisposition: cleanupDispositionVerifiedAbsent,
 			Result: &engine.ResultInfo{
 				SHA256: strings.Repeat("b", 64),
 			},
@@ -915,7 +917,13 @@ func (f *fakeAgentbusClient) JobStatus(_ context.Context, params client.JobStatu
 	if f.result.JobID == "" {
 		return client.JobStatusResult{}, nil
 	}
-	return client.JobStatusResult{Jobs: []client.JobStatus{{JobID: f.result.JobID, SessionID: f.result.SessionID, State: f.result.State}}}, nil
+	return client.JobStatusResult{Jobs: []client.JobStatus{{
+		JobID:              f.result.JobID,
+		SessionID:          f.result.SessionID,
+		State:              f.result.State,
+		CleanupDisposition: f.result.CleanupDisposition,
+		ModelReported:      f.result.ModelReported,
+	}}}, nil
 }
 
 func (f *fakeAgentbusClient) JobResult(_ context.Context, params client.JobResultParams) (client.JobResult, error) {

@@ -37,11 +37,12 @@ func TestReviewCommandsUseReadOnlySanitizedTaskPipelineAndEnvelopeKinds(t *testi
 			fake := &fakeAgentbusClient{
 				hello: helloWithCapabilities(),
 				result: client.JobResult{
-					JobID:     "job_" + strings.ReplaceAll(tc.command, "-", "_"),
-					SessionID: "session_review",
-					State:     engine.StateCompleted,
-					Result:    &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-					Contract:  ptr(compliantContractStamp(t, report)),
+					JobID:              "job_" + strings.ReplaceAll(tc.command, "-", "_"),
+					SessionID:          "session_review",
+					State:              engine.StateCompleted,
+					CleanupDisposition: cleanupDispositionVerifiedAbsent,
+					Result:             &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
+					Contract:           ptr(compliantContractStamp(t, report)),
 				},
 			}
 			restore := stubAgentbusGlobals(t, fake)
@@ -107,11 +108,12 @@ func TestReviewBackgroundArtifactPersistsUntilTerminalResultCleanup(t *testing.T
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		result: client.JobResult{
-			JobID:     "job_review_artifact",
-			SessionID: "session_review_artifact",
-			State:     engine.StateCompleted,
-			Result:    &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-			Contract:  ptr(compliantContractStamp(t, report)),
+			JobID:              "job_review_artifact",
+			SessionID:          "session_review_artifact",
+			State:              engine.StateCompleted,
+			CleanupDisposition: cleanupDispositionVerifiedAbsent,
+			Result:             &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
+			Contract:           ptr(compliantContractStamp(t, report)),
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)
@@ -197,11 +199,12 @@ func TestReviewMetadataFailureAfterLaunchUsesDurableFallbackAndPreservesKind(t *
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		result: client.JobResult{
-			JobID:     "job_review_metadata_fallback",
-			SessionID: "session_review_metadata_fallback",
-			State:     engine.StateCompleted,
-			Result:    &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-			Contract:  ptr(compliantContractStamp(t, report)),
+			JobID:              "job_review_metadata_fallback",
+			SessionID:          "session_review_metadata_fallback",
+			State:              engine.StateCompleted,
+			CleanupDisposition: cleanupDispositionVerifiedAbsent,
+			Result:             &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
+			Contract:           ptr(compliantContractStamp(t, report)),
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)

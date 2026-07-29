@@ -103,7 +103,7 @@ func TestWaitForJobResultSynthesizesEnvelopeInputAcrossTerminalStates(t *testing
 				t.Fatal(err)
 			}
 			fake := &fakeAgentbusClient{resultErr: errors.New("quarantined record cannot be loaded"), status: client.JobStatusResult{Jobs: []client.JobStatus{{JobID: "job_fallback", SessionID: "session_fallback", State: state}}}}
-			result, err := waitForJobResult(context.Background(), fake, stateDir, "job_fallback")
+			result, err := waitForJobResult(context.Background(), fake, stateDir, "job_fallback", nil)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -58,9 +58,10 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		return agentbusCommandErrorResult(*jsonOut, stdout, err)
 	}
 	defer c.Close()
+	cleanupWarnings := newLocalCleanupWarnings(stderr)
 	var status client.JobStatusResult
 	if *wait {
-		status, err = waitForJobStatus(ctx, c, "", *jobID)
+		status, err = waitForJobStatus(ctx, c, "", *jobID, cleanupWarnings)
 	} else {
 		status, err = c.JobStatus(ctx, client.JobStatusParams{JobID: *jobID, All: *jobID == ""})
 	}
@@ -69,11 +70,17 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	if *jobID != "" {
 		if job, ok := findJobStatus(status, *jobID); ok {
-			cleanupStatus("", job)
 			if engine.IsTerminal(job.State) && !*probe {
 				result, resultErr := c.JobResult(ctx, client.JobResultParams{JobID: *jobID})
 				if resultErr != nil {
 					result = terminalJobResultFromStatus(job)
+					cleanupStatus("", job, cleanupWarnings)
+				} else {
+					result.CleanupDisposition = cleanupDispositionFromResultAndStatus(result, job, true)
+					_ = captureBackendError("", job)
+					if err := cleanupJobInput("", result.JobID, result.SessionID, result.State, result.CleanupDisposition, cleanupWarnings); err != nil {
+						return 0, err
+					}
 				}
 				env, envelopeErr := terminalEnvelopeFromJobResult("", result, hello.Capabilities["models.reported"])
 				if envelopeErr != nil {
@@ -206,20 +213,22 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 		return agentbusCommandErrorResult(*jsonOut, stdout, err)
 	}
 	defer c.Close()
+	cleanupWarnings := newLocalCleanupWarnings(stderr)
 	var result client.JobResult
 	if *wait {
-		result, err = waitForJobResult(ctx, c, "", *jobID)
+		result, err = waitForJobResult(ctx, c, "", *jobID, cleanupWarnings)
 	} else {
 		result, err = c.JobResult(ctx, client.JobResultParams{JobID: *jobID})
 		if err != nil {
-			result, err = terminalJobResultFallback(ctx, c, "", *jobID, err)
+			result, err = terminalJobResultFallback(ctx, c, "", *jobID, err, cleanupWarnings)
 		}
 	}
 	if err != nil {
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
 	}
-	cleanupRequestedJobStatus(ctx, c, "", result.JobID)
-	_ = cleanupJobInput("", result.JobID, result.SessionID, result.State)
+	statusJob, statusFound := requestedJobStatusForCleanup(ctx, c, "", result.JobID)
+	result.CleanupDisposition = cleanupDispositionFromResultAndStatus(result, statusJob, statusFound)
+	_ = cleanupJobInput("", result.JobID, result.SessionID, result.State, result.CleanupDisposition, cleanupWarnings)
 	env, err := terminalEnvelopeFromJobResult("", result, hello.Capabilities["models.reported"])
 	if err != nil {
 		return 0, err
@@ -258,7 +267,9 @@ func runCancel(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
 	}
-	if err := cleanupJobInput("", result.JobID, "", result.State); err != nil {
+	cleanupWarnings := newLocalCleanupWarnings(stderr)
+	// TODO(D7): fetch status/result after cancel; JobCancelResult carries no cleanupDisposition.
+	if err := cleanupJobInput("", result.JobID, "", result.State, "", cleanupWarnings); err != nil {
 		return 0, err
 	}
 	if *jsonOut {
@@ -268,18 +279,18 @@ func runCancel(args []string, stdout, stderr io.Writer) (int, error) {
 	return 0, err
 }
 
-func waitForJobResult(ctx context.Context, c agentbusClient, stateDir, jobID string) (client.JobResult, error) {
+func waitForJobResult(ctx context.Context, c agentbusClient, stateDir, jobID string, cleanupWarnings *localCleanupWarnings) (client.JobResult, error) {
 	interval := initialJobPollInterval
 	for {
 		result, err := c.JobResult(ctx, client.JobResultParams{JobID: jobID})
 		if err == nil && engine.IsTerminal(result.State) {
-			if err := cleanupJobInput(stateDir, result.JobID, result.SessionID, result.State); err != nil {
+			if err := cleanupJobInput(stateDir, result.JobID, result.SessionID, result.State, result.CleanupDisposition, cleanupWarnings); err != nil {
 				return client.JobResult{}, err
 			}
 			return result, nil
 		}
 		if err != nil {
-			result, fallbackErr := terminalJobResultFallback(ctx, c, stateDir, jobID, err)
+			result, fallbackErr := terminalJobResultFallback(ctx, c, stateDir, jobID, err, cleanupWarnings)
 			if fallbackErr == nil {
 				return result, nil
 			}
@@ -291,7 +302,7 @@ func waitForJobResult(ctx context.Context, c agentbusClient, stateDir, jobID str
 	}
 }
 
-func submittedTerminalJobResult(ctx context.Context, c agentbusClient, stateDir, jobID string) (client.JobResult, error) {
+func submittedTerminalJobResult(ctx context.Context, c agentbusClient, stateDir, jobID string, cleanupWarnings *localCleanupWarnings) (client.JobResult, error) {
 	result, resultErr := c.JobResult(ctx, client.JobResultParams{JobID: jobID})
 	status, statusErr := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
 	var statusJob client.JobStatus
@@ -300,11 +311,14 @@ func submittedTerminalJobResult(ctx context.Context, c agentbusClient, stateDir,
 		if job, found := findJobStatus(status, jobID); found {
 			statusJob = job
 			statusFound = true
-			cleanupStatus(stateDir, job)
+			_ = captureBackendError(stateDir, job)
 		}
 	}
 	if resultErr != nil {
 		if statusFound && engine.IsTerminal(statusJob.State) {
+			if err := cleanupJobInput(stateDir, statusJob.JobID, statusJob.SessionID, statusJob.State, statusJob.CleanupDisposition, cleanupWarnings); err != nil {
+				return client.JobResult{}, err
+			}
 			return terminalJobResultFromStatus(statusJob), nil
 		}
 		return client.JobResult{}, resultErr
@@ -312,13 +326,17 @@ func submittedTerminalJobResult(ctx context.Context, c agentbusClient, stateDir,
 	if statusFound && result.ModelReported == "" {
 		result.ModelReported = statusJob.ModelReported
 	}
+	result.CleanupDisposition = cleanupDispositionFromResultAndStatus(result, statusJob, statusFound)
 	if !engine.IsTerminal(result.State) {
 		if statusFound && engine.IsTerminal(statusJob.State) {
+			if err := cleanupJobInput(stateDir, statusJob.JobID, statusJob.SessionID, statusJob.State, statusJob.CleanupDisposition, cleanupWarnings); err != nil {
+				return client.JobResult{}, err
+			}
 			return terminalJobResultFromStatus(statusJob), nil
 		}
 		return client.JobResult{}, fmt.Errorf("submitted job %s reported terminal state but job.result returned %q", jobID, result.State)
 	}
-	if err := cleanupJobInput(stateDir, result.JobID, result.SessionID, result.State); err != nil {
+	if err := cleanupJobInput(stateDir, result.JobID, result.SessionID, result.State, result.CleanupDisposition, cleanupWarnings); err != nil {
 		return client.JobResult{}, err
 	}
 	return result, nil
@@ -332,12 +350,12 @@ func nextJobPollInterval(interval time.Duration) time.Duration {
 	return next
 }
 
-func terminalJobResultFallback(ctx context.Context, c agentbusClient, stateDir, jobID string, resultErr error) (client.JobResult, error) {
+func terminalJobResultFallback(ctx context.Context, c agentbusClient, stateDir, jobID string, resultErr error, cleanupWarnings *localCleanupWarnings) (client.JobResult, error) {
 	status, statusErr := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
 	if statusErr != nil {
 		return client.JobResult{}, resultErr
 	}
-	cleanupStatuses(stateDir, status)
+	cleanupStatuses(stateDir, status, cleanupWarnings)
 	job, found := findJobStatus(status, jobID)
 	if !found || !engine.IsTerminal(job.State) {
 		return client.JobResult{}, resultErr
@@ -346,17 +364,27 @@ func terminalJobResultFallback(ctx context.Context, c agentbusClient, stateDir, 
 }
 
 func terminalJobResultFromStatus(job client.JobStatus) client.JobResult {
-	return client.JobResult{JobID: job.JobID, SessionID: job.SessionID, State: job.State, ModelReported: job.ModelReported}
+	return client.JobResult{JobID: job.JobID, SessionID: job.SessionID, State: job.State, CleanupDisposition: job.CleanupDisposition, ModelReported: job.ModelReported}
 }
 
-func waitForJobStatus(ctx context.Context, c agentbusClient, stateDir, jobID string) (client.JobStatusResult, error) {
+func cleanupDispositionFromResultAndStatus(result client.JobResult, statusJob client.JobStatus, statusFound bool) string {
+	if result.CleanupDisposition != "" {
+		return result.CleanupDisposition
+	}
+	if statusFound {
+		return statusJob.CleanupDisposition
+	}
+	return ""
+}
+
+func waitForJobStatus(ctx context.Context, c agentbusClient, stateDir, jobID string, cleanupWarnings *localCleanupWarnings) (client.JobStatusResult, error) {
 	interval := initialJobPollInterval
 	for {
 		status, err := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
 		if err != nil {
 			return client.JobStatusResult{}, err
 		}
-		cleanupStatuses(stateDir, status)
+		cleanupStatuses(stateDir, status, cleanupWarnings)
 		for _, job := range status.Jobs {
 			if job.JobID == jobID && engine.IsTerminal(job.State) {
 				return status, nil
@@ -369,42 +397,44 @@ func waitForJobStatus(ctx context.Context, c agentbusClient, stateDir, jobID str
 	}
 }
 
-func cleanupStatuses(stateDir string, status client.JobStatusResult) {
+func cleanupStatuses(stateDir string, status client.JobStatusResult, cleanupWarnings *localCleanupWarnings) {
 	for _, job := range status.Jobs {
-		cleanupStatus(stateDir, job)
+		cleanupStatus(stateDir, job, cleanupWarnings)
 	}
 }
 
-func cleanupStatus(stateDir string, job client.JobStatus) {
+func cleanupStatus(stateDir string, job client.JobStatus, cleanupWarnings *localCleanupWarnings) {
 	_ = captureBackendError(stateDir, job)
-	_ = cleanupJobInput(stateDir, job.JobID, job.SessionID, job.State)
+	_ = cleanupJobInput(stateDir, job.JobID, job.SessionID, job.State, job.CleanupDisposition, cleanupWarnings)
 }
 
-func cleanupRequestedJobStatus(ctx context.Context, c agentbusClient, stateDir, jobID string) {
+func requestedJobStatusForCleanup(ctx context.Context, c agentbusClient, stateDir, jobID string) (client.JobStatus, bool) {
 	status, err := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
 	if err != nil {
-		return
+		return client.JobStatus{}, false
 	}
 	if job, found := findJobStatus(status, jobID); found {
-		cleanupStatus(stateDir, job)
+		_ = captureBackendError(stateDir, job)
+		return job, true
 	}
+	return client.JobStatus{}, false
 }
 
 func sweepTerminalJobInputs(ctx context.Context, c agentbusClient, stateDir string) error {
-	removed, terminalSweepErr := handoff.SweepTerminalJobInputs(stateDir, func(jobID string) (engine.JobState, bool, error) {
+	removed, terminalSweepErr := handoff.SweepTerminalJobInputs(stateDir, func(jobID string) (engine.JobState, string, bool, error) {
 		status, err := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
 		if err != nil {
-			return "", false, err
+			return "", "", false, err
 		}
 		job, found := findJobStatus(status, jobID)
 		if !found {
-			return "", false, nil
+			return "", "", false, nil
 		}
-		return job.State, true, nil
+		return job.State, job.CleanupDisposition, true, nil
 	}, handoff.Hooks{})
 	sweepErr := terminalSweepErr
 	for _, input := range removed {
-		sweepErr = errors.Join(sweepErr, cleanupJobInput(stateDir, input.JobID, "", engine.StateCompleted))
+		sweepErr = errors.Join(sweepErr, cleanupJobInput(stateDir, input.JobID, "", input.State, input.CleanupDisposition, nil))
 	}
 	return sweepErr
 }

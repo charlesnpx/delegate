@@ -86,7 +86,7 @@ func TestWaitForJobResultBacksOffAndOnlyFallsBackToStatusAfterResultError(t *tes
 	if err := os.Chmod(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	result, err := waitForJobResult(context.Background(), fake, stateDir, "job_poll")
+	result, err := waitForJobResult(context.Background(), fake, stateDir, "job_poll", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -92,7 +92,7 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 		return 0, err
 	}
 	if opts.RecoverRequest != "" {
-		result, err := recoverTaskSubmission(opts)
+		result, err := recoverTaskSubmission(opts, stderr)
 		if err != nil {
 			return agentbusCommandErrorResult(opts.JSON, stdout, err)
 		}
@@ -400,7 +400,7 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 	}); err != nil {
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
-	return submittedTaskRunResult(ctx, c, hello, opts, submitted, warnings)
+	return submittedTaskRunResult(ctx, c, hello, opts, submitted, warnings, stderr)
 }
 
 const maxSubmissionAttempts = 3
@@ -537,7 +537,7 @@ func submissionPhaseForError(classification agentbusErrorClassification) string 
 	return submissionPhaseRejected
 }
 
-func recoverTaskSubmission(opts taskOptions) (taskRunResult, error) {
+func recoverTaskSubmission(opts taskOptions, stderr io.Writer) (taskRunResult, error) {
 	ctx := context.Background()
 	intent, found, err := loadSubmissionIntent(opts.StateDir, opts.RecoverRequest)
 	if err != nil {
@@ -586,7 +586,7 @@ func recoverTaskSubmission(opts taskOptions) (taskRunResult, error) {
 	}); err != nil {
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
-	return submittedTaskRunResult(ctx, c, hello, taskOpts, submitted, warnings)
+	return submittedTaskRunResult(ctx, c, hello, taskOpts, submitted, warnings, stderr)
 }
 
 func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted client.JobSubmitResult) taskOptions {
@@ -674,6 +674,7 @@ func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contra
 		ReviewWorkspace:   opts.ReviewWorkspace,
 		AgentbusStateRoot: opts.AgentbusStateRoot,
 		SubmissionState:   opts.SubmissionState,
+		State:             opts.SubmissionState,
 		Deduplicated:      opts.Deduplicated,
 		Model:             modelEffort.Model,
 		Effort:            modelEffort.Effort,
@@ -722,16 +723,16 @@ func acknowledgeSubmittedTask(opts taskOptions, resolved handoff.ResolvedPrompt,
 	return warnings, true, nil
 }
 
-func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.HelloResult, opts taskOptions, submitted client.JobSubmitResult, warnings []string) (taskRunResult, error) {
+func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.HelloResult, opts taskOptions, submitted client.JobSubmitResult, warnings []string, stderr io.Writer) (taskRunResult, error) {
 	terminalOptions := terminalEnvelopeOptions{
 		ModelsReportedCapable: hello.Capabilities["models.reported"],
 		RequestID:             opts.RequestID,
 		Deduplicated:          opts.Deduplicated,
 		DeduplicatedSet:       true,
 	}
+	cleanupWarnings := newLocalCleanupWarnings(stderr)
 	if engine.IsTerminal(submitted.State) {
-		// TODO(D5): this fast path intentionally uses the existing state-based cleanup helpers until cleanupDisposition gates artifact deletion.
-		jobResult, err := submittedTerminalJobResult(ctx, c, opts.StateDir, submitted.JobID)
+		jobResult, err := submittedTerminalJobResult(ctx, c, opts.StateDir, submitted.JobID, cleanupWarnings)
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
@@ -742,7 +743,7 @@ func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.
 		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
 	}
 	if opts.Wait {
-		jobResult, err := waitForJobResult(ctx, c, opts.StateDir, submitted.JobID)
+		jobResult, err := waitForJobResult(ctx, c, opts.StateDir, submitted.JobID, cleanupWarnings)
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
