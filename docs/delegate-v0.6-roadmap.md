@@ -37,6 +37,13 @@ Each unit lands with its own behavioral tests. D8 is the black-box closure, not 
 
 ---
 
+## STATUS
+- **D0** ✅ agentbus `v0.6.0` tagged/pushed on `main` (content-identical to reviewed AB-F tip); go-resolvable.
+- **D1** ✅ `c3e50f0` — compile cut. gate green (build/vet/gofmt/`go test ./...` all 0 under `-mod=vendor`). review1 SHIP (gpt-5.6-sol, no findings). Provisional path + `TODO(D3)` placeholder retained by design.
+- **D2** 🔄 in progress.
+
+---
+
 ## D1 — Compile cut: dependency bump + client-surface & foreground/embedded removal
 Spec §1 (dep + client surface), §2 (remove resume), §13 (remove embedded). **Foundational — repo will not compile until session/turn types are gone.**
 
