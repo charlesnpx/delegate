@@ -52,7 +52,7 @@ func TestAgentbusV06BinaryIntegrationSmoke(t *testing.T) {
 	serve.Stdout = &serveStdout
 	serve.Stderr = &serveStderr
 	if err := serve.Start(); err != nil {
-		t.Skipf("start agentbus %s from %s: %v", agentbusPath, source, err)
+		t.Fatalf("start agentbus %s from %s: %v", agentbusPath, source, err)
 	}
 	serveDone := make(chan error, 1)
 	serveExited := make(chan struct{})
@@ -87,7 +87,7 @@ func TestAgentbusV06BinaryIntegrationSmoke(t *testing.T) {
 		"--no-contract", "--background", "--json",
 	}, nil, &launchOut, &launchErr)
 	if code != 0 {
-		agentbusSmokeFailOrSkip(t, "delegate task submit", code, launchOut.String(), launchErr.String(), serveStderr.String())
+		t.Fatalf("delegate task submit failed with code %d stdout=%q stderr=%q serveStderr=%q", code, launchOut.String(), launchErr.String(), serveStderr.String())
 	}
 	jobID := smokeJobIDFromLaunch(t, launchOut.Bytes())
 	if jobID == "" {
@@ -99,7 +99,7 @@ func TestAgentbusV06BinaryIntegrationSmoke(t *testing.T) {
 	var resultOut, resultErr bytes.Buffer
 	code = run([]string{"result", "--job", jobID, "--json"}, nil, &resultOut, &resultErr)
 	if code != 0 {
-		agentbusSmokeFailOrSkip(t, "delegate result", code, resultOut.String(), resultErr.String(), serveStderr.String())
+		t.Fatalf("delegate result failed with code %d stdout=%q stderr=%q serveStderr=%q", code, resultOut.String(), resultErr.String(), serveStderr.String())
 	}
 	var terminal TerminalEnvelope
 	if err := json.Unmarshal(bytes.TrimSpace(resultOut.Bytes()), &terminal); err != nil {
@@ -217,7 +217,7 @@ func waitForSmokeAgentbusReady(t *testing.T, stateRoot string, done <-chan error
 	for time.Now().Before(deadline) {
 		select {
 		case err := <-done:
-			agentbusSmokeServeFailOrSkip(t, err, stdout.String(), stderr.String())
+			agentbusSmokeServeFailOrSkip(t, stateRoot, err, stdout.String(), stderr.String())
 		default:
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -234,16 +234,16 @@ func waitForSmokeAgentbusReady(t *testing.T, stateRoot string, done <-chan error
 		last = err
 		time.Sleep(50 * time.Millisecond)
 	}
-	if agentbusSmokeEnvironmentLimited(stderr.String()) || agentbusSmokeEnvironmentLimited(fmt.Sprint(last)) {
-		t.Skipf("agentbus smoke skipped due to environment limit before readiness: last=%v stderr=%s", last, strings.TrimSpace(stderr.String()))
+	if agentbusSmokeStartupBindDenied(stateRoot, stdout.String()+"\n"+stderr.String()) {
+		t.Skipf("agentbus smoke skipped because sandbox denied daemon startup unix-socket bind: last=%v stderr=%s", last, strings.TrimSpace(stderr.String()))
 	}
 	t.Fatalf("agentbus did not become ready: last=%v stdout=%s stderr=%s", last, stdout.String(), stderr.String())
 }
 
-func agentbusSmokeServeFailOrSkip(t *testing.T, err error, stdout, stderr string) {
+func agentbusSmokeServeFailOrSkip(t *testing.T, stateRoot string, err error, stdout, stderr string) {
 	t.Helper()
-	if agentbusSmokeEnvironmentLimited(stdout + "\n" + stderr + "\n" + fmt.Sprint(err)) {
-		t.Skipf("agentbus smoke skipped due to environment-limited daemon startup: %v stderr=%s", err, strings.TrimSpace(stderr))
+	if agentbusSmokeStartupBindDenied(stateRoot, stdout+"\n"+stderr+"\n"+fmt.Sprint(err)) {
+		t.Skipf("agentbus smoke skipped because sandbox denied daemon startup unix-socket bind: %v stderr=%s", err, strings.TrimSpace(stderr))
 	}
 	t.Fatalf("agentbus serve exited before readiness: %v stdout=%s stderr=%s", err, stdout, stderr)
 }
@@ -293,7 +293,7 @@ func waitForSmokeTerminalStatus(t *testing.T, jobID string) {
 		var stdout, stderr bytes.Buffer
 		code := run([]string{"status", "--job", jobID, "--json"}, nil, &stdout, &stderr)
 		if code != 0 {
-			agentbusSmokeFailOrSkip(t, "delegate status", code, stdout.String(), stderr.String(), "")
+			t.Fatalf("delegate status failed with code %d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
 		state, terminal, err := smokeStateFromStatus(stdout.Bytes())
 		if err != nil {
@@ -326,29 +326,42 @@ func smokeStateFromStatus(raw []byte) (engine.JobState, bool, error) {
 	return state, engine.IsTerminal(state), nil
 }
 
-func agentbusSmokeFailOrSkip(t *testing.T, op string, code int, stdout, stderr, serveStderr string) {
-	t.Helper()
-	combined := stdout + "\n" + stderr + "\n" + serveStderr
-	if agentbusSmokeEnvironmentLimited(combined) {
-		t.Skipf("%s skipped due to environment limit (code %d): %s", op, code, strings.TrimSpace(combined))
+func agentbusSmokeStartupBindDenied(stateRoot, text string) bool {
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "unix socket bind denied by sandbox") {
+		return true
 	}
-	t.Fatalf("%s failed with code %d stdout=%q stderr=%q serveStderr=%q", op, code, stdout, stderr, serveStderr)
+	bindDenied := strings.Contains(lower, "bind: operation not permitted") ||
+		strings.Contains(lower, "bind: permission denied")
+	if !bindDenied {
+		return false
+	}
+	socketPath := strings.ToLower(filepath.Join(stateRoot, "agentbus.sock"))
+	return strings.Contains(lower, socketPath) || strings.Contains(lower, "agentbus: bind:")
 }
 
-func agentbusSmokeEnvironmentLimited(text string) bool {
-	lower := strings.ToLower(text)
-	for _, needle := range []string{
-		"operation not permitted",
-		"permission denied",
-		"strict admission support unavailable",
-		"unsupported host",
-		"sandbox",
-		"bind: permission",
-		"bind: operation",
-	} {
-		if strings.Contains(lower, needle) {
-			return true
-		}
+func TestAgentbusSmokeStartupBindDeniedIsNarrow(t *testing.T) {
+	stateRoot := filepath.Join(t.TempDir(), "agentbus")
+	socketPath := filepath.Join(stateRoot, "agentbus.sock")
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "daemon cli bind operation", text: "agentbus: bind: operation not permitted", want: true},
+		{name: "daemon cli bind permission", text: "agentbus: bind: permission denied", want: true},
+		{name: "socket path bind permission", text: socketPath + ": bind: permission denied", want: true},
+		{name: "explicit sandbox bind", text: "unix socket bind denied by sandbox", want: true},
+		{name: "backend permission denied", text: "job failed: backend reported permission denied", want: false},
+		{name: "generic sandbox text", text: "sandbox unavailable for backend", want: false},
+		{name: "strict admission", text: "strict admission support unavailable", want: false},
+		{name: "other bind failure", text: "/tmp/other/agentbus.sock: bind: permission denied", want: false},
 	}
-	return false
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := agentbusSmokeStartupBindDenied(stateRoot, tt.text); got != tt.want {
+				t.Fatalf("agentbusSmokeStartupBindDenied(%q)=%t, want %t", tt.text, got, tt.want)
+			}
+		})
+	}
 }

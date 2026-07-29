@@ -119,11 +119,8 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	ready := capabilitiesOK
-	var readinessErr error
-	if !capabilitiesOK {
-		readinessErr = capabilityMissingError(hello, version, missingCapabilities[0])
-	}
+	ready := capabilitiesOK && preflight.AgentbusStateRootWritable && preflight.AgentbusAutostartLockRootWritable
+	readinessErr := setupReadinessError(hello, version, missingCapabilities, preflight)
 	if *jsonOut {
 		err := writeJSONLine(stdout, setupJSON{
 			Schema:   commandJSONSchema,
@@ -216,6 +213,27 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 		return 1, readinessErr
 	}
 	return 0, nil
+}
+
+func setupReadinessError(hello client.HelloResult, version string, missingCapabilities []string, preflight setupStatePreflightResult) error {
+	var errs []error
+	if len(missingCapabilities) > 0 {
+		errs = append(errs, capabilityMissingError(hello, version, missingCapabilities[0]))
+	}
+	if !preflight.AgentbusStateRootWritable {
+		errs = append(errs, setupWritableReadinessError("agentbus state root", preflight.AgentbusStateRoot))
+	}
+	if !preflight.AgentbusAutostartLockRootWritable {
+		errs = append(errs, setupWritableReadinessError("agentbus autostart lock root", preflight.AgentbusAutostartLockRoot))
+	}
+	return errors.Join(errs...)
+}
+
+func setupWritableReadinessError(name, path string) error {
+	if path == "" {
+		return fmt.Errorf("%s writable check failed", name)
+	}
+	return fmt.Errorf("%s is not writable: %s", name, path)
 }
 
 type setupStatePreflightResult struct {

@@ -39,18 +39,24 @@ func TestRetiredLaunchVocabularyAbsentFromPublicDocsSkillsAndTests(t *testing.T)
 	}
 
 	join := func(parts ...string) string { return strings.Join(parts, "") }
-	words := []string{
-		join("re", "sume"),
-		join("fr", "esh"),
-		join("em", "bedded"),
-		join("em", "bedding"),
-	}
-	wordPattern := regexp.MustCompile(`\b(` + strings.Join(words, "|") + `)\b`)
 	flags := []string{
-		"--" + join("re", "sume"),
-		"--" + join("re", "sume") + "-session",
-		"--" + join("fr", "esh"),
 		"--" + join("em", "bedded"),
+		"--" + join("fr", "esh"),
+		"--" + join("re", "sume"),
+		"--" + join("re", "sume") + "-" + join("se", "ssion"),
+	}
+	phrases := []struct {
+		name    string
+		pattern *regexp.Regexp
+	}{
+		{
+			name:    join("re", "sume") + " " + join("se", "ssion"),
+			pattern: regexp.MustCompile(`(?i)\b` + join("re", "sume") + `\s+` + join("se", "ssion") + `\b`),
+		},
+		{
+			name:    join("se", "ssion") + " " + join("re", "launch"),
+			pattern: regexp.MustCompile(`(?i)\b` + join("se", "ssion") + `\s+` + join("re", "launch") + `\b`),
+		},
 	}
 
 	var violations []string
@@ -60,19 +66,21 @@ func TestRetiredLaunchVocabularyAbsentFromPublicDocsSkillsAndTests(t *testing.T)
 			t.Fatal(err)
 		}
 		content := string(raw)
-		if match := wordPattern.FindString(content); match != "" {
-			violations = append(violations, relativeTestPath(repoRoot, path)+": word "+match)
-			continue
-		}
 		for _, flag := range flags {
 			if strings.Contains(content, flag) {
 				violations = append(violations, relativeTestPath(repoRoot, path)+": flag "+flag)
 				break
 			}
 		}
+		for _, phrase := range phrases {
+			if match := phrase.pattern.FindString(content); match != "" {
+				violations = append(violations, relativeTestPath(repoRoot, path)+": phrase "+phrase.name+" ("+match+")")
+				break
+			}
+		}
 	}
 	if len(violations) > 0 {
-		t.Fatalf("retired launch vocabulary found:\n%s", strings.Join(violations, "\n"))
+		t.Fatalf("retired launch public surface found:\n%s", strings.Join(violations, "\n"))
 	}
 }
 

@@ -119,3 +119,36 @@ func TestSetupReportsPendingSubmissionAndUnresolvedCleanupCounts(t *testing.T) {
 		t.Fatalf("unresolvedCleanupArtifactCount=%d, want 2", result.UnresolvedCleanupArtifactCount)
 	}
 }
+
+func TestSetupReadyRequiresWritableAgentbusStateRoot(t *testing.T) {
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	t.Setenv("HOME", t.TempDir())
+	stateRoot := filepath.Join(t.TempDir(), "agentbus-state-file")
+	if err := os.WriteFile(stateRoot, []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTBUS_STATE_ROOT", stateRoot)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("setup succeeded, want nonzero exit for non-writable Agentbus state root")
+	}
+	var result setupJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if !result.Agentbus.CapabilitiesOK || !result.AdmissionStrictContainment {
+		t.Fatalf("setup capabilities=%#v strict=%t, want compliant daemon", result.Agentbus, result.AdmissionStrictContainment)
+	}
+	if result.Ready || result.AgentbusStateRootWritable {
+		t.Fatalf("setup ready=%t agentbusStateRootWritable=%t, want both false", result.Ready, result.AgentbusStateRootWritable)
+	}
+	if !result.AgentbusAutostartLockRootWritable {
+		t.Fatalf("agentbusAutostartLockRootWritable=false, want only state root check to fail: %#v", result)
+	}
+	if !strings.Contains(stderr.String(), "agentbus state root is not writable") || !strings.Contains(stderr.String(), stateRoot) {
+		t.Fatalf("stderr=%q, want failed Agentbus state root check and path %q", stderr.String(), stateRoot)
+	}
+}
