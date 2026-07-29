@@ -59,6 +59,7 @@ type taskOptions struct {
 	Kind              string
 	ReviewWorkspace   string
 	ModelEffort       config.ModelEffortResolution
+	AgentbusStateRoot string
 }
 
 type taskRunResult struct {
@@ -106,7 +107,7 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 	}
 	result, err := executeTask(opts, resolved, turnPolicy, stderr)
 	if err != nil {
-		return 0, err
+		return agentbusCommandErrorResult(opts.JSON, stdout, err)
 	}
 	return writeTaskRunResult(result, stdout, stderr)
 }
@@ -265,11 +266,12 @@ func resolveTaskOutputSchema(opts taskOptions, stdin io.Reader) (json.RawMessage
 }
 
 func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy, stderr io.Writer) (taskRunResult, error) {
-	c, hello, err := connectAgentbusCommand(ctx, requiredCapabilitiesForPolicy(turnPolicy))
+	c, hello, agentbusStateRoot, err := connectAgentbusCommand(ctx, requiredCapabilitiesForPolicy(turnPolicy))
 	if err != nil {
 		return taskRunResult{}, err
 	}
 	defer c.Close()
+	opts.AgentbusStateRoot = agentbusStateRoot
 	if err := validateBackend(hello, opts.Backend, opts.Model, opts.Effort, stderr); err != nil {
 		return taskRunResult{}, err
 	}
@@ -304,7 +306,7 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 	if err != nil {
 		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
 		_ = deleteJobMetadata(opts.StateDir, pendingJobID)
-		return taskRunResult{}, err
+		return taskRunResult{}, agentbusOperationError(err)
 	}
 	var warnings []string
 	input, warnings = reassociateSubmittedJobInput(input, submitted.JobID, warnings)
@@ -409,18 +411,19 @@ func persistProvisionalJobAdoption(stateDir, provisionalID, jobID string) error 
 func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) jobMetadata {
 	modelEffort := normalizedModelEffort(taskModelEffort(opts))
 	return jobMetadata{
-		Schema:          envelopeSchema,
-		JobID:           jobID,
-		Kind:            effectiveTaskKind(opts),
-		Backend:         opts.Backend,
-		CWD:             opts.CWD,
-		ContractKind:    contractKind,
-		NoContract:      opts.NoContract,
-		JobInputPath:    input.Path,
-		ReviewWorkspace: opts.ReviewWorkspace,
-		Model:           modelEffort.Model,
-		Effort:          modelEffort.Effort,
-		Origin:          envelopeOriginPointer(taskEnvelopeOrigin(opts)),
+		Schema:            envelopeSchema,
+		JobID:             jobID,
+		Kind:              effectiveTaskKind(opts),
+		Backend:           opts.Backend,
+		CWD:               opts.CWD,
+		ContractKind:      contractKind,
+		NoContract:        opts.NoContract,
+		JobInputPath:      input.Path,
+		ReviewWorkspace:   opts.ReviewWorkspace,
+		AgentbusStateRoot: opts.AgentbusStateRoot,
+		Model:             modelEffort.Model,
+		Effort:            modelEffort.Effort,
+		Origin:            envelopeOriginPointer(taskEnvelopeOrigin(opts)),
 	}
 }
 

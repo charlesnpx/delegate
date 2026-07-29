@@ -102,6 +102,10 @@ func resolveCodexSandboxPaths(env func(string) string, homeDir func() (string, e
 		return codexSandboxPaths{}, err
 	}
 
+	agentbusRoot, err := resolveAgentbusStateRootFrom(env, homeDir)
+	if err != nil {
+		return codexSandboxPaths{}, err
+	}
 	stateHome := env("XDG_STATE_HOME")
 	if stateHome == "" {
 		stateHome = filepath.Join(home, ".local", "state")
@@ -113,7 +117,7 @@ func resolveCodexSandboxPaths(env func(string) string, homeDir func() (string, e
 	return codexSandboxPaths{
 		ConfigPath: filepath.Join(codexHome, "config.toml"),
 		WritableRoots: []string{
-			filepath.Join(stateHome, "agentbus"),
+			agentbusRoot,
 			filepath.Join(stateHome, "delegate"),
 		},
 	}, nil

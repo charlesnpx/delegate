@@ -114,7 +114,7 @@ func warnUnknownConfigValue(ctx context.Context, key, value string, stderr io.Wr
 	if !ok || value == "" {
 		return
 	}
-	c, hello, err := connectAgentbusCommand(ctx, nil)
+	c, hello, _, err := connectAgentbusCommand(ctx, nil)
 	if err != nil {
 		return
 	}

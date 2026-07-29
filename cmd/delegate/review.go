@@ -89,7 +89,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		ownsWorkspace = false
 	}
 	if err != nil {
-		return 0, err
+		return agentbusCommandErrorResult(opts.JSON, stdout, err)
 	}
 	if result.Launch != nil {
 		// Job metadata owns the workspace until a terminal state is observed.

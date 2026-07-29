@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/charlesnpx/agentbus/client"
-	"github.com/charlesnpx/agentbus/engine"
 	delegateconfig "github.com/charlesnpx/delegate/internal/config"
 	"github.com/charlesnpx/delegate/internal/handoff"
 	skillpkg "github.com/charlesnpx/delegate/internal/skills"
@@ -80,12 +79,16 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	version := agentbusVersion(path)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	c, hello, err := connectCheckedAgentbus(ctx, client.Options{CommandPath: path}, setupRequiredCapabilities(), version)
+	agentbusRoot, err := resolveAgentbusStateRoot()
 	if err != nil {
 		return 0, err
 	}
+	c, hello, err := connectCheckedAgentbus(ctx, client.Options{CommandPath: path, StateRoot: agentbusRoot}, setupRequiredCapabilities(), version)
+	if err != nil {
+		return agentbusCommandErrorResult(*jsonOut, stdout, err)
+	}
 	defer c.Close()
-	preflight := setupStatePreflight()
+	preflight := setupStatePreflightWithAgentbusRoot(agentbusRoot, nil)
 	cfg, err := delegateconfig.Load()
 	if err != nil {
 		return 0, err
@@ -177,6 +180,11 @@ type setupStatePreflightResult struct {
 }
 
 func setupStatePreflight() setupStatePreflightResult {
+	agentbusRoot, agentbusErr := resolveAgentbusStateRoot()
+	return setupStatePreflightWithAgentbusRoot(agentbusRoot, agentbusErr)
+}
+
+func setupStatePreflightWithAgentbusRoot(agentbusRoot string, agentbusErr error) setupStatePreflightResult {
 	result := setupStatePreflightResult{}
 	delegateRoot, err := handoff.ResolveStateDir(handoff.StateConfig{})
 	if err == nil {
@@ -184,18 +192,11 @@ func setupStatePreflight() setupStatePreflightResult {
 			result.StateRootWritable = directoryWritable(delegateRoot)
 		}
 	}
-	agentbusRoot, err := engine.ResolveStateRoot()
-	if err == nil {
-		if !filepath.IsAbs(agentbusRoot) {
-			if xdgStateHome := os.Getenv("XDG_STATE_HOME"); xdgStateHome != "" {
-				result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus state root was not probed because XDG_STATE_HOME %q must be absolute", xdgStateHome))
-			} else {
-				result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus state root %q must be absolute", agentbusRoot))
-			}
-			return result
-		}
-		result.AgentbusStateRootWritable = directoryWritable(agentbusRoot)
+	if agentbusErr != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus state root was not probed because %v", agentbusErr))
+		return result
 	}
+	result.AgentbusStateRootWritable = directoryWritable(agentbusRoot)
 	return result
 }
 

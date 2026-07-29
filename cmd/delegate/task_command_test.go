@@ -884,6 +884,7 @@ type fakeAgentbusClient struct {
 	submits   []client.JobSubmitParams
 	submitErr error
 	statuses  []client.JobStatusParams
+	statusErr error
 	status    client.JobStatusResult
 	result    client.JobResult
 	resultErr error
@@ -909,6 +910,9 @@ func (f *fakeAgentbusClient) JobSubmit(_ context.Context, params client.JobSubmi
 
 func (f *fakeAgentbusClient) JobStatus(_ context.Context, params client.JobStatusParams) (client.JobStatusResult, error) {
 	f.statuses = append(f.statuses, params)
+	if f.statusErr != nil {
+		return client.JobStatusResult{}, f.statusErr
+	}
 	if len(f.status.Jobs) > 0 {
 		return f.status, nil
 	}

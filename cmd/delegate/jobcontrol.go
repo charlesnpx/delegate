@@ -53,9 +53,13 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("--probe-interval must be at least %s", minimumProbeInterval)
 	}
 	ctx := context.Background()
-	c, hello, err := connectAgentbusCommand(ctx, nil)
+	stateRoot, err := agentbusStateRootForJob("", *jobID)
 	if err != nil {
 		return 0, err
+	}
+	c, hello, err := connectAgentbusCommandAtRoot(ctx, nil, stateRoot)
+	if err != nil {
+		return agentbusCommandErrorResult(*jsonOut, stdout, err)
 	}
 	defer c.Close()
 	var status client.JobStatusResult
@@ -65,7 +69,7 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		status, err = c.JobStatus(ctx, client.JobStatusParams{JobID: *jobID, All: *jobID == ""})
 	}
 	if err != nil {
-		return 0, err
+		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
 	}
 	if *jobID != "" {
 		if job, ok := findJobStatus(status, *jobID); ok {
@@ -128,6 +132,41 @@ func findJobStatus(status client.JobStatusResult, jobID string) (client.JobStatu
 	return client.JobStatus{}, false
 }
 
+func agentbusStateRootForJob(stateDir, jobID string) (string, error) {
+	currentRoot, err := resolveAgentbusStateRoot()
+	if err != nil {
+		return "", err
+	}
+	if jobID == "" {
+		return currentRoot, nil
+	}
+	recordedRoot, found, err := recordedAgentbusStateRootForJob(stateDir, jobID)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return recordedRoot, nil
+	}
+	return currentRoot, nil
+}
+
+func recordedAgentbusStateRootForJob(stateDir, jobID string) (string, bool, error) {
+	// TODO(D3): delegate task --recover-request must load the submission
+	// intent and route to that intent's recorded Agentbus state root.
+	if err := validateDelegateJobID(jobID); err != nil {
+		return "", false, nil
+	}
+	meta, found, err := loadJobMetadata(stateDir, jobID)
+	if err != nil || !found || meta.AgentbusStateRoot == "" {
+		return "", false, err
+	}
+	root, err := canonicalizeAgentbusStateRoot("job metadata agentbus_state_root", meta.AgentbusStateRoot)
+	if err != nil {
+		return "", false, err
+	}
+	return root, true, nil
+}
+
 func writeProbeSummary(stdout io.Writer, result statusProbeResult) error {
 	if _, err := fmt.Fprintf(stdout, "%s %s verdict=%s\n", result.JobID, result.State, result.Verdict); err != nil {
 		return err
@@ -152,7 +191,7 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 	fs := flag.NewFlagSet("delegate result", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	jobID := fs.String("job", "", "job id")
-	_ = fs.Bool("json", false, "emit JSON")
+	jsonOut := fs.Bool("json", false, "emit JSON")
 	wait := fs.Bool("wait", false, "wait for terminal result")
 	if err := fs.Parse(args); err != nil {
 		return 0, err
@@ -164,9 +203,13 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("delegate result requires --job")
 	}
 	ctx := context.Background()
-	c, hello, err := connectAgentbusCommand(ctx, nil)
+	stateRoot, err := agentbusStateRootForJob("", *jobID)
 	if err != nil {
 		return 0, err
+	}
+	c, hello, err := connectAgentbusCommandAtRoot(ctx, nil, stateRoot)
+	if err != nil {
+		return agentbusCommandErrorResult(*jsonOut, stdout, err)
 	}
 	defer c.Close()
 	var result client.JobResult
@@ -179,7 +222,7 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 	}
 	if err != nil {
-		return 0, err
+		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
 	}
 	cleanupRequestedJobStatus(ctx, c, "", result.JobID)
 	_ = cleanupJobInput("", result.JobID, result.SessionID, result.State)
@@ -208,14 +251,18 @@ func runCancel(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("delegate cancel requires --job")
 	}
 	ctx := context.Background()
-	c, _, err := connectAgentbusCommand(ctx, nil)
+	stateRoot, err := agentbusStateRootForJob("", *jobID)
 	if err != nil {
 		return 0, err
+	}
+	c, _, err := connectAgentbusCommandAtRoot(ctx, nil, stateRoot)
+	if err != nil {
+		return agentbusCommandErrorResult(*jsonOut, stdout, err)
 	}
 	defer c.Close()
 	result, err := c.JobCancel(ctx, client.JobCancelParams{JobID: *jobID})
 	if err != nil {
-		return 0, err
+		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
 	}
 	if err := cleanupJobInput("", result.JobID, "", result.State); err != nil {
 		return 0, err

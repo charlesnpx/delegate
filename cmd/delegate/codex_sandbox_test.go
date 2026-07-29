@@ -425,7 +425,11 @@ func TestResolveCodexSandboxPathsUsesXDGStateHome(t *testing.T) {
 	if got, want := paths.ConfigPath, "/opt/codex/config.toml"; got != want {
 		t.Fatalf("config path = %q, want %q", got, want)
 	}
-	if got, want := strings.Join(paths.WritableRoots, ","), "/var/state/agentbus,/var/state/delegate"; got != want {
+	agentbusRoot, err := canonicalizeAgentbusStateRoot("test agentbus root", "/var/state/agentbus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(paths.WritableRoots, ","), strings.Join([]string{agentbusRoot, "/var/state/delegate"}, ","); got != want {
 		t.Fatalf("writable roots = %q, want %q", got, want)
 	}
 }

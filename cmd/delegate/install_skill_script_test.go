@@ -203,7 +203,11 @@ func TestDelegatedInstallerLiveCodexInstallConfiguresSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("configured config does not parse: %v\n%s", err, raw)
 	}
-	wantRoots := []string{filepath.Join(stateHome, "agentbus"), filepath.Join(stateHome, "delegate")}
+	agentbusRoot, err := canonicalizeAgentbusStateRoot("test agentbus root", filepath.Join(stateHome, "agentbus"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoots := []string{agentbusRoot, filepath.Join(stateHome, "delegate")}
 	if !allWritableRootsPresent(parsed.SandboxWorkspaceWrite.WritableRoots, wantRoots) {
 		t.Fatalf("writable roots = %#v, want %#v", parsed.SandboxWorkspaceWrite.WritableRoots, wantRoots)
 	}

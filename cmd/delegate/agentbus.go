@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -80,7 +82,7 @@ var commandOutput = func(name string, args ...string) ([]byte, error) {
 func connectCheckedAgentbus(ctx context.Context, opts client.Options, required []string, version string) (agentbusClient, client.HelloResult, error) {
 	c, err := connectAgentbus(ctx, opts)
 	if err != nil {
-		return nil, client.HelloResult{}, err
+		return nil, client.HelloResult{}, agentbusOperationError(err)
 	}
 	hello := c.HelloResult()
 	if err := requireCapabilities(hello, version, required); err != nil {
@@ -90,13 +92,92 @@ func connectCheckedAgentbus(ctx context.Context, opts client.Options, required [
 	return c, hello, nil
 }
 
-func connectAgentbusCommand(ctx context.Context, required []string) (agentbusClient, client.HelloResult, error) {
+func connectAgentbusCommand(ctx context.Context, required []string) (agentbusClient, client.HelloResult, string, error) {
+	stateRoot, err := resolveAgentbusStateRoot()
+	if err != nil {
+		return nil, client.HelloResult{}, "", err
+	}
+	c, hello, err := connectAgentbusCommandAtRoot(ctx, required, stateRoot)
+	return c, hello, stateRoot, err
+}
+
+func connectAgentbusCommandAtRoot(ctx context.Context, required []string, stateRoot string) (agentbusClient, client.HelloResult, error) {
+	stateRoot, err := canonicalizeAgentbusStateRoot("agentbus state root", stateRoot)
+	if err != nil {
+		return nil, client.HelloResult{}, err
+	}
 	path, version := optionalAgentbusBinaryVersion()
-	opts := client.Options{}
+	opts := client.Options{StateRoot: stateRoot}
 	if path != "" {
 		opts.CommandPath = path
 	}
 	return connectCheckedAgentbus(ctx, opts, required, version)
+}
+
+type agentbusStateRootUsageError struct {
+	Name  string
+	Value string
+}
+
+func (err agentbusStateRootUsageError) Error() string {
+	return fmt.Sprintf("%s %q must be absolute", err.Name, err.Value)
+}
+
+func resolveAgentbusStateRoot() (string, error) {
+	return resolveAgentbusStateRootFrom(os.Getenv, os.UserHomeDir)
+}
+
+func resolveAgentbusStateRootFrom(env func(string) string, userHomeDir func() (string, error)) (string, error) {
+	if root := env("AGENTBUS_STATE_ROOT"); root != "" {
+		return canonicalizeAgentbusStateRoot("AGENTBUS_STATE_ROOT", root)
+	}
+	if stateHome := env("XDG_STATE_HOME"); stateHome != "" {
+		if !filepath.IsAbs(stateHome) {
+			return "", agentbusStateRootUsageError{Name: "XDG_STATE_HOME", Value: stateHome}
+		}
+		return canonicalizeAgentbusStateRoot("agentbus state root", filepath.Join(stateHome, "agentbus"))
+	}
+	home, err := userHomeDir()
+	if err != nil {
+		return "", err
+	}
+	if home == "" {
+		return "", errors.New("home directory is empty")
+	}
+	return canonicalizeAgentbusStateRoot("agentbus state root", filepath.Join(home, ".local", "state", "agentbus"))
+}
+
+func canonicalizeAgentbusStateRoot(label, root string) (string, error) {
+	if root == "" {
+		return "", fmt.Errorf("%s is empty", label)
+	}
+	if !filepath.IsAbs(root) {
+		return "", agentbusStateRootUsageError{Name: label, Value: root}
+	}
+	clean := filepath.Clean(root)
+	if evaluated, err := filepath.EvalSymlinks(clean); err == nil {
+		return filepath.Clean(evaluated), nil
+	}
+	return evalSymlinksAsFeasible(clean), nil
+}
+
+func evalSymlinksAsFeasible(path string) string {
+	missing := []string{}
+	for current := path; ; current = filepath.Dir(current) {
+		if _, err := os.Lstat(current); err == nil {
+			if evaluated, evalErr := filepath.EvalSymlinks(current); evalErr == nil {
+				parts := append([]string{evaluated}, missing...)
+				return filepath.Clean(filepath.Join(parts...))
+			}
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		missing = append([]string{filepath.Base(current)}, missing...)
+	}
+	return path
 }
 
 func requireCapabilities(hello client.HelloResult, version string, required []string) error {
