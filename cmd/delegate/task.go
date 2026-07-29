@@ -35,9 +35,6 @@ type taskOptions struct {
 	Wait              bool
 	JSON              bool
 	CWD               string
-	Resume            bool
-	ResumeSession     string
-	Fresh             bool
 	Model             string
 	ModelSet          bool
 	Effort            string
@@ -50,7 +47,6 @@ type taskOptions struct {
 	ParentClient      optionalStringFlag
 	ParentSession     optionalStringFlag
 	AuditOrigin       envelopeOrigin
-	Embedded          bool
 	Prompt            optionalStringFlag
 	PromptFile        string
 	PromptStdin       bool
@@ -116,15 +112,6 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 }
 
 func resolveTaskModelEffort(opts *taskOptions) error {
-	if opts.ResumeSession != "" {
-		if opts.ModelSet || opts.EffortSet {
-			return fmt.Errorf("model/effort cannot be changed when resuming a session; the session keeps the values it was started with")
-		}
-		opts.Model = ""
-		opts.Effort = ""
-		opts.ModelEffort = sessionModelEffortResolution()
-		return nil
-	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -138,9 +125,6 @@ func resolveTaskModelEffort(opts *taskOptions) error {
 
 func executeTask(opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy, stderr io.Writer) (taskRunResult, error) {
 	ctx := context.Background()
-	if opts.Embedded {
-		return runEmbeddedTask(ctx, opts, resolved, turnPolicy)
-	}
 	return runDaemonTask(ctx, opts, resolved, turnPolicy, stderr)
 }
 
@@ -172,12 +156,9 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	var background bool
 	fs.StringVar(&opts.Backend, "backend", "", "backend name")
 	fs.BoolVar(&background, "background", false, "return after launch")
-	fs.BoolVar(&opts.Wait, "wait", false, "wait for terminal result (required with resume flags in v0.1.0)")
+	fs.BoolVar(&opts.Wait, "wait", false, "wait for terminal result")
 	fs.BoolVar(&opts.JSON, "json", false, "emit JSON")
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute working directory")
-	fs.BoolVar(&opts.Resume, "resume", false, "resume the last session (requires --wait in v0.1.0)")
-	fs.StringVar(&opts.ResumeSession, "resume-session", "", "resume a session id (requires --wait in v0.1.0)")
-	fs.BoolVar(&opts.Fresh, "fresh", false, "start a fresh session")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
 	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout")
@@ -187,7 +168,6 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	fs.StringVar(&opts.Origin, "origin", "", "originating skill")
 	fs.Var(&opts.ParentClient, "parent-client", "explicit parent client for audit linkage")
 	fs.Var(&opts.ParentSession, "parent-session", "explicit parent session id for audit linkage")
-	fs.BoolVar(&opts.Embedded, "embedded", false, "run through the embedded engine path")
 	fs.Var(&opts.Prompt, "prompt", handoff.PromptFlagUsage)
 	fs.StringVar(&opts.PromptFile, "prompt-file", "", "read prompt from file")
 	fs.BoolVar(&opts.PromptStdin, "prompt-stdin", false, "read prompt from stdin")
@@ -235,21 +215,6 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	if opts.OutputSchemaStdin && opts.PromptStdin {
 		return taskOptions{}, fmt.Errorf("--output-schema-stdin cannot be used with --prompt-stdin")
 	}
-	if opts.Resume && opts.ResumeSession != "" {
-		return taskOptions{}, fmt.Errorf("use only one of --resume or --resume-session")
-	}
-	if opts.Resume && opts.Fresh || opts.ResumeSession != "" && opts.Fresh {
-		return taskOptions{}, fmt.Errorf("use only one of resume flags or --fresh")
-	}
-	if (opts.Resume || opts.ResumeSession != "") && !opts.Wait {
-		return taskOptions{}, fmt.Errorf("--resume and --resume-session require --wait in v0.1.0; background resume lands post-v0.1.0")
-	}
-	if (opts.Resume || opts.ResumeSession != "") && (opts.ModelSet || opts.EffortSet) {
-		return taskOptions{}, fmt.Errorf("model/effort cannot be changed when resuming a session; the session keeps the values it was started with")
-	}
-	if opts.Embedded && !opts.Wait {
-		return taskOptions{}, fmt.Errorf("--embedded requires --wait; background supervision is daemon-only")
-	}
 	cwd := opts.CWD
 	if cwd == "" {
 		var err error
@@ -268,16 +233,6 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	}
 	opts.StateDir = stateDir
 	opts.Kind = taskKind
-	if opts.Resume {
-		sessionID, found, err := mostRecentDelegateSession(opts.StateDir, opts.Backend, opts.CWD)
-		if err != nil {
-			return taskOptions{}, err
-		}
-		if !found {
-			return taskOptions{}, fmt.Errorf("no resumable delegate session for backend %q in cwd %q; run a fresh task first or pass --resume-session <id>", opts.Backend, opts.CWD)
-		}
-		opts.ResumeSession = sessionID
-	}
 	if stdin == nil {
 		stdin = os.Stdin
 	}
@@ -329,9 +284,6 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 		Tags:      taskTags(opts),
 		TimeoutMs: timeoutMillis(opts.Timeout),
 	}
-	if opts.ResumeSession != "" {
-		return runDaemonSessionTask(ctx, c, opts, resolved, turnPolicy, hello.Capabilities["models.reported"])
-	}
 	input, err := persistPreLaunchJobInput(opts, resolved)
 	if err != nil {
 		return taskRunResult{}, err
@@ -343,7 +295,12 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 	}
 	pendingJobID := input.JobID
 	spec.Tags[provisionalJobIDTag] = pendingJobID
-	submitted, err := c.JobSubmit(ctx, client.JobSubmitParams{TaskSpec: spec})
+	submitted, err := c.JobSubmit(ctx, client.JobSubmitParams{
+		// TODO(D3): persist real durable WorkspaceKey/RequestID before submit.
+		WorkspaceKey: "",
+		RequestID:    "",
+		TaskSpec:     spec,
+	})
 	if err != nil {
 		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
 		_ = deleteJobMetadata(opts.StateDir, pendingJobID)
@@ -386,118 +343,6 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
 	return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
-}
-
-func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy, modelsReportedCapabilities ...bool) (taskRunResult, error) {
-	modelsReportedCapable := false
-	if len(modelsReportedCapabilities) > 0 {
-		modelsReportedCapable = modelsReportedCapabilities[0]
-	}
-	target, err := resumableSessionInfo(ctx, c, opts.StateDir, opts.ResumeSession)
-	if err != nil {
-		return taskRunResult{}, err
-	}
-	if err := validateResumeTarget(opts, target); err != nil {
-		return taskRunResult{}, err
-	}
-	session, err := c.SessionResume(ctx, client.SessionResumeParams{SessionID: opts.ResumeSession})
-	if err != nil {
-		return taskRunResult{}, err
-	}
-	input, err := persistPreLaunchJobInput(opts, resolved)
-	if err != nil {
-		return taskRunResult{}, err
-	}
-	contractKind := contractKindForPolicy(turnPolicy, opts.NoContract)
-	if _, err := persistProvisionalJobMetadata(opts, input, input.JobID, contractKind); err != nil {
-		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
-		return taskRunResult{}, fmt.Errorf("persist metadata before launch: %w", err)
-	}
-	pendingJobID := input.JobID
-	write := opts.Write
-	started, notifications, err := c.TurnStart(ctx, client.TurnStartParams{
-		SessionID: session.SessionID,
-		Prompt:    resolved.Prompt,
-		Write:     &write,
-		Policy:    turnPolicy,
-		TimeoutMs: timeoutMillis(opts.Timeout),
-	})
-	if err != nil {
-		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
-		_ = deleteJobMetadata(opts.StateDir, pendingJobID)
-		return taskRunResult{}, err
-	}
-	var warnings []string
-	if err := persistProvisionalJobAdoption(opts.StateDir, pendingJobID, started.JobID); err != nil {
-		warnings = append(warnings, fmt.Sprintf("provisional metadata for %s could not record adopted job %s: %v", pendingJobID, started.JobID, err))
-	}
-	input, warnings = reassociateSubmittedJobInput(input, started.JobID, warnings)
-	if warning, err := persistLaunchedJobMetadata(opts, input, started.JobID, contractKind); err != nil {
-		warnings = append(warnings, err.Error())
-		env, envelopeErr := newLaunchEnvelopeWithOrigin(started.JobID, engine.StateRunning, taskEnvelopeOrigin(opts), taskModelEffort(opts))
-		if envelopeErr != nil {
-			return taskRunResult{Submitted: true, Warnings: warnings}, envelopeErr
-		}
-		return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
-	} else if warning != "" {
-		warnings = append(warnings, warning)
-	}
-	if pendingJobID != started.JobID && input.JobID == started.JobID {
-		if err := deleteJobMetadata(opts.StateDir, pendingJobID); err != nil {
-			warnings = append(warnings, fmt.Sprintf("pending metadata for %s could not be removed: %v", pendingJobID, err))
-		}
-	}
-	err = cleanupJobInput(opts.StateDir, started.JobID, started.SessionID, engine.StateRunning)
-	if err != nil {
-		return taskRunResult{Submitted: true, Warnings: warnings}, err
-	}
-	if opts.Wait {
-		jobResult, err := waitForTurnResult(ctx, c, opts.StateDir, started.JobID, notifications)
-		if err != nil {
-			return taskRunResult{Submitted: true, Warnings: warnings}, err
-		}
-		env, err := terminalEnvelopeFromJobResult(opts.StateDir, jobResult, modelsReportedCapable)
-		if err != nil {
-			return taskRunResult{Submitted: true, Warnings: warnings}, err
-		}
-		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
-	}
-	env, err := newLaunchEnvelopeWithOrigin(started.JobID, engine.StateRunning, taskEnvelopeOrigin(opts), taskModelEffort(opts))
-	if err != nil {
-		return taskRunResult{Submitted: true, Warnings: warnings}, err
-	}
-	return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
-}
-
-func validateResumeTarget(opts taskOptions, target client.SessionInfo) error {
-	actualCWD := filepath.Clean(target.CWD)
-	requestedCWD := filepath.Clean(opts.CWD)
-	if target.Backend != opts.Backend || actualCWD != requestedCWD {
-		return fmt.Errorf("session %q has backend %q and cwd %q, which do not match requested --backend %q and effective --cwd %q; use --fresh to start a new session", opts.ResumeSession, target.Backend, actualCWD, opts.Backend, requestedCWD)
-	}
-	return nil
-}
-
-func resumableSessionInfo(ctx context.Context, c agentbusClient, stateDir, sessionID string) (client.SessionInfo, error) {
-	listed, listErr := c.SessionList(ctx, client.SessionListParams{})
-	if listErr == nil {
-		for _, session := range listed.Sessions {
-			if session.SessionID == sessionID && session.Backend != "" && session.CWD != "" {
-				return session, nil
-			}
-		}
-	}
-	meta, found, err := delegateSessionMetadata(stateDir, sessionID)
-	if err != nil {
-		return client.SessionInfo{}, err
-	}
-	if found && meta.Backend != "" && meta.CWD != "" {
-		return client.SessionInfo{SessionID: sessionID, Backend: meta.Backend, CWD: meta.CWD}, nil
-	}
-	if listErr != nil {
-		return client.SessionInfo{}, fmt.Errorf("inspect session %q before resume: %w; use --fresh to start a new session", sessionID, listErr)
-	}
-	return client.SessionInfo{}, fmt.Errorf("cannot verify backend and cwd for session %q before resume; use --fresh to start a new session", sessionID)
 }
 
 var saveDelegateJobMetadata = saveJobMetadata
@@ -580,17 +425,7 @@ func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contra
 }
 
 func taskModelEffort(opts taskOptions) config.ModelEffortResolution {
-	if opts.ResumeSession != "" {
-		return sessionModelEffortResolution()
-	}
 	return opts.ModelEffort
-}
-
-func sessionModelEffortResolution() config.ModelEffortResolution {
-	return config.ModelEffortResolution{
-		Model:  config.DimensionResolution{Source: "session"},
-		Effort: config.DimensionResolution{Source: "session"},
-	}
 }
 
 func persistLaunchedJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) (string, error) {

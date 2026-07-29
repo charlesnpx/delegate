@@ -15,12 +15,7 @@ import (
 
 type agentbusClient interface {
 	Close() error
-	Hello(context.Context) (client.HelloResult, error)
 	HelloResult() client.HelloResult
-	SessionStart(context.Context, client.SessionStartParams) (client.SessionStartResult, error)
-	SessionResume(context.Context, client.SessionResumeParams) (client.SessionStartResult, error)
-	SessionList(context.Context, client.SessionListParams) (client.SessionListResult, error)
-	TurnStart(context.Context, client.TurnStartParams) (client.TurnStartResult, <-chan client.TurnNotification, error)
 	JobSubmit(context.Context, client.JobSubmitParams) (client.JobSubmitResult, error)
 	JobStatus(context.Context, client.JobStatusParams) (client.JobStatusResult, error)
 	JobResult(context.Context, client.JobResultParams) (client.JobResult, error)
@@ -88,14 +83,6 @@ func connectCheckedAgentbus(ctx context.Context, opts client.Options, required [
 		return nil, client.HelloResult{}, err
 	}
 	hello := c.HelloResult()
-	if hello.ProtocolVersion == 0 {
-		var helloErr error
-		hello, helloErr = c.Hello(ctx)
-		if helloErr != nil {
-			_ = c.Close()
-			return nil, client.HelloResult{}, helloErr
-		}
-	}
 	if err := requireCapabilities(hello, version, required); err != nil {
 		_ = c.Close()
 		return nil, client.HelloResult{}, err
@@ -122,7 +109,7 @@ func requireCapabilities(hello client.HelloResult, version string, required []st
 }
 
 func requiredCapabilitiesForPolicy(policy *engine.TurnPolicy) []string {
-	var required []string
+	required := []string{"admission.strictContainment"}
 	if policy != nil && policy.Contract != nil {
 		if policy.Contract.Shape != nil {
 			required = append(required, "policy.shape")

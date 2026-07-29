@@ -1,6 +1,6 @@
 # delegate
 
-`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.4.2 ships `task`, rescue, sanitized review, adversarial-review, job-control workflows, and parent-session audit linkage.
+`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.6.0 ships `task`, rescue, sanitized review, adversarial-review, job-control workflows, and parent-session audit linkage.
 
 agentbus owns execution, supervision, and generic policy enforcement. delegate owns the delegation-specific data and decisions it passes to agentbus: the embedded `delegate-report` contract, the delegate-contract digest, policy tiers, handoff lifecycle, skill matrix, and result envelopes.
 
@@ -38,14 +38,14 @@ delegate install-skills [--plan|--install|--uninstall] [--target claude|codex|al
 delegate handoff create --json
 
 delegate task --backend claude|codex [--background|--wait] [--json] [--cwd <abs>]
-              [(--resume|--resume-session <id>) --wait|--fresh] [--model <model>] [--effort <effort>]
+              [--model <model>] [--effort <effort>]
               [--timeout <duration>] [--write] [--strict-contract|--no-contract]
-              [--origin <skill>] [--parent-client <client>] [--parent-session <id>] [--embedded] [prompt source]
+              [--origin <skill>] [--parent-client <client>] [--parent-session <id>] [prompt source]
 
 delegate review|adversarial-review --backend claude|codex [--background|--wait] [--json] [--cwd <abs>]
               [--base <ref>] [--scope auto|working-tree|branch] [--allow-live-repo-read]
               [--model <model>] [--effort <effort>] [--timeout <duration>]
-              [--strict-contract] [--origin <skill>] [--parent-client <client>] [--parent-session <id>] [--embedded]
+              [--strict-contract] [--origin <skill>] [--parent-client <client>] [--parent-session <id>]
 
 delegate status [--job <id>] [--wait|--probe] [--json]
 delegate result --job <id> [--wait] [--json]
@@ -54,9 +54,7 @@ delegate cancel --job <id> [--json]
 
 Prompt sources are mutually exclusive: `--prompt`, `--prompt-file`, `--prompt-stdin`, `--handoff-prompt-file`, or positional text. `--prompt` and positional text are visible in process arguments and shell history; use stdin, a prompt file, or a handoff file for sensitive input.
 
-Use `--resume-session <id>` to resume an explicit agentbus session. `--resume` selects the most recent session recorded in delegate job metadata for the selected backend and cwd. Before resuming, delegate verifies that the session's actual backend and cwd match the requested `--backend` and effective `--cwd`; use `--fresh` instead when they differ. In v0.1.x, both resume forms require `--wait` because background resume is not yet supported. Omitting the resume flags, or passing `--fresh` explicitly, starts a new session.
-
-Daemon mode is the default. It connects through `agentbus/client`, checks the protocol capabilities required by the selected policy, and returns a launch envelope unless `--wait` is set. `--embedded --wait` uses the vendored `agentbus/engine` for tests and foreground-only local execution; it intentionally cannot supervise a background job after the CLI exits.
+Delegate connects through `agentbus/client`, requires strict admission plus the policy capabilities used by the selected contract, and returns a launch envelope unless `--wait` is set.
 
 ## Rescue workflow
 
@@ -100,7 +98,7 @@ The source directories escape `:` as `__colon__`; the installer decodes the name
 
 Launch skills preflight shared filesystem and state access, no-fork execution, agentbus capabilities, and target-backend reachability. Rescue skills launch through `delegate task`; review skills launch through the sanitized `delegate review` commands. All return the launch envelope verbatim and never add `--no-contract`. Job-control skills use the same status, result, cancellation, evidence-preservation, and no-substitute-answer discipline. Review prose requires findings ordered by severity, preservation of evidence labels, and no automatic fixes after review.
 
-v0.4.2 retains the breaking namespace rename. On install or upgrade, the managed installer removes the legacy `codex:{rescue,review,adversarial-review,status,result,cancel}` names from Claude Code and the corresponding `claude:{...}` names from Codex; `--plan --json`, `--install --json`, and `--uninstall --json` report them in each target's additive `removed` array (entries of `{"path": ...}`); the `files` array contains only installed skill files.
+v0.6.0 retains the breaking namespace rename. On install or upgrade, the managed installer removes the legacy `codex:{rescue,review,adversarial-review,status,result,cancel}` names from Claude Code and the corresponding `claude:{...}` names from Codex; `--plan --json`, `--install --json`, and `--uninstall --json` report them in each target's additive `removed` array (entries of `{"path": ...}`); the `files` array contains only installed skill files.
 
 ## Contract tiers
 
@@ -109,7 +107,7 @@ v0.4.2 retains the breaking namespace rename. On install or upgrade, the managed
 | Invocation | Contract result | Retry behavior |
 | --- | --- | --- |
 | Default read-only task | Inject digest, validate, stamp | No corrective retry; a malformed result is `completed_noncompliant`. |
-| `--write` or `--strict-contract` | Inject digest, validate, stamp | At most one corrective resume. The resume is always read-only and instructs the backend to emit only the corrected report and make no further changes. |
+| `--write` or `--strict-contract` | Inject digest, validate, stamp | At most one corrective retry. The retry is always read-only and instructs the backend to emit only the corrected report and make no further changes. |
 | `--no-contract` | Enforcement disabled | No retry; terminal envelope has `contract.status: "disabled"` and `reason: "no_contract_flag"`. This is for direct CLI use only, never managed skills. |
 
 ## Envelope reference
@@ -169,7 +167,7 @@ The non-JSON setup output always includes this exact line:
 stop-review-gate: not available (planned v0.2)
 ```
 
-Launch with `--background`, then poll `delegate status --job <id>` every 2–5 minutes while a job is outstanding. Long `--wait` calls can block a host agent loop for 100+ seconds; reserve them for short, explicitly bounded terminal checks. An expired heartbeat lease is an immediate stall signal. Otherwise run `delegate status --job <id> --probe`: it samples child-process CPU/elapsed state twice, checks established TCP sockets twice, and compares captured-log size over 60 seconds. Only cancel after all three probes are flat. Report the job ID and last phase, then cancel and relaunch (fresh or `--resume-session`) or continue waiting; never silently drop the job or replace it with an orchestrator-authored answer. Escalate after 30 minutes without progress.
+Launch with `--background`, then poll `delegate status --job <id>` every 2–5 minutes while a job is outstanding. Long `--wait` calls can block a host agent loop for 100+ seconds; reserve them for short, explicitly bounded terminal checks. An expired heartbeat lease is an immediate stall signal. Otherwise run `delegate status --job <id> --probe`: it samples child-process CPU/elapsed state twice, checks established TCP sockets twice, and compares captured-log size over 60 seconds. Only cancel after all three probes are flat. Report the job ID and last phase, then cancel and launch a new task or continue waiting; never silently drop the job or replace it with an orchestrator-authored answer. Escalate after 30 minutes without progress.
 
 ## Development and release
 
@@ -177,7 +175,7 @@ Launch with `--background`, then poll `delegate status --job <id>` every 2–5 m
 GOCACHE=/private/tmp/delegate-gocache go test -race ./...
 GOCACHE=/private/tmp/delegate-gocache go vet ./...
 bash -n install-skill.sh scripts/*.sh
-scripts/release-check.sh v0.4.2
+scripts/release-check.sh v0.6.0
 ```
 
 The release check requires a clean worktree, including no modified tracked files and no untracked files outside ignored paths. Manually inspect the same gate with `git status --short --untracked-files=all`. It also requires the requested tag to point exactly at `HEAD`, requires `VERSION` to match `v<version>`, JSON-decodes installer and CLI output, verifies every staged binary/skill hash, and confirms the staged binary reports the release version. `--allow-dirty` is an unsafe escape hatch and always prints a loud warning when used.

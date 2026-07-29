@@ -36,7 +36,7 @@ An expired heartbeat lease in "delegate status" is an immediate stall signal. Ot
 - "lsof -p <pid> -iTCP -sTCP:ESTABLISHED" to confirm a live API socket.
 - captured log file size watched over the probe interval, because progress can land without a command event.
 
-Only if all three probes are flat is the job stalled. On confirmed stall, report the job id and last-known phase, then either "delegate cancel --job <id>" and relaunch fresh or with "--resume-session", or keep waiting. Never silently drop the job, never substitute your own answer for the delegated run, and escalate after a 30-minute patience cap without progress.
+Only if all three probes are flat is the job stalled. On confirmed stall, report the job id and last-known phase, then either "delegate cancel --job <id>" and launch a new delegated task, or keep waiting. Never silently drop the job, never substitute your own answer for the delegated run, and escalate after a 30-minute patience cap without progress.
 
 ## Operating Discipline
 

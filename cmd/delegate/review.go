@@ -27,7 +27,6 @@ type reviewOptions struct {
 	Origin            string
 	ParentClient      optionalStringFlag
 	ParentSession     optionalStringFlag
-	Embedded          bool
 	Base              string
 	Scope             string
 	AllowLiveRepoRead bool
@@ -78,7 +77,6 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		StrictContract:  opts.StrictContract,
 		Origin:          opts.Origin,
 		AuditOrigin:     captureTaskOrigin(opts.Origin, opts.ParentClient, opts.ParentSession, nil),
-		Embedded:        opts.Embedded,
 		StateDir:        assembled.StateDir,
 		Kind:            kind,
 		ReviewWorkspace: assembled.Workspace,
@@ -134,7 +132,6 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	fs.StringVar(&opts.Origin, "origin", "", "originating skill")
 	fs.Var(&opts.ParentClient, "parent-client", "explicit parent client for audit linkage")
 	fs.Var(&opts.ParentSession, "parent-session", "explicit parent session id for audit linkage")
-	fs.BoolVar(&opts.Embedded, "embedded", false, "run through the embedded engine path")
 	fs.StringVar(&opts.Base, "base", "", "comparison base ref")
 	fs.StringVar(&opts.Scope, "scope", reviewpkg.ScopeAuto, "review scope: auto combines branch and working-tree changes; or working-tree, branch")
 	fs.BoolVar(&opts.AllowLiveRepoRead, "allow-live-repo-read", false, "use live repository as backend cwd (makes backend file reads easier; does not prevent backend file reads)")
@@ -149,9 +146,6 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	}
 	if background && opts.Wait {
 		return reviewOptions{}, fmt.Errorf("use only one of --background or --wait")
-	}
-	if opts.Embedded && !opts.Wait {
-		return reviewOptions{}, fmt.Errorf("--embedded requires --wait; background supervision is daemon-only")
 	}
 	if opts.Scope == reviewpkg.ScopeWorkingTree && opts.Base != "" {
 		return reviewOptions{}, fmt.Errorf("--base cannot be used with --scope working-tree")

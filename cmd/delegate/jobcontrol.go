@@ -53,7 +53,7 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("--probe-interval must be at least %s", minimumProbeInterval)
 	}
 	ctx := context.Background()
-	c, hello, err := connectAgentbusCommand(ctx, setupRequiredCapabilities())
+	c, hello, err := connectAgentbusCommand(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -164,7 +164,7 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("delegate result requires --job")
 	}
 	ctx := context.Background()
-	c, hello, err := connectAgentbusCommand(ctx, setupRequiredCapabilities())
+	c, hello, err := connectAgentbusCommand(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -208,7 +208,7 @@ func runCancel(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("delegate cancel requires --job")
 	}
 	ctx := context.Background()
-	c, _, err := connectAgentbusCommand(ctx, setupRequiredCapabilities())
+	c, _, err := connectAgentbusCommand(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -225,27 +225,6 @@ func runCancel(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	_, err = fmt.Fprintf(stdout, "%s %s\n", result.JobID, result.State)
 	return 0, err
-}
-
-func waitForTurnResult(ctx context.Context, c agentbusClient, stateDir, jobID string, notifications <-chan client.TurnNotification) (client.JobResult, error) {
-	for notification := range notifications {
-		if notification.Result == nil {
-			continue
-		}
-		result := client.JobResult{
-			JobID:         notification.Result.JobID,
-			SessionID:     notification.Result.SessionID,
-			State:         notification.Result.State,
-			Result:        notification.Result.Result,
-			ModelReported: notification.Result.ModelReported,
-			Contract:      notification.Result.Contract,
-		}
-		if err := cleanupJobInput(stateDir, result.JobID, result.SessionID, result.State); err != nil {
-			return client.JobResult{}, err
-		}
-		return result, nil
-	}
-	return waitForJobResult(ctx, c, stateDir, jobID)
 }
 
 func waitForJobResult(ctx context.Context, c agentbusClient, stateDir, jobID string) (client.JobResult, error) {

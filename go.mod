@@ -4,10 +4,12 @@ go 1.26
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/charlesnpx/agentbus v0.5.1
+	github.com/charlesnpx/agentbus v0.6.0
 )
 
 require (
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
+	go.etcd.io/bbolt v1.5.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 )

@@ -382,7 +382,7 @@ func requireStallGuidance(t *testing.T, skill GeneratedSkill) {
 		"log file size watched over the probe interval",
 		"Only if all three probes are flat",
 		"delegate cancel --job <id>",
-		"--resume-session",
+		"launch a new delegated task",
 		"Never silently drop the job",
 		"never substitute your own answer",
 		"30-minute patience cap",
