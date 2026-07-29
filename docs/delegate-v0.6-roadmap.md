@@ -40,7 +40,10 @@ Each unit lands with its own behavioral tests. D8 is the black-box closure, not 
 ## STATUS
 - **D0** ✅ agentbus `v0.6.0` tagged/pushed on `main` (content-identical to reviewed AB-F tip); go-resolvable.
 - **D1** ✅ `c3e50f0` — compile cut. gate green (build/vet/gofmt/`go test ./...` all 0 under `-mod=vendor`). review1 SHIP (gpt-5.6-sol, no findings). Provisional path + `TODO(D3)` placeholder retained by design.
-- **D2** 🔄 in progress.
+- **D2** ✅ `ce75ba7` — state-root resolver + typed RPC classification. gate green.
+- **D3** ✅ `c7ac49d` — durable submission intents + identities + opaque job IDs + exact timeout. gate green (incl. protocol-v2 socket fake-server replay test running+passing). `TODO(D4)` for dedup/terminal rendering.
+- **Review** 🔄 combined D2+D3 refute-review (gpt-5.6-sol) in progress at `c7ac49d`. (D1 review SHIP'd on iter 1; D2 individual review was blocked by a sustained gpt-5.6-sol capacity outage, so D2 is being reviewed together with D3 in one integration pass — codex is single-active-task, so reviews serialize after workers.)
+- **Next:** D4 ∥ D5 after the combined review clears.
 
 ---
 
