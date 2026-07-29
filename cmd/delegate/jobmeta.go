@@ -21,6 +21,7 @@ const (
 	backendDiagnosticMaxBytes  = 2 * 1024
 	backendDiagnosticReadBytes = 64 * 1024
 	backendDiagnosticTruncated = "\n[truncated]"
+	jobMetadataSchema          = 1
 )
 
 type jobMetadata struct {
@@ -93,7 +94,7 @@ func saveJobMetadata(stateDir string, meta jobMetadata) error {
 		return err
 	}
 	if meta.Schema == 0 {
-		meta.Schema = envelopeSchema
+		meta.Schema = jobMetadataSchema
 	}
 	now := time.Now().UTC()
 	if meta.CreatedAt.IsZero() {

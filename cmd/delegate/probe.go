@@ -122,7 +122,7 @@ func probeJobStatusWithInterval(ctx context.Context, job client.JobStatus, inter
 		pid = job.WorkerPID
 	}
 	result := statusProbeResult{
-		Schema:          envelopeSchema,
+		Schema:          commandJSONSchema,
 		JobID:           job.JobID,
 		State:           job.State,
 		LastKnownPhase:  job.State,

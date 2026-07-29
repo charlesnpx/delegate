@@ -291,6 +291,39 @@ func waitForJobResult(ctx context.Context, c agentbusClient, stateDir, jobID str
 	}
 }
 
+func submittedTerminalJobResult(ctx context.Context, c agentbusClient, stateDir, jobID string) (client.JobResult, error) {
+	result, resultErr := c.JobResult(ctx, client.JobResultParams{JobID: jobID})
+	status, statusErr := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
+	var statusJob client.JobStatus
+	statusFound := false
+	if statusErr == nil {
+		if job, found := findJobStatus(status, jobID); found {
+			statusJob = job
+			statusFound = true
+			cleanupStatus(stateDir, job)
+		}
+	}
+	if resultErr != nil {
+		if statusFound && engine.IsTerminal(statusJob.State) {
+			return terminalJobResultFromStatus(statusJob), nil
+		}
+		return client.JobResult{}, resultErr
+	}
+	if statusFound && result.ModelReported == "" {
+		result.ModelReported = statusJob.ModelReported
+	}
+	if !engine.IsTerminal(result.State) {
+		if statusFound && engine.IsTerminal(statusJob.State) {
+			return terminalJobResultFromStatus(statusJob), nil
+		}
+		return client.JobResult{}, fmt.Errorf("submitted job %s reported terminal state but job.result returned %q", jobID, result.State)
+	}
+	if err := cleanupJobInput(stateDir, result.JobID, result.SessionID, result.State); err != nil {
+		return client.JobResult{}, err
+	}
+	return result, nil
+}
+
 func nextJobPollInterval(interval time.Duration) time.Duration {
 	next := time.Duration(float64(interval) * 1.5)
 	if next > maximumJobPollInterval {
@@ -377,6 +410,14 @@ func sweepTerminalJobInputs(ctx context.Context, c agentbusClient, stateDir stri
 }
 
 func terminalEnvelopeFromJobResult(stateDir string, result client.JobResult, modelsReportedCapable ...bool) (TerminalEnvelope, error) {
+	capable := false
+	if len(modelsReportedCapable) > 0 {
+		capable = modelsReportedCapable[0]
+	}
+	return terminalEnvelopeFromJobResultWithOptions(stateDir, result, terminalEnvelopeOptions{ModelsReportedCapable: capable})
+}
+
+func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.JobResult, option terminalEnvelopeOptions) (TerminalEnvelope, error) {
 	meta, found, err := loadJobMetadata(stateDir, result.JobID)
 	if err != nil {
 		return TerminalEnvelope{}, err
@@ -414,15 +455,21 @@ func terminalEnvelopeFromJobResult(stateDir string, result client.JobResult, mod
 		if meta.Origin != nil {
 			origin = *meta.Origin
 		}
+		if option.RequestID == "" {
+			option.RequestID = meta.RequestID
+		}
+		if !option.DeduplicatedSet {
+			option.Deduplicated = meta.Deduplicated
+			option.DeduplicatedSet = true
+		}
 	}
 	if result.Result == nil && backendError != "" && !(found && meta.NoContract) {
 		stamp = skippedDelegateContractStamp(engine.SkipBackendError)
 	}
-	capable := false
-	if len(modelsReportedCapable) > 0 {
-		capable = modelsReportedCapable[0]
-	}
-	return newTerminalEnvelope(result.JobID, result.State, kind, contractKind, stamp, resultSHA256, backendError, terminalEnvelopeOptions{ModelEffort: modelEffort, ModelReported: result.ModelReported, ModelsReportedCapable: capable, Origin: origin})
+	option.ModelEffort = modelEffort
+	option.ModelReported = result.ModelReported
+	option.Origin = origin
+	return newTerminalEnvelope(result.JobID, result.State, kind, contractKind, stamp, resultSHA256, backendError, option)
 }
 
 func skippedDelegateContractStamp(reason engine.SkippedReason) engine.ContractStamp {

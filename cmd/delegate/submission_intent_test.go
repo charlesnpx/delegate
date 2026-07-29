@@ -77,6 +77,204 @@ func TestSubmissionIntentPhaseSequenceModeAndPayloadRemoval(t *testing.T) {
 	}
 }
 
+func TestDeduplicatedTerminalReplayEmitsTerminalEnvelopeWithoutWait(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		state     engine.JobState
+		exitCode  int
+		resultSHA string
+	}{
+		{name: "completed", state: engine.StateCompleted, exitCode: 0, resultSHA: strings.Repeat("a", 64)},
+		{name: "failed", state: engine.StateFailed, exitCode: engine.ExitCodeForState(engine.StateFailed), resultSHA: strings.Repeat("b", 64)},
+		{name: "canceled", state: engine.StateCanceled, exitCode: engine.ExitCodeForState(engine.StateCanceled), resultSHA: strings.Repeat("c", 64)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jobID := "job_dedup_" + tc.name
+			report := compliantReport()
+			fake := &fakeAgentbusClient{
+				hello: helloWithCapabilities(),
+				submitResult: client.JobSubmitResult{
+					JobID:        jobID,
+					State:        tc.state,
+					Deduplicated: true,
+				},
+				status: client.JobStatusResult{Jobs: []client.JobStatus{{
+					JobID:     jobID,
+					SessionID: "session_" + tc.name,
+					State:     tc.state,
+				}}},
+				result: client.JobResult{
+					JobID:     jobID,
+					SessionID: "session_" + tc.name,
+					State:     tc.state,
+					Result:    &engine.ResultInfo{Text: report, SHA256: tc.resultSHA, Bytes: int64(len(report))},
+					Contract:  ptr(compliantContractStamp(t, report)),
+				},
+			}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "terminal replay", "--background", "--json"}, nil, &stdout, &stderr)
+			if code != tc.exitCode {
+				t.Fatalf("task code=%d stderr=%q stdout=%q, want %d", code, stderr.String(), stdout.String(), tc.exitCode)
+			}
+			var env TerminalEnvelope
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+				t.Fatalf("terminal JSON: %v; raw=%q", err, stdout.String())
+			}
+			if env.Schema != envelopeSchema || env.JobID != jobID || env.Status != tc.state || env.Status == engine.StateRunning {
+				t.Fatalf("terminal envelope=%#v, want schema %d job %s status %s", env, envelopeSchema, jobID, tc.state)
+			}
+			if env.RequestID == "" || !strings.HasPrefix(env.RequestID, "delegate-") {
+				t.Fatalf("request_id=%q, want delegate request id", env.RequestID)
+			}
+			if !env.Deduplicated || !env.SubmissionDeduplicated {
+				t.Fatalf("dedup fields = %v/%v, want true/true", env.Deduplicated, env.SubmissionDeduplicated)
+			}
+			if env.ResultSHA256 == nil || *env.ResultSHA256 != tc.resultSHA {
+				t.Fatalf("result_sha256=%v, want %s", env.ResultSHA256, tc.resultSHA)
+			}
+			if len(fake.results) != 1 || fake.results[0].JobID != jobID {
+				t.Fatalf("JobResult calls=%#v, want one call for %s", fake.results, jobID)
+			}
+			if len(fake.statuses) != 1 || fake.statuses[0].JobID != jobID || fake.statuses[0].All {
+				t.Fatalf("JobStatus calls=%#v, want one requested status for %s", fake.statuses, jobID)
+			}
+		})
+	}
+}
+
+func TestSubmitPreservesNonTerminalReplayStates(t *testing.T) {
+	for _, state := range []engine.JobState{
+		engine.StateQueued,
+		engine.StateStarting,
+		engine.StateRunning,
+		engine.StateRetrying,
+	} {
+		t.Run(string(state), func(t *testing.T) {
+			jobID := "job_submit_" + string(state)
+			fake := &fakeAgentbusClient{
+				hello: helloWithCapabilities(),
+				submitResult: client.JobSubmitResult{
+					JobID:        jobID,
+					State:        state,
+					Deduplicated: true,
+				},
+			}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "nonterminal replay", "--background", "--json"}, nil, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("task code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+			}
+			var env LaunchEnvelope
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+				t.Fatalf("launch JSON: %v; raw=%q", err, stdout.String())
+			}
+			if env.Schema != envelopeSchema || env.JobID != jobID || env.Status != string(state) {
+				t.Fatalf("launch envelope=%#v, want schema %d job %s status %s", env, envelopeSchema, jobID, state)
+			}
+			if env.RequestID == "" || !env.Deduplicated || !env.SubmissionDeduplicated {
+				t.Fatalf("launch request/dedup fields=%#v, want request id and true dedup", env)
+			}
+			if len(fake.results) != 0 || len(fake.statuses) != 0 {
+				t.Fatalf("nonterminal submit made result/status calls: results=%#v statuses=%#v", fake.results, fake.statuses)
+			}
+		})
+	}
+}
+
+func TestAcknowledgementPathIsIdempotent(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	handoffResult, err := handoff.Create(handoff.CreateOptions{
+		StateDir: stateDir,
+		Reader:   strings.NewReader("ack payload"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := handoff.ResolvePrompt(handoff.PromptSources{HandoffPromptFile: handoffResult.HandoffPath, StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := "delegate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	opts := taskOptions{
+		Backend:           "codex",
+		CWD:               t.TempDir(),
+		StateDir:          stateDir,
+		Kind:              taskKind,
+		AgentbusStateRoot: t.TempDir(),
+		RequestID:         requestID,
+		WorkspaceKey:      "delegate-v1-" + strings.Repeat("b", 64),
+		SubmissionState:   engine.StateRunning,
+	}
+	submitted := client.JobSubmitResult{JobID: "job_idempotent_ack", State: engine.StateRunning}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		warnings, acknowledged, err := acknowledgeSubmittedTask(opts, resolved, submitted, contractKindShape, "after idempotent test")
+		if err != nil || !acknowledged || len(warnings) != 0 {
+			t.Fatalf("ack attempt %d warnings=%#v acknowledged=%v err=%v", attempt, warnings, acknowledged, err)
+		}
+	}
+	if _, err := os.Stat(handoffResult.HandoffPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("handoff payload stat err=%v, want removed", err)
+	}
+	meta, found, err := loadJobMetadata(stateDir, submitted.JobID)
+	if err != nil || !found {
+		t.Fatalf("metadata found=%v err=%v", found, err)
+	}
+	if meta.RequestID != requestID || meta.JobInputPath == "" {
+		t.Fatalf("metadata=%#v, want acknowledged request and retained running input", meta)
+	}
+	matches, err := filepath.Glob(filepath.Join(stateDir, "job-input.*.prompt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("job inputs=%#v metadata path=%q, want one reused input", matches, meta.JobInputPath)
+	}
+	matchPath, err := filepath.EvalSymlinks(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	metaPath, err := filepath.EvalSymlinks(meta.JobInputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matchPath != metaPath {
+		t.Fatalf("job input=%q metadata path=%q, want reused input", matchPath, metaPath)
+	}
+
+	params := testSubmitParams(t, requestID, "ack payload", nil)
+	intent := testSubmissionIntent(params, opts.AgentbusStateRoot)
+	intent.Phase = submissionPhaseAcknowledged
+	intent.JobID = submitted.JobID
+	if err := saveSubmissionIntent(stateDir, intent); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := transitionSubmissionIntent(stateDir, &intent, submissionPhaseAcknowledged, func(intent *submissionIntent) {
+			intent.JobID = submitted.JobID
+			intent.Deduplicated = submitted.Deduplicated
+			intent.LastError = nil
+		}); err != nil {
+			t.Fatalf("intent ack attempt %d: %v", attempt, err)
+		}
+	}
+	loaded, found, err := loadSubmissionIntent(stateDir, requestID)
+	if err != nil || !found || loaded.Phase != submissionPhaseAcknowledged || loaded.JobID != submitted.JobID {
+		t.Fatalf("intent=%#v found=%v err=%v, want acknowledged", loaded, found, err)
+	}
+}
+
 func TestLostResponseReplayUsesSameRequestAndOneBackendExecution(t *testing.T) {
 	bus := newReplayAdmissionBus()
 	bus.closeBeforeFirstSubmitResponse = true

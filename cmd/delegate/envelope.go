@@ -14,7 +14,8 @@ import (
 )
 
 const (
-	envelopeSchema        = 1
+	envelopeSchema        = 2
+	commandJSONSchema     = 1
 	taskKind              = "task"
 	reviewKind            = "review"
 	adversarialReviewKind = "adversarial_review"
@@ -26,21 +27,27 @@ const (
 
 // LaunchEnvelope is the schema returned when delegate has launched a job.
 type LaunchEnvelope struct {
-	Schema       int                        `json:"schema"`
-	JobID        string                     `json:"job_id"`
-	Status       string                     `json:"status"`
-	Model        config.DimensionResolution `json:"model"`
-	Effort       config.DimensionResolution `json:"effort"`
-	ResultSHA256 *string                    `json:"result_sha256"`
-	Origin       *envelopeOrigin            `json:"origin,omitempty"`
-	SHA256       string                     `json:"sha256"`
+	Schema                 int                        `json:"schema"`
+	RequestID              string                     `json:"request_id,omitempty"`
+	JobID                  string                     `json:"job_id"`
+	Status                 string                     `json:"status"`
+	Deduplicated           bool                       `json:"deduplicated"`
+	SubmissionDeduplicated bool                       `json:"submission_deduplicated"`
+	Model                  config.DimensionResolution `json:"model"`
+	Effort                 config.DimensionResolution `json:"effort"`
+	ResultSHA256           *string                    `json:"result_sha256"`
+	Origin                 *envelopeOrigin            `json:"origin,omitempty"`
+	SHA256                 string                     `json:"sha256"`
 }
 
 // TerminalEnvelope is the schema returned by delegate result and task --wait.
 type TerminalEnvelope struct {
 	Schema                         int                        `json:"schema"`
+	RequestID                      string                     `json:"request_id,omitempty"`
 	JobID                          string                     `json:"job_id"`
 	Status                         engine.JobState            `json:"status"`
+	Deduplicated                   bool                       `json:"deduplicated"`
+	SubmissionDeduplicated         bool                       `json:"submission_deduplicated"`
 	Kind                           string                     `json:"kind"`
 	ContractKind                   string                     `json:"contractKind"`
 	Contract                       engine.ContractStamp       `json:"contract"`
@@ -60,13 +67,28 @@ type terminalEnvelopeOptions struct {
 	ModelReported         string
 	ModelsReportedCapable bool
 	Origin                envelopeOrigin
+	RequestID             string
+	Deduplicated          bool
+	DeduplicatedSet       bool
+}
+
+// TODO(D6): extend schema-2 envelopes with cleanup disposition, late finalization,
+// agentbus warnings, retained-artifact state, and orphaned-specific result reasons.
+type launchEnvelopeOptions struct {
+	ModelEffort  config.ModelEffortResolution
+	Origin       envelopeOrigin
+	RequestID    string
+	Deduplicated bool
 }
 
 func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 	type terminalEnvelopeJSON struct {
 		Schema                         int                        `json:"schema"`
+		RequestID                      string                     `json:"request_id,omitempty"`
 		JobID                          string                     `json:"job_id"`
 		Status                         engine.JobState            `json:"status"`
+		Deduplicated                   bool                       `json:"deduplicated"`
+		SubmissionDeduplicated         bool                       `json:"submission_deduplicated"`
 		Kind                           string                     `json:"kind"`
 		ContractKind                   string                     `json:"contractKind"`
 		Contract                       map[string]any             `json:"contract"`
@@ -82,8 +104,11 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(terminalEnvelopeJSON{
 		Schema:                         e.Schema,
+		RequestID:                      e.RequestID,
 		JobID:                          e.JobID,
 		Status:                         e.Status,
+		Deduplicated:                   e.Deduplicated,
+		SubmissionDeduplicated:         e.SubmissionDeduplicated,
 		Kind:                           e.Kind,
 		ContractKind:                   e.ContractKind,
 		Contract:                       contractStampEnvelopeValue(e.Contract),
@@ -125,14 +150,24 @@ func newLaunchEnvelope(jobID string, state engine.JobState, resolutions ...confi
 }
 
 func newLaunchEnvelopeWithOrigin(jobID string, state engine.JobState, origin envelopeOrigin, resolutions ...config.ModelEffortResolution) (LaunchEnvelope, error) {
-	modelEffort := normalizedModelEffort(resolutions...)
+	return newLaunchEnvelopeWithOptions(jobID, state, launchEnvelopeOptions{
+		ModelEffort: normalizedModelEffort(resolutions...),
+		Origin:      origin,
+	})
+}
+
+func newLaunchEnvelopeWithOptions(jobID string, state engine.JobState, option launchEnvelopeOptions) (LaunchEnvelope, error) {
+	modelEffort := normalizedModelEffort(option.ModelEffort)
 	env := LaunchEnvelope{
-		Schema: envelopeSchema,
-		JobID:  jobID,
-		Status: launchStatus(state),
-		Model:  modelEffort.Model,
-		Effort: modelEffort.Effort,
-		Origin: envelopeOriginPointer(origin),
+		Schema:                 envelopeSchema,
+		RequestID:              option.RequestID,
+		JobID:                  jobID,
+		Status:                 launchStatus(state),
+		Deduplicated:           option.Deduplicated,
+		SubmissionDeduplicated: option.Deduplicated,
+		Model:                  modelEffort.Model,
+		Effort:                 modelEffort.Effort,
+		Origin:                 envelopeOriginPointer(option.Origin),
 	}
 	sum, err := envelopeSHA256(env)
 	if err != nil {
@@ -151,8 +186,11 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 	modelEffort := normalizedModelEffort(option.ModelEffort)
 	env := TerminalEnvelope{
 		Schema:                         envelopeSchema,
+		RequestID:                      option.RequestID,
 		JobID:                          jobID,
 		Status:                         state,
+		Deduplicated:                   option.Deduplicated,
+		SubmissionDeduplicated:         option.Deduplicated,
 		Kind:                           kind,
 		ContractKind:                   contractKind,
 		Contract:                       stamp,
@@ -201,10 +239,7 @@ func modelReportedUnavailableReason(capable bool, modelReported string) string {
 }
 
 func launchStatus(state engine.JobState) string {
-	if state == engine.StateQueued {
-		return string(engine.StateQueued)
-	}
-	return string(engine.StateRunning)
+	return string(state)
 }
 
 func normalizeContractStamp(stamp engine.ContractStamp) engine.ContractStamp {

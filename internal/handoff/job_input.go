@@ -115,11 +115,19 @@ func ReassociateJobInput(input JobInput, jobID string, hooks Hooks) (JobInput, e
 	}
 	target := filepath.Join(filepath.Dir(input.Path), jobInputPrefix+encodeJobID(jobID)+trimmed[dot:]+jobInputSuffix)
 	if _, err := os.Lstat(target); err == nil {
+		if _, sourceErr := os.Lstat(input.Path); errors.Is(sourceErr, os.ErrNotExist) {
+			return JobInput{JobID: jobID, Path: target}, nil
+		}
 		return input, fmt.Errorf("job-input target already exists: %q", target)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return input, err
 	}
 	if err := os.Rename(input.Path, target); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if _, targetErr := os.Lstat(target); targetErr == nil {
+				return JobInput{JobID: jobID, Path: target}, nil
+			}
+		}
 		return input, err
 	}
 	reassociated := JobInput{JobID: jobID, Path: target}

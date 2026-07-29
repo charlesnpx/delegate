@@ -103,7 +103,7 @@ func installSkillsJSON(operation string, results map[string]skillpkg.Result, war
 		targets[name] = installSkillTarget{Files: result.Files, Removed: result.Removed}
 	}
 	return installSkillsResult{
-		Schema:    envelopeSchema,
+		Schema:    commandJSONSchema,
 		Name:      "delegate",
 		Version:   Version,
 		Operation: operation,

@@ -103,7 +103,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	if *jsonOut {
 		return 0, writeJSONLine(stdout, setupJSON{
-			Schema:   envelopeSchema,
+			Schema:   commandJSONSchema,
 			Delegate: versionLine(),
 			Agentbus: setupAgentbus{
 				Found:           true,

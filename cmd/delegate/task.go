@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	"github.com/charlesnpx/agentbus/client"
@@ -380,22 +381,17 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 	opts.SubmissionState = submitted.State
 	opts.Deduplicated = submitted.Deduplicated
 	contractKind := intent.ContractKind
-	input, inputErr := persistDelegateJobInputWithoutPayloadCleanup(opts, resolved, submitted.JobID)
-	if inputErr != nil {
-		warnings = append(warnings, fmt.Sprintf("job input for %s could not be persisted after submission: %v", submitted.JobID, inputErr))
+	ackWarnings, acknowledged, err := acknowledgeSubmittedTask(opts, resolved, submitted, contractKind, "after submission")
+	warnings = append(warnings, ackWarnings...)
+	if err != nil {
+		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
-	if warning, err := persistLaunchedJobMetadata(opts, input, submitted.JobID, contractKind); err != nil {
-		warnings = append(warnings, err.Error())
-		env, envelopeErr := newLaunchEnvelopeWithOrigin(submitted.JobID, submitted.State, taskEnvelopeOrigin(opts), taskModelEffort(opts))
+	if !acknowledged {
+		env, envelopeErr := newLaunchEnvelopeForTask(submitted.JobID, submitted.State, opts)
 		if envelopeErr != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, envelopeErr
 		}
 		return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
-	} else if warning != "" {
-		warnings = append(warnings, warning)
-	}
-	if err := removeResolvedPromptPayload(resolved); err != nil {
-		warnings = append(warnings, err.Error())
 	}
 	if err := transitionSubmissionIntent(opts.StateDir, &intent, submissionPhaseAcknowledged, func(intent *submissionIntent) {
 		intent.JobID = submitted.JobID
@@ -404,25 +400,7 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 	}); err != nil {
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
-	// TODO(D4): JobSubmitResult.State and Deduplicated are persisted above, but
-	// this launch path still renders non-queued states as "running" until D4
-	// handles deduplicated/already-terminal submissions idempotently.
-	if opts.Wait {
-		jobResult, err := waitForJobResult(ctx, c, opts.StateDir, submitted.JobID)
-		if err != nil {
-			return taskRunResult{Submitted: true, Warnings: warnings}, err
-		}
-		env, err := terminalEnvelopeFromJobResult(opts.StateDir, jobResult, hello.Capabilities["models.reported"])
-		if err != nil {
-			return taskRunResult{Submitted: true, Warnings: warnings}, err
-		}
-		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
-	}
-	env, err := newLaunchEnvelopeWithOrigin(submitted.JobID, submitted.State, taskEnvelopeOrigin(opts), taskModelEffort(opts))
-	if err != nil {
-		return taskRunResult{Submitted: true, Warnings: warnings}, err
-	}
-	return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
+	return submittedTaskRunResult(ctx, c, hello, opts, submitted, warnings)
 }
 
 const maxSubmissionAttempts = 3
@@ -586,21 +564,20 @@ func recoverTaskSubmission(opts taskOptions) (taskRunResult, error) {
 		return taskRunResult{}, err
 	}
 	taskOpts := taskOptionsFromIntent(opts.StateDir, intent, submitted)
+	taskOpts.Wait = opts.Wait
 	var warnings []string
 	resolved := handoff.ResolvedPrompt{Prompt: intent.Params.TaskSpec.Prompt, Source: handoff.SourcePrompt}
-	input, inputErr := persistDelegateJobInputWithoutPayloadCleanup(taskOpts, resolved, submitted.JobID)
-	if inputErr != nil {
-		warnings = append(warnings, fmt.Sprintf("job input for %s could not be persisted after recovery: %v", submitted.JobID, inputErr))
+	ackWarnings, acknowledged, err := acknowledgeSubmittedTask(taskOpts, resolved, submitted, intent.ContractKind, "after recovery")
+	warnings = append(warnings, ackWarnings...)
+	if err != nil {
+		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
-	if warning, err := persistLaunchedJobMetadata(taskOpts, input, submitted.JobID, intent.ContractKind); err != nil {
-		warnings = append(warnings, err.Error())
-		env, envelopeErr := newLaunchEnvelopeWithOrigin(submitted.JobID, submitted.State, taskEnvelopeOrigin(taskOpts), taskModelEffort(taskOpts))
+	if !acknowledged {
+		env, envelopeErr := newLaunchEnvelopeForTask(submitted.JobID, submitted.State, taskOpts)
 		if envelopeErr != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, envelopeErr
 		}
 		return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
-	} else if warning != "" {
-		warnings = append(warnings, warning)
 	}
 	if err := transitionSubmissionIntent(opts.StateDir, &intent, submissionPhaseAcknowledged, func(intent *submissionIntent) {
 		intent.JobID = submitted.JobID
@@ -609,22 +586,7 @@ func recoverTaskSubmission(opts taskOptions) (taskRunResult, error) {
 	}); err != nil {
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
-	if opts.Wait {
-		jobResult, err := waitForJobResult(ctx, c, opts.StateDir, submitted.JobID)
-		if err != nil {
-			return taskRunResult{Submitted: true, Warnings: warnings}, err
-		}
-		env, err := terminalEnvelopeFromJobResult(opts.StateDir, jobResult, hello.Capabilities["models.reported"])
-		if err != nil {
-			return taskRunResult{Submitted: true, Warnings: warnings}, err
-		}
-		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
-	}
-	env, err := newLaunchEnvelopeWithOrigin(submitted.JobID, submitted.State, taskEnvelopeOrigin(taskOpts), taskModelEffort(taskOpts))
-	if err != nil {
-		return taskRunResult{Submitted: true, Warnings: warnings}, err
-	}
-	return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
+	return submittedTaskRunResult(ctx, c, hello, taskOpts, submitted, warnings)
 }
 
 func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted client.JobSubmitResult) taskOptions {
@@ -654,6 +616,9 @@ func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted c
 }
 
 func persistDelegateJobInputWithoutPayloadCleanup(opts taskOptions, resolved handoff.ResolvedPrompt, jobID string) (handoff.JobInput, error) {
+	if input, found, err := acknowledgedJobInputFromMetadata(opts, jobID); err != nil || found {
+		return input, err
+	}
 	if resolved.Source == handoff.SourceHandoffPromptFile {
 		resolved.Source = handoff.SourcePrompt
 		resolved.HandoffPath = ""
@@ -696,7 +661,7 @@ func persistDelegateJobInput(opts taskOptions, resolved handoff.ResolvedPrompt, 
 func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) jobMetadata {
 	modelEffort := normalizedModelEffort(taskModelEffort(opts))
 	return jobMetadata{
-		Schema:            envelopeSchema,
+		Schema:            jobMetadataSchema,
 		JobID:             jobID,
 		RequestID:         opts.RequestID,
 		WorkspaceKey:      opts.WorkspaceKey,
@@ -722,6 +687,14 @@ func taskModelEffort(opts taskOptions) config.ModelEffortResolution {
 
 func persistLaunchedJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) (string, error) {
 	meta := delegateJobMetadata(opts, input, jobID, contractKind)
+	if existing, found, err := acknowledgedJobMetadata(opts, jobID); err != nil {
+		return "", err
+	} else if found {
+		meta = mergeAcknowledgedJobMetadata(existing, meta)
+		if reflect.DeepEqual(existing, meta) {
+			return "", nil
+		}
+	}
 	if err := saveDelegateJobMetadata(opts.StateDir, meta); err != nil {
 		if fallbackErr := saveLaunchedJobMetadataFallback(opts.StateDir, meta); fallbackErr != nil {
 			return "", fmt.Errorf("persist launched job metadata for %s: primary: %v; state-dir fallback: %w", jobID, err, fallbackErr)
@@ -729,6 +702,153 @@ func persistLaunchedJobMetadata(opts taskOptions, input handoff.JobInput, jobID,
 		return fmt.Sprintf("delegate job metadata for %s required the durable state-directory fallback after the primary write failed: %v", jobID, err), nil
 	}
 	return "", nil
+}
+
+func acknowledgeSubmittedTask(opts taskOptions, resolved handoff.ResolvedPrompt, submitted client.JobSubmitResult, contractKind, inputContext string) ([]string, bool, error) {
+	var warnings []string
+	input, inputErr := persistDelegateJobInputWithoutPayloadCleanup(opts, resolved, submitted.JobID)
+	if inputErr != nil {
+		warnings = append(warnings, fmt.Sprintf("job input for %s could not be persisted %s: %v", submitted.JobID, inputContext, inputErr))
+	}
+	if warning, err := persistLaunchedJobMetadata(opts, input, submitted.JobID, contractKind); err != nil {
+		warnings = append(warnings, err.Error())
+		return warnings, false, nil
+	} else if warning != "" {
+		warnings = append(warnings, warning)
+	}
+	if err := removeResolvedPromptPayload(resolved); err != nil {
+		warnings = append(warnings, err.Error())
+	}
+	return warnings, true, nil
+}
+
+func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.HelloResult, opts taskOptions, submitted client.JobSubmitResult, warnings []string) (taskRunResult, error) {
+	terminalOptions := terminalEnvelopeOptions{
+		ModelsReportedCapable: hello.Capabilities["models.reported"],
+		RequestID:             opts.RequestID,
+		Deduplicated:          opts.Deduplicated,
+		DeduplicatedSet:       true,
+	}
+	if engine.IsTerminal(submitted.State) {
+		// TODO(D5): this fast path intentionally uses the existing state-based cleanup helpers until cleanupDisposition gates artifact deletion.
+		jobResult, err := submittedTerminalJobResult(ctx, c, opts.StateDir, submitted.JobID)
+		if err != nil {
+			return taskRunResult{Submitted: true, Warnings: warnings}, err
+		}
+		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, jobResult, terminalOptions)
+		if err != nil {
+			return taskRunResult{Submitted: true, Warnings: warnings}, err
+		}
+		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
+	}
+	if opts.Wait {
+		jobResult, err := waitForJobResult(ctx, c, opts.StateDir, submitted.JobID)
+		if err != nil {
+			return taskRunResult{Submitted: true, Warnings: warnings}, err
+		}
+		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, jobResult, terminalOptions)
+		if err != nil {
+			return taskRunResult{Submitted: true, Warnings: warnings}, err
+		}
+		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
+	}
+	env, err := newLaunchEnvelopeForTask(submitted.JobID, submitted.State, opts)
+	if err != nil {
+		return taskRunResult{Submitted: true, Warnings: warnings}, err
+	}
+	return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
+}
+
+func newLaunchEnvelopeForTask(jobID string, state engine.JobState, opts taskOptions) (LaunchEnvelope, error) {
+	return newLaunchEnvelopeWithOptions(jobID, state, launchEnvelopeOptions{
+		ModelEffort:  taskModelEffort(opts),
+		Origin:       taskEnvelopeOrigin(opts),
+		RequestID:    opts.RequestID,
+		Deduplicated: opts.Deduplicated,
+	})
+}
+
+func acknowledgedJobInputFromMetadata(opts taskOptions, jobID string) (handoff.JobInput, bool, error) {
+	meta, found, err := acknowledgedJobMetadata(opts, jobID)
+	if err != nil || !found {
+		return handoff.JobInput{}, false, err
+	}
+	return handoff.JobInput{JobID: jobID, Path: meta.JobInputPath}, true, nil
+}
+
+func acknowledgedJobMetadata(opts taskOptions, jobID string) (jobMetadata, bool, error) {
+	meta, found, err := loadJobMetadata(opts.StateDir, jobID)
+	if err != nil || !found {
+		return jobMetadata{}, false, err
+	}
+	if err := validateAcknowledgedJobMetadata(meta, opts, jobID); err != nil {
+		return jobMetadata{}, false, err
+	}
+	return meta, true, nil
+}
+
+func validateAcknowledgedJobMetadata(meta jobMetadata, opts taskOptions, jobID string) error {
+	if meta.JobID != jobID {
+		return fmt.Errorf("delegate job metadata %q has job_id %q", jobID, meta.JobID)
+	}
+	if opts.RequestID != "" && meta.RequestID != "" && meta.RequestID != opts.RequestID {
+		return fmt.Errorf("delegate job metadata for %s belongs to request %s, not %s", jobID, meta.RequestID, opts.RequestID)
+	}
+	if opts.WorkspaceKey != "" && meta.WorkspaceKey != "" && meta.WorkspaceKey != opts.WorkspaceKey {
+		return fmt.Errorf("delegate job metadata for %s belongs to workspace %s, not %s", jobID, meta.WorkspaceKey, opts.WorkspaceKey)
+	}
+	return nil
+}
+
+func mergeAcknowledgedJobMetadata(existing, next jobMetadata) jobMetadata {
+	merged := existing
+	if merged.Schema == 0 || merged.Schema < next.Schema {
+		merged.Schema = next.Schema
+	}
+	if merged.RequestID == "" {
+		merged.RequestID = next.RequestID
+	}
+	if merged.WorkspaceKey == "" {
+		merged.WorkspaceKey = next.WorkspaceKey
+	}
+	if merged.Kind == "" {
+		merged.Kind = next.Kind
+	}
+	if merged.Backend == "" {
+		merged.Backend = next.Backend
+	}
+	if merged.CWD == "" {
+		merged.CWD = next.CWD
+	}
+	if merged.ContractKind == "" {
+		merged.ContractKind = next.ContractKind
+	}
+	if next.NoContract {
+		merged.NoContract = true
+	}
+	if merged.AgentbusStateRoot == "" {
+		merged.AgentbusStateRoot = next.AgentbusStateRoot
+	}
+	if next.SubmissionState != "" {
+		merged.SubmissionState = next.SubmissionState
+	}
+	if next.Deduplicated {
+		merged.Deduplicated = true
+	}
+	if dimensionResolutionEmpty(merged.Model) {
+		merged.Model = next.Model
+	}
+	if dimensionResolutionEmpty(merged.Effort) {
+		merged.Effort = next.Effort
+	}
+	if merged.Origin == nil {
+		merged.Origin = next.Origin
+	}
+	return merged
+}
+
+func dimensionResolutionEmpty(value config.DimensionResolution) bool {
+	return value.Requested == "" && value.Effective == "" && value.Source == ""
 }
 
 func taskTags(opts taskOptions) map[string]string {

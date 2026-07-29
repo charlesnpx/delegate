@@ -36,7 +36,10 @@ func TestEnvelopeSchemasAndHashes(t *testing.T) {
 	if bytes.Contains(raw, []byte(`"origin"`)) {
 		t.Fatalf("launch envelope = %s, want no origin without captured linkage", raw)
 	}
-	wantLaunchHash := sha256.Sum256([]byte(`{"effort":{"source":"default"},"job_id":"job_envelope","model":{"source":"default"},"result_sha256":null,"schema":1,"status":"queued"}`))
+	if launch.Schema != envelopeSchema {
+		t.Fatalf("launch schema = %d, want %d", launch.Schema, envelopeSchema)
+	}
+	wantLaunchHash := sha256.Sum256([]byte(`{"deduplicated":false,"effort":{"source":"default"},"job_id":"job_envelope","model":{"source":"default"},"result_sha256":null,"schema":2,"status":"queued","submission_deduplicated":false}`))
 	if launch.SHA256 != hex.EncodeToString(wantLaunchHash[:]) {
 		t.Fatalf("launch sha256 = %q, want %q", launch.SHA256, hex.EncodeToString(wantLaunchHash[:]))
 	}
@@ -75,7 +78,7 @@ func TestEnvelopeSchemasAndHashes(t *testing.T) {
 	if terminal.SHA256 == "" || terminal.SHA256 == strings.Repeat("a", 64) {
 		t.Fatalf("terminal envelope sha256 = %q, want distinct envelope hash", terminal.SHA256)
 	}
-	canonicalTerminal := `{"contract":{"attempts":1,"missing":[],"reason":"","retryUsed":false,"status":"compliant","validatedAt":"1970-01-01T00:00:01Z"},"contractKind":"shape","effort":{"source":"default"},"job_id":"job_envelope","kind":"task","model":{"source":"default"},"model_reported_unavailable_reason":"agentbus_capability_missing","result_sha256":"` + strings.Repeat("a", 64) + `","schema":1,"status":"completed"}`
+	canonicalTerminal := `{"contract":{"attempts":1,"missing":[],"reason":"","retryUsed":false,"status":"compliant","validatedAt":"1970-01-01T00:00:01Z"},"contractKind":"shape","deduplicated":false,"effort":{"source":"default"},"job_id":"job_envelope","kind":"task","model":{"source":"default"},"model_reported_unavailable_reason":"agentbus_capability_missing","result_sha256":"` + strings.Repeat("a", 64) + `","schema":2,"status":"completed","submission_deduplicated":false}`
 	wantTerminalHash := sha256.Sum256([]byte(canonicalTerminal))
 	if terminal.SHA256 != hex.EncodeToString(wantTerminalHash[:]) {
 		t.Fatalf("terminal sha256 = %q, want independent canonical JSON digest %q", terminal.SHA256, hex.EncodeToString(wantTerminalHash[:]))
@@ -89,10 +92,52 @@ func TestEnvelopeSchemasAndHashes(t *testing.T) {
 	if withOrigin.Origin == nil || *withOrigin.Origin != origin || withOrigin.SHA256 == launch.SHA256 {
 		t.Fatalf("launch with origin = %#v, want origin-covered distinct hash", withOrigin)
 	}
-	canonicalOrigin := `{"effort":{"source":"default"},"job_id":"job_envelope","model":{"source":"default"},"origin":{"depth":"1","parent_agent":"agent","parent_client":"claude-code","parent_session_id":"parent-session","skill":"delegate:rescue:claude"},"result_sha256":null,"schema":1,"status":"queued"}`
+	canonicalOrigin := `{"deduplicated":false,"effort":{"source":"default"},"job_id":"job_envelope","model":{"source":"default"},"origin":{"depth":"1","parent_agent":"agent","parent_client":"claude-code","parent_session_id":"parent-session","skill":"delegate:rescue:claude"},"result_sha256":null,"schema":2,"status":"queued","submission_deduplicated":false}`
 	wantOriginHash := sha256.Sum256([]byte(canonicalOrigin))
 	if withOrigin.SHA256 != hex.EncodeToString(wantOriginHash[:]) {
 		t.Fatalf("launch origin sha256 = %q, want %q", withOrigin.SHA256, hex.EncodeToString(wantOriginHash[:]))
+	}
+}
+
+func TestEnvelopeSchema2SubmissionFieldsRoundTrip(t *testing.T) {
+	requestID := "delegate-11111111111111111111111111111111"
+	launch, err := newLaunchEnvelopeWithOptions("job_schema2", engine.StateRetrying, launchEnvelopeOptions{
+		RequestID:    requestID,
+		Deduplicated: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(launch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decodedLaunch LaunchEnvelope
+	if err := json.Unmarshal(raw, &decodedLaunch); err != nil {
+		t.Fatalf("launch round trip: %v; raw=%s", err, raw)
+	}
+	if decodedLaunch.Schema != 2 || decodedLaunch.RequestID != requestID || !decodedLaunch.Deduplicated || !decodedLaunch.SubmissionDeduplicated || decodedLaunch.Status != string(engine.StateRetrying) {
+		t.Fatalf("launch round trip = %#v", decodedLaunch)
+	}
+
+	terminal, err := newTerminalEnvelope("job_schema2", engine.StateCompleted, taskKind, contractKindShape, engine.ContractStamp{}, "", "", terminalEnvelopeOptions{
+		RequestID:       requestID,
+		Deduplicated:    true,
+		DeduplicatedSet: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err = json.Marshal(terminal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decodedTerminal TerminalEnvelope
+	if err := json.Unmarshal(raw, &decodedTerminal); err != nil {
+		t.Fatalf("terminal round trip: %v; raw=%s", err, raw)
+	}
+	if decodedTerminal.Schema != 2 || decodedTerminal.RequestID != requestID || !decodedTerminal.Deduplicated || !decodedTerminal.SubmissionDeduplicated {
+		t.Fatalf("terminal round trip = %#v", decodedTerminal)
 	}
 }
 
@@ -819,16 +864,18 @@ func helloWithCapabilities() client.HelloResult {
 }
 
 type fakeAgentbusClient struct {
-	hello     client.HelloResult
-	submits   []client.JobSubmitParams
-	submitErr error
-	statuses  []client.JobStatusParams
-	statusErr error
-	status    client.JobStatusResult
-	result    client.JobResult
-	resultErr error
-	cancel    client.JobCancelResult
-	cancelErr error
+	hello        client.HelloResult
+	submits      []client.JobSubmitParams
+	submitResult client.JobSubmitResult
+	submitErr    error
+	statuses     []client.JobStatusParams
+	statusErr    error
+	status       client.JobStatusResult
+	results      []client.JobResultParams
+	result       client.JobResult
+	resultErr    error
+	cancel       client.JobCancelResult
+	cancelErr    error
 }
 
 func (f *fakeAgentbusClient) Close() error { return nil }
@@ -843,6 +890,16 @@ func (f *fakeAgentbusClient) JobSubmit(_ context.Context, params client.JobSubmi
 	jobID := "job_fake"
 	if f.result.JobID != "" {
 		jobID = f.result.JobID
+	}
+	if f.submitResult.JobID != "" || f.submitResult.State != "" || f.submitResult.Deduplicated {
+		submitted := f.submitResult
+		if submitted.JobID == "" {
+			submitted.JobID = jobID
+		}
+		if submitted.State == "" {
+			submitted.State = engine.StateQueued
+		}
+		return submitted, nil
 	}
 	return client.JobSubmitResult{JobID: jobID, State: engine.StateQueued}, nil
 }
@@ -861,7 +918,8 @@ func (f *fakeAgentbusClient) JobStatus(_ context.Context, params client.JobStatu
 	return client.JobStatusResult{Jobs: []client.JobStatus{{JobID: f.result.JobID, SessionID: f.result.SessionID, State: f.result.State}}}, nil
 }
 
-func (f *fakeAgentbusClient) JobResult(context.Context, client.JobResultParams) (client.JobResult, error) {
+func (f *fakeAgentbusClient) JobResult(_ context.Context, params client.JobResultParams) (client.JobResult, error) {
+	f.results = append(f.results, params)
 	if f.resultErr != nil {
 		return client.JobResult{}, f.resultErr
 	}

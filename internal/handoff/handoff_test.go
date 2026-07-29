@@ -466,6 +466,25 @@ func TestDeleteJobInputHooks(t *testing.T) {
 	}
 }
 
+func TestReassociateJobInputIsIdempotentAfterPriorRename(t *testing.T) {
+	stateDir := newTestStateDir(t)
+	original := persistTestJobInputInDir(t, stateDir, "request-job")
+	reassociated, err := ReassociateJobInput(original, "actual-job", Hooks{})
+	if err != nil {
+		t.Fatalf("first ReassociateJobInput() error = %v", err)
+	}
+	assertMissing(t, original.Path)
+	assertExists(t, reassociated.Path)
+
+	again, err := ReassociateJobInput(original, "actual-job", Hooks{})
+	if err != nil {
+		t.Fatalf("second ReassociateJobInput() error = %v", err)
+	}
+	if again != reassociated {
+		t.Fatalf("second ReassociateJobInput() = %#v, want %#v", again, reassociated)
+	}
+}
+
 func TestSweepTerminalJobInputs(t *testing.T) {
 	stateDir := newTestStateDir(t)
 	completed := persistTestJobInputInDir(t, stateDir, "job-completed")
