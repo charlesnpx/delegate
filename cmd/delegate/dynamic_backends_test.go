@@ -14,17 +14,42 @@ import (
 )
 
 func TestTerminalEnvelopeWithoutResultAcrossTerminalStates(t *testing.T) {
-	states := []engine.JobState{engine.StateFailed, engine.StateTimedOut, engine.StateInterrupted, engine.StateCanceled, engine.StateReaped, engine.StateQuarantined}
-	for _, state := range states {
-		t.Run(string(state), func(t *testing.T) {
-			env, err := newTerminalEnvelope("job_terminal", state, taskKind, contractKindShape, skippedDelegateContractStamp(engine.SkipResultUnavailable), "", "")
+	cases := []struct {
+		state  engine.JobState
+		reason string
+	}{
+		{state: engine.StateFailed, reason: "failed_without_result"},
+		{state: engine.StateTimedOut, reason: "timed_out_without_result"},
+		{state: engine.StateInterrupted, reason: "interrupted_without_result"},
+		{state: engine.StateCanceled, reason: "canceled_without_result"},
+		{state: engine.StateOrphaned, reason: "orphaned_without_result"},
+		{state: engine.StateReaped, reason: "reaped_without_result"},
+		{state: engine.StateQuarantined, reason: "quarantined_without_result"},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.state), func(t *testing.T) {
+			env, err := newTerminalEnvelope("job_terminal", tc.state, taskKind, contractKindShape, skippedDelegateContractStamp(engine.SkipResultUnavailable), "", "")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if env.ResultSHA256 != nil || env.ResultUnavailableReason != "result_unavailable" || env.Contract.Status != engine.ContractSkipped {
+			if env.ResultSHA256 != nil || env.ResultUnavailableReason != tc.reason || env.Contract.Status != engine.ContractSkipped {
 				t.Fatalf("terminal envelope = %#v", env)
 			}
 		})
+	}
+}
+
+func TestResultUnavailableReasonDiffersByTerminalState(t *testing.T) {
+	orphaned, err := newTerminalEnvelope("job_orphaned", engine.StateOrphaned, taskKind, contractKindShape, skippedDelegateContractStamp(engine.SkipResultUnavailable), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled, err := newTerminalEnvelope("job_canceled", engine.StateCanceled, taskKind, contractKindShape, skippedDelegateContractStamp(engine.SkipResultUnavailable), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if orphaned.ResultUnavailableReason != "orphaned_without_result" || canceled.ResultUnavailableReason != "canceled_without_result" || orphaned.ResultUnavailableReason == canceled.ResultUnavailableReason {
+		t.Fatalf("reasons orphaned=%q canceled=%q, want distinct state-specific reasons", orphaned.ResultUnavailableReason, canceled.ResultUnavailableReason)
 	}
 }
 
@@ -111,7 +136,7 @@ func TestWaitForJobResultSynthesizesEnvelopeInputAcrossTerminalStates(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			if env.JobID != "job_fallback" || env.Status != state || env.ResultUnavailableReason != "result_unavailable" {
+			if env.JobID != "job_fallback" || env.Status != state || env.ResultUnavailableReason != resultUnavailableReason(state) {
 				t.Fatalf("fallback envelope = %#v", env)
 			}
 		})

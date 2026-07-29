@@ -72,17 +72,19 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		if job, ok := findJobStatus(status, *jobID); ok {
 			if engine.IsTerminal(job.State) && !*probe {
 				result, resultErr := c.JobResult(ctx, client.JobResultParams{JobID: *jobID})
+				terminalJob := terminalJobResultFromResultAndStatus(result, job, true)
 				if resultErr != nil {
-					result = terminalJobResultFromStatus(job)
+					terminalJob = terminalJobResultFromStatus(job)
 					cleanupStatus("", job, cleanupWarnings)
 				} else {
-					result.CleanupDisposition = cleanupDispositionFromResultAndStatus(result, job, true)
+					result = terminalJob.result
 					_ = captureBackendError("", job)
 					if err := cleanupJobInput("", result.JobID, result.SessionID, result.State, result.CleanupDisposition, cleanupWarnings); err != nil {
 						return 0, err
 					}
+					terminalJob.result = result
 				}
-				env, envelopeErr := terminalEnvelopeFromJobResult("", result, hello.Capabilities["models.reported"])
+				env, envelopeErr := terminalEnvelopeFromJobResultWithOptions("", terminalJob.result, terminalJob.envelopeOptions(terminalEnvelopeOptions{ModelsReportedCapable: hello.Capabilities["models.reported"]}))
 				if envelopeErr != nil {
 					return 0, envelopeErr
 				}
@@ -214,22 +216,26 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	defer c.Close()
 	cleanupWarnings := newLocalCleanupWarnings(stderr)
-	var result client.JobResult
+	var terminalJob terminalJobResult
 	if *wait {
-		result, err = waitForJobResult(ctx, c, "", *jobID, cleanupWarnings)
+		terminalJob, err = waitForTerminalJobResult(ctx, c, "", *jobID, cleanupWarnings)
 	} else {
-		result, err = c.JobResult(ctx, client.JobResultParams{JobID: *jobID})
+		result, resultErr := c.JobResult(ctx, client.JobResultParams{JobID: *jobID})
+		err = resultErr
 		if err != nil {
-			result, err = terminalJobResultFallback(ctx, c, "", *jobID, err, cleanupWarnings)
+			terminalJob, err = terminalJobResultFallbackWithStatus(ctx, c, "", *jobID, err, cleanupWarnings)
+		} else {
+			statusJob, statusFound := requestedJobStatusForCleanup(ctx, c, "", result.JobID)
+			terminalJob = terminalJobResultFromResultAndStatus(result, statusJob, statusFound)
+			result = terminalJob.result
+			_ = cleanupJobInput("", result.JobID, result.SessionID, result.State, result.CleanupDisposition, cleanupWarnings)
+			terminalJob.result = result
 		}
 	}
 	if err != nil {
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
 	}
-	statusJob, statusFound := requestedJobStatusForCleanup(ctx, c, "", result.JobID)
-	result.CleanupDisposition = cleanupDispositionFromResultAndStatus(result, statusJob, statusFound)
-	_ = cleanupJobInput("", result.JobID, result.SessionID, result.State, result.CleanupDisposition, cleanupWarnings)
-	env, err := terminalEnvelopeFromJobResult("", result, hello.Capabilities["models.reported"])
+	env, err := terminalEnvelopeFromJobResultWithOptions("", terminalJob.result, terminalJob.envelopeOptions(terminalEnvelopeOptions{ModelsReportedCapable: hello.Capabilities["models.reported"]}))
 	if err != nil {
 		return 0, err
 	}
@@ -279,32 +285,75 @@ func runCancel(args []string, stdout, stderr io.Writer) (int, error) {
 	return 0, err
 }
 
-func waitForJobResult(ctx context.Context, c agentbusClient, stateDir, jobID string, cleanupWarnings *localCleanupWarnings) (client.JobResult, error) {
+type terminalJobResult struct {
+	result      client.JobResult
+	statusJob   client.JobStatus
+	statusFound bool
+}
+
+func terminalJobResultFromResultAndStatus(result client.JobResult, statusJob client.JobStatus, statusFound bool) terminalJobResult {
+	result.CleanupDisposition = cleanupDispositionFromResultAndStatus(result, statusJob, statusFound)
+	if statusFound {
+		if result.ModelReported == "" {
+			result.ModelReported = statusJob.ModelReported
+		}
+		result.LateFinalization = result.LateFinalization || statusJob.LateFinalization
+	}
+	return terminalJobResult{result: result, statusJob: statusJob, statusFound: statusFound}
+}
+
+func terminalJobResultFromStatus(job client.JobStatus) terminalJobResult {
+	return terminalJobResultFromResultAndStatus(terminalJobResultEnvelopeInputFromStatus(job), job, true)
+}
+
+func (result terminalJobResult) envelopeOptions(option terminalEnvelopeOptions) terminalEnvelopeOptions {
+	if option.CleanupDisposition == "" {
+		option.CleanupDisposition = result.result.CleanupDisposition
+	}
+	option.LateFinalization = option.LateFinalization || result.result.LateFinalization
+	if result.statusFound {
+		if option.CleanupDisposition == "" {
+			option.CleanupDisposition = result.statusJob.CleanupDisposition
+		}
+		option.LateFinalization = option.LateFinalization || result.statusJob.LateFinalization
+		option.AgentbusWarnings = append([]string(nil), result.statusJob.Warnings...)
+	}
+	return option
+}
+
+func waitForTerminalJobResult(ctx context.Context, c agentbusClient, stateDir, jobID string, cleanupWarnings *localCleanupWarnings) (terminalJobResult, error) {
 	interval := initialJobPollInterval
 	for {
 		result, err := c.JobResult(ctx, client.JobResultParams{JobID: jobID})
 		if err == nil && engine.IsTerminal(result.State) {
 			statusJob, statusFound := requestedJobStatusForCleanup(ctx, c, stateDir, jobID)
-			cleanupDisposition := cleanupDispositionFromResultAndStatus(result, statusJob, statusFound)
-			if err := cleanupJobInput(stateDir, result.JobID, result.SessionID, result.State, cleanupDisposition, cleanupWarnings); err != nil {
-				return client.JobResult{}, err
+			terminalJob := terminalJobResultFromResultAndStatus(result, statusJob, statusFound)
+			result = terminalJob.result
+			if err := cleanupJobInput(stateDir, result.JobID, result.SessionID, result.State, result.CleanupDisposition, cleanupWarnings); err != nil {
+				return terminalJobResult{}, err
 			}
-			return result, nil
+			terminalJob.result = result
+			return terminalJob, nil
 		}
 		if err != nil {
-			result, fallbackErr := terminalJobResultFallback(ctx, c, stateDir, jobID, err, cleanupWarnings)
+			result, fallbackErr := terminalJobResultFallbackWithStatus(ctx, c, stateDir, jobID, err, cleanupWarnings)
 			if fallbackErr == nil {
 				return result, nil
 			}
 		}
 		if err := jobPollSleep(ctx, interval); err != nil {
-			return client.JobResult{}, err
+			return terminalJobResult{}, err
 		}
 		interval = nextJobPollInterval(interval)
 	}
 }
 
-func submittedTerminalJobResult(ctx context.Context, c agentbusClient, stateDir, jobID string, cleanupWarnings *localCleanupWarnings) (client.JobResult, error) {
+func waitForJobResult(ctx context.Context, c agentbusClient, stateDir, jobID string, cleanupWarnings *localCleanupWarnings) (client.JobResult, error) {
+	result, err := waitForTerminalJobResult(ctx, c, stateDir, jobID, cleanupWarnings)
+	return result.result, err
+}
+
+func submittedTerminalJob(ctx context.Context, c agentbusClient, stateDir, jobID string, cleanupWarnings *localCleanupWarnings) (terminalJobResult, error) {
 	result, resultErr := c.JobResult(ctx, client.JobResultParams{JobID: jobID})
 	status, statusErr := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
 	var statusJob client.JobStatus
@@ -319,29 +368,33 @@ func submittedTerminalJobResult(ctx context.Context, c agentbusClient, stateDir,
 	if resultErr != nil {
 		if statusFound && engine.IsTerminal(statusJob.State) {
 			if err := cleanupJobInput(stateDir, statusJob.JobID, statusJob.SessionID, statusJob.State, statusJob.CleanupDisposition, cleanupWarnings); err != nil {
-				return client.JobResult{}, err
+				return terminalJobResult{}, err
 			}
 			return terminalJobResultFromStatus(statusJob), nil
 		}
-		return client.JobResult{}, resultErr
+		return terminalJobResult{}, resultErr
 	}
-	if statusFound && result.ModelReported == "" {
-		result.ModelReported = statusJob.ModelReported
-	}
-	result.CleanupDisposition = cleanupDispositionFromResultAndStatus(result, statusJob, statusFound)
+	terminalJob := terminalJobResultFromResultAndStatus(result, statusJob, statusFound)
+	result = terminalJob.result
 	if !engine.IsTerminal(result.State) {
 		if statusFound && engine.IsTerminal(statusJob.State) {
 			if err := cleanupJobInput(stateDir, statusJob.JobID, statusJob.SessionID, statusJob.State, statusJob.CleanupDisposition, cleanupWarnings); err != nil {
-				return client.JobResult{}, err
+				return terminalJobResult{}, err
 			}
 			return terminalJobResultFromStatus(statusJob), nil
 		}
-		return client.JobResult{}, fmt.Errorf("submitted job %s reported terminal state but job.result returned %q", jobID, result.State)
+		return terminalJobResult{}, fmt.Errorf("submitted job %s reported terminal state but job.result returned %q", jobID, result.State)
 	}
 	if err := cleanupJobInput(stateDir, result.JobID, result.SessionID, result.State, result.CleanupDisposition, cleanupWarnings); err != nil {
-		return client.JobResult{}, err
+		return terminalJobResult{}, err
 	}
-	return result, nil
+	terminalJob.result = result
+	return terminalJob, nil
+}
+
+func submittedTerminalJobResult(ctx context.Context, c agentbusClient, stateDir, jobID string, cleanupWarnings *localCleanupWarnings) (client.JobResult, error) {
+	result, err := submittedTerminalJob(ctx, c, stateDir, jobID, cleanupWarnings)
+	return result.result, err
 }
 
 func nextJobPollInterval(interval time.Duration) time.Duration {
@@ -352,21 +405,26 @@ func nextJobPollInterval(interval time.Duration) time.Duration {
 	return next
 }
 
-func terminalJobResultFallback(ctx context.Context, c agentbusClient, stateDir, jobID string, resultErr error, cleanupWarnings *localCleanupWarnings) (client.JobResult, error) {
+func terminalJobResultFallbackWithStatus(ctx context.Context, c agentbusClient, stateDir, jobID string, resultErr error, cleanupWarnings *localCleanupWarnings) (terminalJobResult, error) {
 	status, statusErr := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
 	if statusErr != nil {
-		return client.JobResult{}, resultErr
+		return terminalJobResult{}, resultErr
 	}
 	cleanupStatuses(stateDir, status, cleanupWarnings)
 	job, found := findJobStatus(status, jobID)
 	if !found || !engine.IsTerminal(job.State) {
-		return client.JobResult{}, resultErr
+		return terminalJobResult{}, resultErr
 	}
 	return terminalJobResultFromStatus(job), nil
 }
 
-func terminalJobResultFromStatus(job client.JobStatus) client.JobResult {
-	return client.JobResult{JobID: job.JobID, SessionID: job.SessionID, State: job.State, CleanupDisposition: job.CleanupDisposition, ModelReported: job.ModelReported}
+func terminalJobResultFallback(ctx context.Context, c agentbusClient, stateDir, jobID string, resultErr error, cleanupWarnings *localCleanupWarnings) (client.JobResult, error) {
+	result, err := terminalJobResultFallbackWithStatus(ctx, c, stateDir, jobID, resultErr, cleanupWarnings)
+	return result.result, err
+}
+
+func terminalJobResultEnvelopeInputFromStatus(job client.JobStatus) client.JobResult {
+	return client.JobResult{JobID: job.JobID, SessionID: job.SessionID, State: job.State, CleanupDisposition: job.CleanupDisposition, LateFinalization: job.LateFinalization, ModelReported: job.ModelReported}
 }
 
 func cleanupDispositionFromResultAndStatus(result client.JobResult, statusJob client.JobStatus, statusFound bool) string {
@@ -454,6 +512,10 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 	if err != nil {
 		return TerminalEnvelope{}, err
 	}
+	cleanupDisposition := option.CleanupDisposition
+	if cleanupDisposition == "" {
+		cleanupDisposition = result.CleanupDisposition
+	}
 	kind := taskKind
 	contractKind := contractKindShape
 	if found {
@@ -462,6 +524,12 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 		}
 		if meta.ContractKind != "" {
 			contractKind = meta.ContractKind
+		}
+		if cleanupDisposition == "" {
+			cleanupDisposition = meta.CleanupDisposition
+		}
+		if localArtifactsRetainedFromMetadata(meta, result.State, cleanupDisposition) {
+			option.LocalArtifactsRetained = true
 		}
 	}
 	stamp := skippedDelegateContractStamp(engine.SkipResultUnavailable)
@@ -501,7 +569,13 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 	option.ModelEffort = modelEffort
 	option.ModelReported = result.ModelReported
 	option.Origin = origin
+	option.CleanupDisposition = cleanupDisposition
+	option.LateFinalization = option.LateFinalization || result.LateFinalization
 	return newTerminalEnvelope(result.JobID, result.State, kind, contractKind, stamp, resultSHA256, backendError, option)
+}
+
+func localArtifactsRetainedFromMetadata(meta jobMetadata, state engine.JobState, cleanupDisposition string) bool {
+	return engine.IsTerminal(state) && !localCleanupSafe(cleanupDisposition) && (meta.JobInputPath != "" || meta.ReviewWorkspace != "")
 }
 
 func skippedDelegateContractStamp(reason engine.SkippedReason) engine.ContractStamp {

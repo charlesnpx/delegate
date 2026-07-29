@@ -48,6 +48,10 @@ type TerminalEnvelope struct {
 	Status                         engine.JobState            `json:"status"`
 	Deduplicated                   bool                       `json:"deduplicated"`
 	SubmissionDeduplicated         bool                       `json:"submission_deduplicated"`
+	CleanupDisposition             string                     `json:"cleanup_disposition,omitempty"`
+	LateFinalization               bool                       `json:"late_finalization,omitempty"`
+	AgentbusWarnings               []string                   `json:"agentbus_warnings,omitempty"`
+	LocalArtifactsRetained         bool                       `json:"local_artifacts_retained,omitempty"`
 	Kind                           string                     `json:"kind"`
 	ContractKind                   string                     `json:"contractKind"`
 	Contract                       engine.ContractStamp       `json:"contract"`
@@ -63,17 +67,19 @@ type TerminalEnvelope struct {
 }
 
 type terminalEnvelopeOptions struct {
-	ModelEffort           config.ModelEffortResolution
-	ModelReported         string
-	ModelsReportedCapable bool
-	Origin                envelopeOrigin
-	RequestID             string
-	Deduplicated          bool
-	DeduplicatedSet       bool
+	ModelEffort            config.ModelEffortResolution
+	ModelReported          string
+	ModelsReportedCapable  bool
+	Origin                 envelopeOrigin
+	RequestID              string
+	Deduplicated           bool
+	DeduplicatedSet        bool
+	CleanupDisposition     string
+	LateFinalization       bool
+	AgentbusWarnings       []string
+	LocalArtifactsRetained bool
 }
 
-// TODO(D6): extend schema-2 envelopes with cleanup disposition, late finalization,
-// agentbus warnings, retained-artifact state, and orphaned-specific result reasons.
 type launchEnvelopeOptions struct {
 	ModelEffort  config.ModelEffortResolution
 	Origin       envelopeOrigin
@@ -89,6 +95,10 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		Status                         engine.JobState            `json:"status"`
 		Deduplicated                   bool                       `json:"deduplicated"`
 		SubmissionDeduplicated         bool                       `json:"submission_deduplicated"`
+		CleanupDisposition             string                     `json:"cleanup_disposition,omitempty"`
+		LateFinalization               bool                       `json:"late_finalization,omitempty"`
+		AgentbusWarnings               []string                   `json:"agentbus_warnings,omitempty"`
+		LocalArtifactsRetained         bool                       `json:"local_artifacts_retained,omitempty"`
 		Kind                           string                     `json:"kind"`
 		ContractKind                   string                     `json:"contractKind"`
 		Contract                       map[string]any             `json:"contract"`
@@ -109,6 +119,10 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		Status:                         e.Status,
 		Deduplicated:                   e.Deduplicated,
 		SubmissionDeduplicated:         e.SubmissionDeduplicated,
+		CleanupDisposition:             e.CleanupDisposition,
+		LateFinalization:               e.LateFinalization,
+		AgentbusWarnings:               e.AgentbusWarnings,
+		LocalArtifactsRetained:         e.LocalArtifactsRetained,
 		Kind:                           e.Kind,
 		ContractKind:                   e.ContractKind,
 		Contract:                       contractStampEnvelopeValue(e.Contract),
@@ -191,6 +205,10 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 		Status:                         state,
 		Deduplicated:                   option.Deduplicated,
 		SubmissionDeduplicated:         option.Deduplicated,
+		CleanupDisposition:             option.CleanupDisposition,
+		LateFinalization:               option.LateFinalization,
+		AgentbusWarnings:               append([]string(nil), option.AgentbusWarnings...),
+		LocalArtifactsRetained:         option.LocalArtifactsRetained,
 		Kind:                           kind,
 		ContractKind:                   contractKind,
 		Contract:                       stamp,
@@ -204,7 +222,7 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 	if resultSHA256 != "" {
 		env.ResultSHA256 = &resultSHA256
 	} else {
-		env.ResultUnavailableReason = "result_unavailable"
+		env.ResultUnavailableReason = resultUnavailableReason(state)
 	}
 	sum, err := envelopeSHA256(env)
 	if err != nil {
@@ -212,6 +230,41 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 	}
 	env.SHA256 = sum
 	return env, nil
+}
+
+func resultUnavailableReason(state engine.JobState) string {
+	switch state {
+	case engine.StateCompleted:
+		return "completed_without_result"
+	case engine.StateCompletedNoncompliant:
+		return "completed_noncompliant_without_result"
+	case engine.StateFailed:
+		return "failed_without_result"
+	case engine.StateTimedOut:
+		return "timed_out_without_result"
+	case engine.StateInterrupted:
+		return "interrupted_without_result"
+	case engine.StateCanceled:
+		return "canceled_without_result"
+	case engine.StateOrphaned:
+		return "orphaned_without_result"
+	case engine.StateReaped:
+		return "reaped_without_result"
+	case engine.StateQuarantined:
+		return "quarantined_without_result"
+	case engine.StateQueued:
+		return "queued_without_result"
+	case engine.StateStarting:
+		return "starting_without_result"
+	case engine.StateRunning:
+		return "running_without_result"
+	case engine.StateRetrying:
+		return "retrying_without_result"
+	case "":
+		return "state_unknown_without_result"
+	default:
+		return string(state) + "_without_result"
+	}
 }
 
 func normalizedModelEffort(values ...config.ModelEffortResolution) config.ModelEffortResolution {

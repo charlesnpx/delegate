@@ -732,22 +732,22 @@ func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.
 	}
 	cleanupWarnings := newLocalCleanupWarnings(stderr)
 	if engine.IsTerminal(submitted.State) {
-		jobResult, err := submittedTerminalJobResult(ctx, c, opts.StateDir, submitted.JobID, cleanupWarnings)
+		jobResult, err := submittedTerminalJob(ctx, c, opts.StateDir, submitted.JobID, cleanupWarnings)
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
-		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, jobResult, terminalOptions)
+		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, jobResult.result, jobResult.envelopeOptions(terminalOptions))
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
 		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
 	}
 	if opts.Wait {
-		jobResult, err := waitForJobResult(ctx, c, opts.StateDir, submitted.JobID, cleanupWarnings)
+		jobResult, err := waitForTerminalJobResult(ctx, c, opts.StateDir, submitted.JobID, cleanupWarnings)
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
-		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, jobResult, terminalOptions)
+		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, jobResult.result, jobResult.envelopeOptions(terminalOptions))
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}

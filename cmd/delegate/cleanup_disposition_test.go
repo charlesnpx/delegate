@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
@@ -67,6 +69,158 @@ func TestCanceledUnresolvedCleanupRetainsArtifacts(t *testing.T) {
 	code := run([]string{"result", "--job", jobID, "--json"}, nil, &stdout, &stderr)
 	if code != engine.ExitCodeForState(engine.StateCanceled) {
 		t.Fatalf("result code=%d stderr=%q stdout=%q, want canceled exit", code, stderr.String(), stdout.String())
+	}
+	assertPathExists(t, inputPath)
+	assertPathExists(t, workspace)
+	assertCleanupWarning(t, stderr.String(), cleanupDispositionUnresolvedWarning)
+}
+
+func TestOrphanedTerminalWaitStopsEmitsEnvelopeAndRetainsArtifacts(t *testing.T) {
+	jobID := "job_orphaned_unresolved"
+	fake := &fakeAgentbusClient{
+		hello:     helloWithCapabilities(),
+		resultErr: errors.New("orphaned job has no result"),
+		status: client.JobStatusResult{Jobs: []client.JobStatus{{
+			JobID:              jobID,
+			SessionID:          "session_orphaned_unresolved",
+			State:              engine.StateOrphaned,
+			CleanupDisposition: cleanupDispositionUnresolved,
+			LateFinalization:   true,
+			Warnings:           []string{"lease expired before backend result was finalized"},
+		}}},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	_, inputPath, workspace := prepareCleanupDispositionArtifacts(t, jobID)
+
+	oldSleep := jobPollSleep
+	sleepCalls := 0
+	jobPollSleep = func(context.Context, time.Duration) error {
+		sleepCalls++
+		return errors.New("unexpected poll sleep after orphaned terminal status")
+	}
+	defer func() { jobPollSleep = oldSleep }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"result", "--job", jobID, "--wait", "--json"}, nil, &stdout, &stderr)
+	if code != engine.ExitCodeForState(engine.StateOrphaned) {
+		t.Fatalf("result code=%d stderr=%q stdout=%q, want orphaned exit", code, stderr.String(), stdout.String())
+	}
+	if code != 14 {
+		t.Fatalf("orphaned exit code=%d, want 14", code)
+	}
+	if sleepCalls != 0 {
+		t.Fatalf("poll sleep calls=%d, want wait to stop on orphaned", sleepCalls)
+	}
+	if len(fake.results) != 1 || len(fake.statuses) != 1 {
+		t.Fatalf("RPC calls results=%#v statuses=%#v, want one result attempt and one status fallback", fake.results, fake.statuses)
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON: %v; raw=%q", err, stdout.String())
+	}
+	if env.Status != engine.StateOrphaned || env.CleanupDisposition != cleanupDispositionUnresolved || !env.LocalArtifactsRetained {
+		t.Fatalf("orphaned envelope=%#v, want orphaned unresolved retained", env)
+	}
+	if env.ResultSHA256 != nil || env.ResultUnavailableReason != "orphaned_without_result" {
+		t.Fatalf("orphaned result fields=%#v reason=%q, want no fabricated result", env.ResultSHA256, env.ResultUnavailableReason)
+	}
+	if !env.LateFinalization || len(env.AgentbusWarnings) != 1 || env.AgentbusWarnings[0] != "lease expired before backend result was finalized" {
+		t.Fatalf("orphaned agentbus fields=%#v late=%v", env.AgentbusWarnings, env.LateFinalization)
+	}
+	assertPathExists(t, inputPath)
+	assertPathExists(t, workspace)
+	assertCleanupWarning(t, stderr.String(), cleanupDispositionUnresolvedWarning)
+}
+
+func TestTerminalEnvelopeSchema2FieldsFromResultAndStatus(t *testing.T) {
+	jobID := "job_terminal_schema2"
+	resultSHA := strings.Repeat("e", 64)
+	fake := &fakeAgentbusClient{
+		hello: helloWithCapabilities(),
+		result: client.JobResult{
+			JobID:     jobID,
+			SessionID: "session_terminal_schema2",
+			State:     engine.StateCompleted,
+			Result:    &engine.ResultInfo{SHA256: resultSHA},
+		},
+		status: client.JobStatusResult{Jobs: []client.JobStatus{{
+			JobID:              jobID,
+			SessionID:          "session_terminal_schema2",
+			State:              engine.StateCompleted,
+			CleanupDisposition: cleanupDispositionUnresolved,
+			LateFinalization:   true,
+			Warnings:           []string{"cleanup could not prove absence"},
+		}}},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	_, inputPath, workspace := prepareCleanupDispositionArtifacts(t, jobID)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"result", "--job", jobID, "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("result code=%d stderr=%q stdout=%q, want success", code, stderr.String(), stdout.String())
+	}
+	if len(fake.statuses) != 1 {
+		t.Fatalf("JobStatus calls=%#v, want one reused terminal status lookup", fake.statuses)
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON: %v; raw=%q", err, stdout.String())
+	}
+	if env.CleanupDisposition != cleanupDispositionUnresolved || !env.LocalArtifactsRetained || !env.LateFinalization {
+		t.Fatalf("terminal schema-2 fields=%#v", env)
+	}
+	if len(env.AgentbusWarnings) != 1 || env.AgentbusWarnings[0] != "cleanup could not prove absence" {
+		t.Fatalf("agentbus_warnings=%#v", env.AgentbusWarnings)
+	}
+	if env.ResultSHA256 == nil || *env.ResultSHA256 != resultSHA || env.ResultUnavailableReason != "" {
+		t.Fatalf("result fields sha=%#v reason=%q", env.ResultSHA256, env.ResultUnavailableReason)
+	}
+	assertPathExists(t, inputPath)
+	assertPathExists(t, workspace)
+	assertCleanupWarning(t, stderr.String(), cleanupDispositionUnresolvedWarning)
+}
+
+func TestTerminalEnvelopeSchema2FieldsFromStatusFallback(t *testing.T) {
+	jobID := "job_status_fallback_schema2"
+	fake := &fakeAgentbusClient{
+		hello:     helloWithCapabilities(),
+		resultErr: errors.New("terminal result unavailable"),
+		status: client.JobStatusResult{Jobs: []client.JobStatus{{
+			JobID:              jobID,
+			SessionID:          "session_status_fallback_schema2",
+			State:              engine.StateFailed,
+			CleanupDisposition: cleanupDispositionUnresolved,
+			LateFinalization:   true,
+			Warnings:           []string{"terminal status was recovered without a result"},
+		}}},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	_, inputPath, workspace := prepareCleanupDispositionArtifacts(t, jobID)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"result", "--job", jobID, "--json"}, nil, &stdout, &stderr)
+	if code != engine.ExitCodeForState(engine.StateFailed) {
+		t.Fatalf("result code=%d stderr=%q stdout=%q, want failed exit", code, stderr.String(), stdout.String())
+	}
+	if len(fake.results) != 1 || len(fake.statuses) != 1 {
+		t.Fatalf("RPC calls results=%#v statuses=%#v, want one result attempt and one status fallback", fake.results, fake.statuses)
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON: %v; raw=%q", err, stdout.String())
+	}
+	if env.Status != engine.StateFailed || env.CleanupDisposition != cleanupDispositionUnresolved || !env.LocalArtifactsRetained || !env.LateFinalization {
+		t.Fatalf("fallback schema-2 fields=%#v", env)
+	}
+	if len(env.AgentbusWarnings) != 1 || env.AgentbusWarnings[0] != "terminal status was recovered without a result" {
+		t.Fatalf("fallback agentbus_warnings=%#v", env.AgentbusWarnings)
+	}
+	if env.ResultSHA256 != nil || env.ResultUnavailableReason != "failed_without_result" {
+		t.Fatalf("fallback result fields sha=%#v reason=%q", env.ResultSHA256, env.ResultUnavailableReason)
 	}
 	assertPathExists(t, inputPath)
 	assertPathExists(t, workspace)
