@@ -46,7 +46,8 @@ Each unit lands with its own behavioral tests. D8 is the black-box closure, not 
 - **D4** ✅ `76b246b` — dedup/already-terminal + schema-2 envelope base. gate green.
 - **D5** ✅ `87cb872` + fix `99ddc1d` — cleanup-disposition safety gate. D4+D5 combined review: iter1 FIX (1 High: wait-loop cleanup ignored status-disposition fallback → over-retention on `--wait`; accepted+fixed), iter2 SHIP. gate green.
 - **Review-backend note:** gpt-5.6-sol hit a sustained capacity outage mid-campaign; reviews were batched into integration passes (D2+D3, D4+D5) and resumed across capacity retries. Codex is single-active-task → workers and reviews serialize; the D4∥D5 parallel plan was dropped (also overlapping files).
-- **Next:** D6 (envelope schema-2 completion + orphaned exit-14) → D7 → D8.
+- **D6** ✅ `f0ffd59` — schema-2 envelope completion + orphaned first-class (exit 14, no fabricated result, status-fallback parity). review1 SHIP. gate green.
+- **Next:** D7 (cancel→status/result + wait/poll reclassification) → D8 closure.
 
 ---
 
