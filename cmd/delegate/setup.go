@@ -119,7 +119,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	ready := capabilitiesOK && preflight.AgentbusStateRootWritable && preflight.AgentbusAutostartLockRootWritable
+	ready := capabilitiesOK && preflight.StateRootWritable && preflight.AgentbusStateRootWritable && preflight.AgentbusAutostartLockRootWritable
 	readinessErr := setupReadinessError(hello, version, missingCapabilities, preflight)
 	if *jsonOut {
 		err := writeJSONLine(stdout, setupJSON{
@@ -225,6 +225,9 @@ func setupReadinessError(hello client.HelloResult, version string, missingCapabi
 	}
 	if !preflight.AgentbusAutostartLockRootWritable {
 		errs = append(errs, setupWritableReadinessError("agentbus autostart lock root", preflight.AgentbusAutostartLockRoot))
+	}
+	if !preflight.StateRootWritable {
+		errs = append(errs, setupWritableReadinessError("delegate state root", preflight.DelegateStateRoot))
 	}
 	return errors.Join(errs...)
 }

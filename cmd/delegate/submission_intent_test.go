@@ -375,6 +375,186 @@ func TestRecoverRequestRestoresCrashAfterResponseJobMapping(t *testing.T) {
 	}
 }
 
+func TestRecoverRequestRestoresHandoffPayloadAndSafeCleanup(t *testing.T) {
+	jobID := "job_recovered_handoff_cleanup"
+	report := compliantReport()
+	fake := &fakeAgentbusClient{
+		hello:     helloWithCapabilities(),
+		submitErr: errors.New("lost response after accept"),
+		submitResult: client.JobSubmitResult{
+			JobID: jobID,
+			State: engine.StateCompleted,
+		},
+		result: client.JobResult{
+			JobID:              jobID,
+			State:              engine.StateCompleted,
+			CleanupDisposition: cleanupDispositionVerifiedAbsent,
+			Result:             &engine.ResultInfo{Text: report, SHA256: strings.Repeat("d", 64), Bytes: int64(len(report))},
+			Contract:           ptr(compliantContractStamp(t, report)),
+		},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoffResult, err := handoff.Create(handoff.CreateOptions{
+		StateDir: stateDir,
+		Reader:   strings.NewReader("recover handoff prompt"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--handoff-prompt-file", handoffResult.HandoffPath, "--background", "--json"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("initial task code=0, want unresolved submission; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if len(fake.submits) != maxSubmissionAttempts {
+		t.Fatalf("initial submits=%d, want %d", len(fake.submits), maxSubmissionAttempts)
+	}
+	requestID := fake.submits[0].RequestID
+	if combined := stdout.String() + stderr.String(); !strings.Contains(combined, "delegate task --recover-request "+requestID) {
+		t.Fatalf("output=%q, want recovery command for %s", combined, requestID)
+	}
+	if _, err := os.Stat(handoffResult.HandoffPath); err != nil {
+		t.Fatalf("handoff payload after unresolved submit: %v", err)
+	}
+	intent, found, err := loadSubmissionIntent(stateDir, requestID)
+	if err != nil || !found {
+		t.Fatalf("load intent found=%v err=%v", found, err)
+	}
+	if intent.Phase != submissionPhaseBlocked || !intent.HandoffSource || intent.HandoffPayloadPath != handoffResult.HandoffPath {
+		t.Fatalf("intent=%#v, want blocked handoff source with payload %q", intent, handoffResult.HandoffPath)
+	}
+	if _, found, err := loadJobMetadata(stateDir, jobID); err != nil || found {
+		t.Fatalf("metadata found=%v err=%v, want no acknowledgement metadata before recovery", found, err)
+	}
+	matches, err := filepath.Glob(filepath.Join(stateDir, "job-input.*.prompt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("job inputs before recovery=%#v, want none", matches)
+	}
+
+	fake.submitErr = nil
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"task", "--recover-request", requestID, "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("recover code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if env.JobID != jobID || env.CleanupDisposition != cleanupDispositionVerifiedAbsent || env.LocalArtifactsRetained {
+		t.Fatalf("terminal envelope=%#v, want safe cleanup and local_artifacts_retained=false", env)
+	}
+	if _, err := os.Stat(handoffResult.HandoffPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("handoff payload after safe recovery cleanup: %v, want removed", err)
+	}
+	matches, err = filepath.Glob(filepath.Join(stateDir, "job-input.*.prompt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("job inputs after safe recovery cleanup=%#v, want none", matches)
+	}
+	meta, found, err := loadJobMetadata(stateDir, jobID)
+	if err != nil || !found {
+		t.Fatalf("metadata found=%v err=%v after recovery", found, err)
+	}
+	if meta.JobInputPath != "" || meta.CleanupDisposition != cleanupDispositionVerifiedAbsent {
+		t.Fatalf("metadata=%#v, want cleaned job input and verified_absent disposition", meta)
+	}
+	lastSubmit := fake.submits[len(fake.submits)-1]
+	if len(fake.submits) != maxSubmissionAttempts+1 || lastSubmit.RequestID != requestID || lastSubmit.TaskSpec.Prompt != "recover handoff prompt" {
+		t.Fatalf("recovery submit=%#v, want same request and prompt", fake.submits)
+	}
+}
+
+func TestRecoverRequestRestoresNoContractForBackendFailure(t *testing.T) {
+	jobID := "job_recovered_no_contract_failure"
+	logDir := t.TempDir()
+	stderrLog := filepath.Join(logDir, "backend.err")
+	if err := os.WriteFile(stderrLog, []byte("backend exploded\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAgentbusClient{
+		hello:     helloWithCapabilities(),
+		submitErr: errors.New("lost response after accept"),
+		submitResult: client.JobSubmitResult{
+			JobID: jobID,
+			State: engine.StateFailed,
+		},
+		status: client.JobStatusResult{Jobs: []client.JobStatus{{
+			JobID:              jobID,
+			State:              engine.StateFailed,
+			CleanupDisposition: cleanupDispositionVerifiedAbsent,
+			LogPaths:           engine.LogPaths{Stderr: stderrLog},
+		}}},
+		result: client.JobResult{
+			JobID:              jobID,
+			State:              engine.StateFailed,
+			CleanupDisposition: cleanupDispositionVerifiedAbsent,
+		},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "recover no-contract prompt", "--no-contract", "--background", "--json"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("initial task code=0, want unresolved submission; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if len(fake.submits) != maxSubmissionAttempts {
+		t.Fatalf("initial submits=%d, want %d", len(fake.submits), maxSubmissionAttempts)
+	}
+	requestID := fake.submits[0].RequestID
+	intent, found, err := loadSubmissionIntent(stateDir, requestID)
+	if err != nil || !found {
+		t.Fatalf("load intent found=%v err=%v", found, err)
+	}
+	if !intent.NoContract || intent.Params.TaskSpec.Policy != nil {
+		t.Fatalf("intent=%#v, want durable no-contract request with nil policy", intent)
+	}
+
+	fake.submitErr = nil
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"task", "--recover-request", requestID, "--json"}, nil, &stdout, &stderr)
+	if want := engine.ExitCodeForState(engine.StateFailed); code != want {
+		t.Fatalf("recover code=%d stderr=%q stdout=%q, want %d", code, stderr.String(), stdout.String(), want)
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if env.ContractKind != contractKindNone || env.Contract.Status != engine.ContractDisabled || env.Contract.Reason != policy.NoContractFlagReason {
+		t.Fatalf("contract stamp=%#v kind=%q, want disabled/no_contract_flag", env.Contract, env.ContractKind)
+	}
+	if env.BackendError == "" {
+		t.Fatalf("terminal envelope=%#v, want captured backend error", env)
+	}
+	meta, found, err := loadJobMetadata(stateDir, jobID)
+	if err != nil || !found {
+		t.Fatalf("metadata found=%v err=%v after recovery", found, err)
+	}
+	if !meta.NoContract {
+		t.Fatalf("metadata=%#v, want no_contract=true after recovery acknowledgement", meta)
+	}
+}
+
 func TestRecoverRequestReplayConflictPreservesIntentAndDoesNotMintID(t *testing.T) {
 	bus := newReplayAdmissionBus()
 	restore := stubReplayAdmissionBus(t, bus)

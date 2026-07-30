@@ -152,3 +152,48 @@ func TestSetupReadyRequiresWritableAgentbusStateRoot(t *testing.T) {
 		t.Fatalf("stderr=%q, want failed Agentbus state root check and path %q", stderr.String(), stateRoot)
 	}
 }
+
+func TestSetupReadyRequiresWritableDelegateStateRoot(t *testing.T) {
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	t.Setenv("HOME", t.TempDir())
+	agentbusRoot := filepath.Join(t.TempDir(), "agentbus")
+	if err := os.MkdirAll(agentbusRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTBUS_STATE_ROOT", agentbusRoot)
+	xdgState := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", xdgState)
+	delegateRoot := filepath.Join(xdgState, "delegate")
+	if err := os.MkdirAll(delegateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(delegateRoot, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(delegateRoot, 0o700)
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("setup succeeded, want nonzero exit for non-writable Delegate state root")
+	}
+	var result setupJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if !result.Agentbus.CapabilitiesOK || !result.AdmissionStrictContainment {
+		t.Fatalf("setup capabilities=%#v strict=%t, want compliant daemon", result.Agentbus, result.AdmissionStrictContainment)
+	}
+	if result.Ready || result.StateRootWritable {
+		t.Fatalf("setup ready=%t stateRootWritable=%t, want both false", result.Ready, result.StateRootWritable)
+	}
+	if !result.AgentbusStateRootWritable || !result.AgentbusAutostartLockRootWritable {
+		t.Fatalf("agentbus writable fields = state:%t lock:%t, want only delegate state check to fail", result.AgentbusStateRootWritable, result.AgentbusAutostartLockRootWritable)
+	}
+	if !strings.Contains(stderr.String(), "delegate state root is not writable") || !strings.Contains(stderr.String(), delegateRoot) {
+		t.Fatalf("stderr=%q, want failed Delegate state root check and path %q", stderr.String(), delegateRoot)
+	}
+}

@@ -458,21 +458,31 @@ func prepareNewSubmissionIntent(opts taskOptions, resolved handoff.ResolvedPromp
 	modelEffort := normalizedModelEffort(taskModelEffort(opts))
 	now := time.Now().UTC()
 	return submissionIntent{
-		Schema:            submissionIntentSchema,
-		RequestID:         requestID,
-		WorkspaceKey:      workspaceKey,
-		AgentbusStateRoot: opts.AgentbusStateRoot,
-		Params:            params,
-		Kind:              effectiveTaskKind(opts),
-		ContractKind:      contractKindForPolicy(turnPolicy, opts.NoContract),
-		Model:             modelEffort.Model,
-		Effort:            modelEffort.Effort,
-		Origin:            envelopeOriginPointer(taskEnvelopeOrigin(opts)),
-		ReviewWorkspace:   opts.ReviewWorkspace,
-		Phase:             submissionPhasePrepared,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		Schema:             submissionIntentSchema,
+		RequestID:          requestID,
+		WorkspaceKey:       workspaceKey,
+		AgentbusStateRoot:  opts.AgentbusStateRoot,
+		Params:             params,
+		Kind:               effectiveTaskKind(opts),
+		ContractKind:       contractKindForPolicy(turnPolicy, opts.NoContract),
+		NoContract:         opts.NoContract,
+		HandoffSource:      resolved.Source == handoff.SourceHandoffPromptFile,
+		HandoffPayloadPath: handoffPayloadPathForIntent(resolved),
+		Model:              modelEffort.Model,
+		Effort:             modelEffort.Effort,
+		Origin:             envelopeOriginPointer(taskEnvelopeOrigin(opts)),
+		ReviewWorkspace:    opts.ReviewWorkspace,
+		Phase:              submissionPhasePrepared,
+		CreatedAt:          now,
+		UpdatedAt:          now,
 	}, nil
+}
+
+func handoffPayloadPathForIntent(resolved handoff.ResolvedPrompt) string {
+	if resolved.Source != handoff.SourceHandoffPromptFile {
+		return ""
+	}
+	return resolved.HandoffPath
 }
 
 func submitIntentWithRetry(ctx context.Context, c agentbusClient, hello client.HelloResult, stateDir string, intent *submissionIntent, requiredCapabilities []string) (client.JobSubmitResult, agentbusClient, client.HelloResult, error) {
@@ -566,7 +576,7 @@ func recoverTaskSubmission(opts taskOptions, stderr io.Writer) (taskRunResult, e
 	taskOpts := taskOptionsFromIntent(opts.StateDir, intent, submitted)
 	taskOpts.Wait = opts.Wait
 	var warnings []string
-	resolved := handoff.ResolvedPrompt{Prompt: intent.Params.TaskSpec.Prompt, Source: handoff.SourcePrompt}
+	resolved := resolvedPromptFromIntent(intent)
 	ackWarnings, acknowledged, err := acknowledgeSubmittedTask(taskOpts, resolved, submitted, intent.ContractKind, "after recovery")
 	warnings = append(warnings, ackWarnings...)
 	if err != nil {
@@ -602,6 +612,7 @@ func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted c
 		Model:             spec.Model,
 		Effort:            spec.Effort,
 		Write:             spec.Write,
+		NoContract:        intent.NoContract,
 		StateDir:          stateDir,
 		Kind:              intent.Kind,
 		ReviewWorkspace:   intent.ReviewWorkspace,
@@ -613,6 +624,15 @@ func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted c
 		SubmissionState:   submitted.State,
 		Deduplicated:      submitted.Deduplicated,
 	}
+}
+
+func resolvedPromptFromIntent(intent submissionIntent) handoff.ResolvedPrompt {
+	resolved := handoff.ResolvedPrompt{Prompt: intent.Params.TaskSpec.Prompt, Source: handoff.SourcePrompt}
+	if intent.HandoffSource {
+		resolved.Source = handoff.SourceHandoffPromptFile
+		resolved.HandoffPath = intent.HandoffPayloadPath
+	}
+	return resolved
 }
 
 func persistDelegateJobInputWithoutPayloadCleanup(opts taskOptions, resolved handoff.ResolvedPrompt, jobID string) (handoff.JobInput, error) {

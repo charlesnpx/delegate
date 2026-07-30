@@ -26,23 +26,26 @@ const (
 )
 
 type submissionIntent struct {
-	Schema            int                        `json:"schema"`
-	RequestID         string                     `json:"request_id"`
-	WorkspaceKey      string                     `json:"workspace_key"`
-	AgentbusStateRoot string                     `json:"agentbus_state_root"`
-	Params            client.JobSubmitParams     `json:"params"`
-	Kind              string                     `json:"kind"`
-	ContractKind      string                     `json:"contractKind"`
-	Model             config.DimensionResolution `json:"model,omitempty"`
-	Effort            config.DimensionResolution `json:"effort,omitempty"`
-	Origin            *envelopeOrigin            `json:"origin,omitempty"`
-	ReviewWorkspace   string                     `json:"review_workspace,omitempty"`
-	Phase             string                     `json:"phase"`
-	JobID             string                     `json:"job_id,omitempty"`
-	Deduplicated      bool                       `json:"deduplicated,omitempty"`
-	LastError         *agentbusError             `json:"last_error,omitempty"`
-	CreatedAt         time.Time                  `json:"created_at"`
-	UpdatedAt         time.Time                  `json:"updated_at"`
+	Schema             int                        `json:"schema"`
+	RequestID          string                     `json:"request_id"`
+	WorkspaceKey       string                     `json:"workspace_key"`
+	AgentbusStateRoot  string                     `json:"agentbus_state_root"`
+	Params             client.JobSubmitParams     `json:"params"`
+	Kind               string                     `json:"kind"`
+	ContractKind       string                     `json:"contractKind"`
+	NoContract         bool                       `json:"no_contract,omitempty"`
+	HandoffSource      bool                       `json:"handoff_source,omitempty"`
+	HandoffPayloadPath string                     `json:"handoff_payload_path,omitempty"`
+	Model              config.DimensionResolution `json:"model,omitempty"`
+	Effort             config.DimensionResolution `json:"effort,omitempty"`
+	Origin             *envelopeOrigin            `json:"origin,omitempty"`
+	ReviewWorkspace    string                     `json:"review_workspace,omitempty"`
+	Phase              string                     `json:"phase"`
+	JobID              string                     `json:"job_id,omitempty"`
+	Deduplicated       bool                       `json:"deduplicated,omitempty"`
+	LastError          *agentbusError             `json:"last_error,omitempty"`
+	CreatedAt          time.Time                  `json:"created_at"`
+	UpdatedAt          time.Time                  `json:"updated_at"`
 }
 
 type agentbusError struct {

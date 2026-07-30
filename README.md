@@ -115,7 +115,7 @@ v0.6.0 retains the breaking namespace rename. On install or upgrade, the managed
 
 Delegate resolves Agentbus state with the same rule for setup, launch, recovery, status, result, cancel, and Codex sandbox configuration: `AGENTBUS_STATE_ROOT` when set, otherwise `${XDG_STATE_HOME:-~/.local/state}/agentbus`. The resolved root is persisted in submission intents and acknowledged job metadata. `delegate task --recover-request <request-id>` reconnects to the request's recorded root and resubmits the exact persisted `job.submit` parameters; it does not reconstruct prompts, timeouts, policy, model, effort, or tags from current flags.
 
-`status`, `result`, and `cancel` use the job metadata's recorded Agentbus root when available and otherwise use the current resolved root. `status --all` uses only the current resolved root. Delegate never scans arbitrary roots and never performs Agentbus admission recovery, reset, seal, or fail-stop clearing automatically.
+`status`, `result`, and `cancel` use the job metadata's recorded Agentbus root when available and otherwise use the current resolved root. Running `delegate status` without `--job` lists all jobs from only the current resolved root. Delegate never scans arbitrary roots and never performs Agentbus admission recovery, reset, seal, or fail-stop clearing automatically.
 
 ## Envelope Reference
 
