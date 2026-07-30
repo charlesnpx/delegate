@@ -173,3 +173,15 @@ Base SHA: `e1b03246` (branch `delegate-v0.6-protocol-v2-cut`). Risk: medium. Fol
 **Deliberately rejected from the review (overengineering / excessive tests / low-value):** a "supported schema version" recovery check (no v2 intent schema exists — YAGNI); rebuilding the agentbus binary smoke into a hermetic checkout (accepted-scope local dev smoke; only fix the PR-body wording that overstates its skip guard); wiring/removing the dead-code `cmd/delegate` `sweepTerminalJobInputs` wrapper (low-priority disk hygiene, deferred); installer `--plan` state-root/lock-root accuracy (low, deferred). The upstream note (agentbus v0.6 authority projection not yet populating warnings/contract/model) is forward-compatible plumbing, not a delegate defect.
 
 - **Gates:** `go build ./...`=0, `gofmt -l` empty, `go vet ./...`, full `go test ./...`; focused regression tests for each of F1-F5. Review: gpt-5.6-sol high, refute-first, SHA-bound, max 4 iterations.
+
+### D10 — COMPLETE (local, unpushed)
+- **Impl:** gpt-5.5 xhigh worker → all five fixes F1-F5 in `cmd/delegate/*.go` (+8 focused regression tests). Commit `1a36102`.
+- **Review round 1** (gpt-5.6-sol high, SHA-bound `9c3b9de..1a36102`): FIX — 3 High, all accepted as reachable defects introduced by the diff:
+  - H1: retry-branch reconnect+persist double-failure could return a plain error → review.go deletes a daemon-owned CWD.
+  - H2: warning-writer failure (stderr EPIPE) propagated as fatal → re-suppressed the terminal envelope.
+  - H3: successful delete + failed metadata-save → stale reload → false `local_artifacts_retained=true`.
+- **Fix round 1** (gpt-5.5 xhigh): H1 always-preserve in that branch; H2 warnings best-effort (never fatal); H3 single save-retry after successful cleanup. Commit `456fad8`.
+- **Review round 2** (gpt-5.6-sol high, SHA-bound `1a36102..456fad8`, full unit `9c3b9de..456fad8`): **SHIP**, no Critical/High/Medium/worthwhile-Low. Loop closed at iteration 2 of max 4.
+- **Gates (orchestrator, network+socket env):** `go build ./...`=0, `gofmt -l cmd/delegate` empty, `go vet ./...`=0, full `go test ./...`=ok. Scope strictly `cmd/delegate/*.go`.
+- **Residual (accepted):** H3 persistent metadata-save double-failure leaves stale on-disk paths (false retained=true) — degraded-disk case; terminal outcome always preserved + warned. Deferred lows (unchanged): dead-code `sweepTerminalJobInputs` wrapper; installer `--plan` root accuracy; PR-body smoke-skip wording.
+- **Not pushed:** commits `9c3b9de` (ledger), `1a36102`, `456fad8` are local on `delegate-v0.6-protocol-v2-cut`. Pushing / updating PR #17 is an external write pending user approval.
