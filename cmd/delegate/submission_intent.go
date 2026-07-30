@@ -131,6 +131,12 @@ func loadSubmissionIntent(stateDir, requestID string) (submissionIntent, bool, e
 	if intent.RequestID != requestID {
 		return submissionIntent{}, false, fmt.Errorf("submission intent %q has request_id %q", requestID, intent.RequestID)
 	}
+	if intent.Params.RequestID != intent.RequestID {
+		return submissionIntent{}, false, fmt.Errorf("submission intent %q has params request_id %q", requestID, intent.Params.RequestID)
+	}
+	if intent.Params.WorkspaceKey != intent.WorkspaceKey {
+		return submissionIntent{}, false, fmt.Errorf("submission intent %q has params workspace_key %q", requestID, intent.Params.WorkspaceKey)
+	}
 	if err := validateSubmissionPhase(intent.Phase); err != nil {
 		return submissionIntent{}, false, err
 	}

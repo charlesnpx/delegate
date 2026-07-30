@@ -277,3 +277,48 @@ func TestStatusRoutingUsesRecordedRootForJobAndCurrentRootForAll(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentbusStateRootForJobUsesRecordedRootBeforeCurrentEnv(t *testing.T) {
+	tmp := t.TempDir()
+	recordedRootRaw := filepath.Join(tmp, "recorded-agentbus")
+	if err := os.Mkdir(recordedRootRaw, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTBUS_STATE_ROOT", "relative-agentbus")
+	t.Setenv("XDG_STATE_HOME", filepath.Join(tmp, "xdg-state"))
+	jobID := "job_recorded_root_invalid_current_env"
+	if err := saveJobMetadata("", jobMetadata{
+		JobID:             jobID,
+		Kind:              taskKind,
+		ContractKind:      contractKindShape,
+		AgentbusStateRoot: recordedRootRaw,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := agentbusStateRootForJob("", jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := canonicalizeAgentbusStateRoot("recorded root", recordedRootRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("agentbus root=%q, want recorded root %q", got, want)
+	}
+}
+
+func TestAgentbusStateRootForJobFallsBackToCurrentEnvWithoutRecordedRoot(t *testing.T) {
+	t.Setenv("AGENTBUS_STATE_ROOT", "relative-agentbus")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	_, err := agentbusStateRootForJob("", "job_without_recorded_root")
+	var usageErr agentbusStateRootUsageError
+	if !errors.As(err, &usageErr) {
+		t.Fatalf("agentbusStateRootForJob error=%v, want current env usage error", err)
+	}
+	if usageErr.Name != "AGENTBUS_STATE_ROOT" || usageErr.Value != "relative-agentbus" {
+		t.Fatalf("usage error=%#v, want AGENTBUS_STATE_ROOT relative-agentbus", usageErr)
+	}
+}

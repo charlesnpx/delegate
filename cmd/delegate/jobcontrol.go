@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	initialJobPollInterval = 100 * time.Millisecond
-	maximumJobPollInterval = 2 * time.Second
+	initialJobPollInterval                          = 100 * time.Millisecond
+	maximumJobPollInterval                          = 2 * time.Second
+	maxRetryableJobResultErrorsBeforeStatusFallback = 5
 )
 
 var jobPollSleep = sleepContext
@@ -138,21 +139,16 @@ func findJobStatus(status client.JobStatusResult, jobID string) (client.JobStatu
 }
 
 func agentbusStateRootForJob(stateDir, jobID string) (string, error) {
-	currentRoot, err := resolveAgentbusStateRoot()
-	if err != nil {
-		return "", err
+	if jobID != "" {
+		recordedRoot, found, err := recordedAgentbusStateRootForJob(stateDir, jobID)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			return recordedRoot, nil
+		}
 	}
-	if jobID == "" {
-		return currentRoot, nil
-	}
-	recordedRoot, found, err := recordedAgentbusStateRootForJob(stateDir, jobID)
-	if err != nil {
-		return "", err
-	}
-	if found {
-		return recordedRoot, nil
-	}
-	return currentRoot, nil
+	return resolveAgentbusStateRoot()
 }
 
 func recordedAgentbusStateRootForJob(stateDir, jobID string) (string, bool, error) {
@@ -370,8 +366,12 @@ func (result terminalJobResult) envelopeOptions(option terminalEnvelopeOptions) 
 
 func waitForTerminalJobResult(ctx context.Context, c agentbusClient, stateDir, jobID string, cleanupWarnings *localCleanupWarnings) (terminalJobResult, error) {
 	interval := initialJobPollInterval
+	consecutiveRetryableResultErrors := 0
 	for {
 		result, err := c.JobResult(ctx, client.JobResultParams{JobID: jobID})
+		if err == nil {
+			consecutiveRetryableResultErrors = 0
+		}
 		if err == nil && engine.IsTerminal(result.State) {
 			statusJob, statusFound := requestedJobStatusForCleanup(ctx, c, stateDir, jobID)
 			terminalJob := terminalJobResultFromResultAndStatus(result, statusJob, statusFound)
@@ -387,6 +387,7 @@ func waitForTerminalJobResult(ctx context.Context, c agentbusClient, stateDir, j
 			if !retry {
 				return terminalJobResult{}, pollErr
 			}
+			consecutiveRetryableResultErrors++
 			status, statusErr := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
 			if statusErr != nil {
 				statusRetry, statusPollErr := retryableJobPollError(statusErr)
@@ -396,7 +397,9 @@ func waitForTerminalJobResult(ctx context.Context, c agentbusClient, stateDir, j
 			} else {
 				cleanupStatuses(stateDir, status, cleanupWarnings)
 				if job, found := findJobStatus(status, jobID); found && engine.IsTerminal(job.State) {
-					return terminalJobResultFromStatus(job), nil
+					if terminalStatusDoesNotExpectJobResult(job) || consecutiveRetryableResultErrors >= maxRetryableJobResultErrorsBeforeStatusFallback {
+						return terminalJobResultFromStatus(job), nil
+					}
 				}
 			}
 		}
@@ -405,6 +408,10 @@ func waitForTerminalJobResult(ctx context.Context, c agentbusClient, stateDir, j
 		}
 		interval = nextJobPollInterval(interval)
 	}
+}
+
+func terminalStatusDoesNotExpectJobResult(job client.JobStatus) bool {
+	return engine.IsTerminal(job.State) && job.State == engine.StateOrphaned
 }
 
 func retryableJobPollError(err error) (bool, error) {
@@ -694,8 +701,8 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 	return newTerminalEnvelope(result.JobID, result.State, kind, contractKind, stamp, resultSHA256, backendError, option)
 }
 
-func localArtifactsRetainedFromMetadata(meta jobMetadata, state engine.JobState, cleanupDisposition string) bool {
-	return engine.IsTerminal(state) && !localCleanupSafe(cleanupDisposition) && (meta.JobInputPath != "" || meta.ReviewWorkspace != "")
+func localArtifactsRetainedFromMetadata(meta jobMetadata, state engine.JobState, _ string) bool {
+	return engine.IsTerminal(state) && (meta.JobInputPath != "" || meta.ReviewWorkspace != "")
 }
 
 func skippedDelegateContractStamp(reason engine.SkippedReason) engine.ContractStamp {

@@ -332,6 +332,82 @@ func TestProtocolV2FakeServerLostResponseReplay(t *testing.T) {
 	}
 }
 
+func TestSubmitIntentWithRetryRetryablePersistFailureIsUnresolved(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	params := testSubmitParams(t, "delegate-33333333333333333333333333333333", "retryable persist failure", nil)
+	intent := testSubmissionIntent(params, t.TempDir())
+	fake := &fakeAgentbusClient{
+		hello:     helloWithCapabilities(),
+		submitErr: errors.New("lost response after accept"),
+	}
+	persistErr := errors.New("persist last error")
+	realSave := saveSubmissionIntent
+	saveSubmissionIntent = func(stateDir string, intent submissionIntent) error {
+		if intent.LastError != nil {
+			return persistErr
+		}
+		return realSave(stateDir, intent)
+	}
+	defer func() { saveSubmissionIntent = realSave }()
+
+	_, _, _, err := submitIntentWithRetry(context.Background(), fake, fake.hello, stateDir, &intent, nil)
+	if err == nil {
+		t.Fatal("submitIntentWithRetry error = nil, want unresolved error")
+	}
+	var unresolved submissionUnresolvedError
+	if !errors.As(err, &unresolved) {
+		t.Fatalf("error = %T %[1]v, want submissionUnresolvedError", err)
+	}
+	if unresolved.RequestID != params.RequestID {
+		t.Fatalf("unresolved request_id=%q, want %q", unresolved.RequestID, params.RequestID)
+	}
+	var transportErr *agentbusTransportError
+	if !errors.As(err, &transportErr) {
+		t.Fatalf("unresolved cause = %T %[1]v, want transport operation error", errors.Unwrap(err))
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("JobSubmit calls=%d, want one attempted submit", len(fake.submits))
+	}
+}
+
+func TestSubmitIntentWithRetryDefinitivePersistFailureIsNotUnresolved(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	params := testSubmitParams(t, "delegate-44444444444444444444444444444444", "definitive persist failure", nil)
+	intent := testSubmissionIntent(params, t.TempDir())
+	submitErr := testRPCError(t, agentbusErrorBackendUnavailable, "unsupported backend", admissionCauseUnsupportedBackend, "", nil)
+	fake := &fakeAgentbusClient{
+		hello:     helloWithCapabilities(),
+		submitErr: submitErr,
+	}
+	persistErr := errors.New("persist rejection error")
+	realSave := saveSubmissionIntent
+	saveSubmissionIntent = func(stateDir string, intent submissionIntent) error {
+		if intent.LastError != nil {
+			return persistErr
+		}
+		return realSave(stateDir, intent)
+	}
+	defer func() { saveSubmissionIntent = realSave }()
+
+	_, _, _, err := submitIntentWithRetry(context.Background(), fake, fake.hello, stateDir, &intent, nil)
+	if err == nil {
+		t.Fatal("submitIntentWithRetry error = nil, want definitive operational error")
+	}
+	var unresolved submissionUnresolvedError
+	if errors.As(err, &unresolved) {
+		t.Fatalf("error = %T %[1]v, did not want submissionUnresolvedError", err)
+	}
+	if !errors.Is(err, submitErr) {
+		t.Fatalf("error = %T %[1]v, want original operational error %T %[2]v", err, submitErr)
+	}
+}
+
 func TestRecoverRequestRestoresCrashAfterResponseJobMapping(t *testing.T) {
 	bus := newReplayAdmissionBus()
 	restore := stubReplayAdmissionBus(t, bus)
@@ -552,6 +628,65 @@ func TestRecoverRequestRestoresNoContractForBackendFailure(t *testing.T) {
 	}
 	if !meta.NoContract {
 		t.Fatalf("metadata=%#v, want no_contract=true after recovery acknowledgement", meta)
+	}
+}
+
+func TestLoadSubmissionIntentValidatesEmbeddedParamsIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*submissionIntent)
+		wantErr bool
+	}{
+		{
+			name: "matching identity loads",
+		},
+		{
+			name: "request id mismatch fails closed",
+			mutate: func(intent *submissionIntent) {
+				intent.Params.RequestID = "delegate-55555555555555555555555555555555"
+			},
+			wantErr: true,
+		},
+		{
+			name: "workspace key mismatch fails closed",
+			mutate: func(intent *submissionIntent) {
+				intent.Params.WorkspaceKey = "delegate-v1-" + strings.Repeat("5", 64)
+			},
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			if err := os.Chmod(stateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			requestID := "delegate-66666666666666666666666666666666"
+			params := testSubmitParams(t, requestID, "load identity", nil)
+			intent := testSubmissionIntent(params, t.TempDir())
+			if tc.mutate != nil {
+				tc.mutate(&intent)
+			}
+			if err := saveSubmissionIntent(stateDir, intent); err != nil {
+				t.Fatal(err)
+			}
+
+			loaded, found, err := loadSubmissionIntent(stateDir, requestID)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("loadSubmissionIntent err=nil found=%v loaded=%#v, want identity error", found, loaded)
+				}
+				if found {
+					t.Fatalf("loadSubmissionIntent found=true on identity mismatch")
+				}
+				return
+			}
+			if err != nil || !found {
+				t.Fatalf("loadSubmissionIntent found=%v err=%v, want well-formed intent", found, err)
+			}
+			if loaded.RequestID != requestID || loaded.Params.RequestID != requestID || loaded.Params.WorkspaceKey != loaded.WorkspaceKey {
+				t.Fatalf("loaded intent identity=%#v, want matching outer and embedded identity", loaded)
+			}
+		})
 	}
 }
 

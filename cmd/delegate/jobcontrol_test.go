@@ -339,6 +339,106 @@ func TestWaitForJobResultRetryablePollErrorsKeepPollingThenSucceed(t *testing.T)
 	}
 }
 
+func TestWaitForTerminalJobResultRetriesRetryableResultErrorsBeforeStatusFallback(t *testing.T) {
+	jobID := "job_retry_before_status_fallback"
+	report := compliantReport()
+	resultSHA := strings.Repeat("9", 64)
+	stamp := compliantContractStamp(t, report)
+	base := &fakeAgentbusClient{hello: helloWithCapabilities()}
+	fake := &scriptedPollingClient{
+		fakeAgentbusClient: base,
+		results: []jobResultStep{
+			{err: errors.New("temporary result transport failure 1")},
+			{err: errors.New("temporary result transport failure 2")},
+			{err: errors.New("temporary result transport failure 3")},
+			{result: client.JobResult{
+				JobID:    jobID,
+				State:    engine.StateCompleted,
+				Result:   &engine.ResultInfo{Text: report, SHA256: resultSHA, Bytes: int64(len(report))},
+				Contract: ptr(stamp),
+			}},
+		},
+		statuses: []client.JobStatusResult{
+			{Jobs: []client.JobStatus{{JobID: jobID, State: engine.StateCompleted}}},
+			{Jobs: []client.JobStatus{{JobID: jobID, State: engine.StateCompleted}}},
+			{Jobs: []client.JobStatus{{JobID: jobID, State: engine.StateCompleted}}},
+			{Jobs: []client.JobStatus{{JobID: jobID, State: engine.StateCompleted, CleanupDisposition: cleanupDispositionVerifiedAbsent}}},
+		},
+	}
+	oldSleep := jobPollSleep
+	sleepCalls := 0
+	jobPollSleep = func(context.Context, time.Duration) error {
+		sleepCalls++
+		return nil
+	}
+	defer func() { jobPollSleep = oldSleep }()
+
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	terminalJob, err := waitForTerminalJobResult(context.Background(), fake, stateDir, jobID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sleepCalls != 3 {
+		t.Fatalf("sleep calls=%d, want three retry delays before real result", sleepCalls)
+	}
+	if want := []string{"result", "status", "result", "status", "result", "status", "result", "status"}; !reflect.DeepEqual(fake.calls, want) {
+		t.Fatalf("RPC order=%#v, want %#v", fake.calls, want)
+	}
+	if terminalJob.result.Result == nil || terminalJob.result.Result.SHA256 != resultSHA {
+		t.Fatalf("terminal result info=%#v, want real result sha %s", terminalJob.result.Result, resultSHA)
+	}
+	if terminalJob.result.Contract == nil || !reflect.DeepEqual(*terminalJob.result.Contract, stamp) {
+		t.Fatalf("terminal contract=%#v, want real result contract %#v", terminalJob.result.Contract, stamp)
+	}
+}
+
+func TestWaitForTerminalJobResultUsesStatusFallbackImmediatelyForOrphaned(t *testing.T) {
+	jobID := "job_orphaned_status_only"
+	base := &fakeAgentbusClient{hello: helloWithCapabilities()}
+	fake := &scriptedPollingClient{
+		fakeAgentbusClient: base,
+		results: []jobResultStep{
+			{err: errors.New("orphaned job has no result")},
+		},
+		statuses: []client.JobStatusResult{
+			{Jobs: []client.JobStatus{{
+				JobID:              jobID,
+				SessionID:          "session_orphaned_status_only",
+				State:              engine.StateOrphaned,
+				CleanupDisposition: cleanupDispositionUnresolved,
+			}}},
+		},
+	}
+	oldSleep := jobPollSleep
+	sleepCalls := 0
+	jobPollSleep = func(context.Context, time.Duration) error {
+		sleepCalls++
+		return errors.New("unexpected sleep after orphaned status fallback")
+	}
+	defer func() { jobPollSleep = oldSleep }()
+
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	terminalJob, err := waitForTerminalJobResult(context.Background(), fake, stateDir, jobID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sleepCalls != 0 {
+		t.Fatalf("sleep calls=%d, want immediate orphaned status fallback", sleepCalls)
+	}
+	if want := []string{"result", "status"}; !reflect.DeepEqual(fake.calls, want) {
+		t.Fatalf("RPC order=%#v, want %#v", fake.calls, want)
+	}
+	if terminalJob.result.State != engine.StateOrphaned || terminalJob.result.Result != nil || terminalJob.result.Contract != nil {
+		t.Fatalf("terminal status fallback result=%#v, want orphaned without fabricated result", terminalJob.result)
+	}
+}
+
 func TestWaitContextCancelReturnsImmediatelyAndPreservesSubmissionIntent(t *testing.T) {
 	jobID := "job_wait_context_cancel"
 	fake := &fakeAgentbusClient{

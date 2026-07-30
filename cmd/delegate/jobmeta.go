@@ -30,6 +30,11 @@ const (
 	cleanupDispositionUnresolvedWarning = "Agentbus reported cleanupDisposition=unresolved; delegate retained local job artifacts because backend absence is unproven"
 )
 
+var (
+	deleteJobInputOnTerminalState = handoff.DeleteJobInputOnTerminalState
+	cleanupReviewWorkspace        = reviewpkg.CleanupWorkspace
+)
+
 type jobMetadata struct {
 	Schema             int                        `json:"schema"`
 	JobID              string                     `json:"job_id"`
@@ -107,6 +112,13 @@ func localArtifactsRetainedWarning(state engine.JobState, cleanupDisposition str
 		return fmt.Sprintf("Agentbus reported cleanupDisposition=%s; delegate retained local job artifacts because backend absence is unproven", cleanupDisposition), true
 	}
 	return "", false
+}
+
+func warnLocalCleanupFailure(warnings *localCleanupWarnings, jobID, artifact string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return warnings.warn(jobID, fmt.Sprintf("Delegate could not remove local %s; local job artifacts were retained: %v", artifact, err))
 }
 
 func captureBackendError(stateDir string, job client.JobStatus) error {
@@ -249,24 +261,35 @@ func cleanupJobInput(stateDir, jobID, sessionID string, state engine.JobState, c
 	}
 	if meta.JobInputPath != "" && cleanupSafe {
 		input := handoff.JobInput{JobID: jobID, Path: meta.JobInputPath}
-		_, err = handoff.DeleteJobInputOnTerminalState(input, state, cleanupDisposition, handoff.Hooks{})
+		_, err = deleteJobInputOnTerminalState(input, state, cleanupDisposition, handoff.Hooks{})
 		if err != nil {
-			return err
+			if warnErr := warnLocalCleanupFailure(warnings, jobID, "job input", err); warnErr != nil {
+				return warnErr
+			}
+		} else {
+			meta.JobInputPath = ""
+			changed = true
 		}
-		meta.JobInputPath = ""
-		changed = true
 	}
 	if meta.ReviewWorkspace != "" && cleanupSafe {
-		if err := reviewpkg.CleanupWorkspace(stateDir, meta.ReviewWorkspace); err != nil {
-			return err
+		if err := cleanupReviewWorkspace(stateDir, meta.ReviewWorkspace); err != nil {
+			if warnErr := warnLocalCleanupFailure(warnings, jobID, "review workspace", err); warnErr != nil {
+				return warnErr
+			}
+		} else {
+			meta.ReviewWorkspace = ""
+			changed = true
 		}
-		meta.ReviewWorkspace = ""
-		changed = true
 	}
 	if !changed {
 		return nil
 	}
-	return saveJobMetadata(stateDir, meta)
+	if err := saveJobMetadata(stateDir, meta); err != nil {
+		if warnErr := warnings.warn(jobID, fmt.Sprintf("Delegate could not persist local cleanup metadata; terminal outcome was preserved: %v", err)); warnErr != nil {
+			return warnErr
+		}
+	}
+	return nil
 }
 
 func jobMetadataDir(stateDir string) (string, error) {

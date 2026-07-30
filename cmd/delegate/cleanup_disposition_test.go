@@ -265,6 +265,66 @@ func TestSafeCleanupDispositionsRemoveArtifacts(t *testing.T) {
 	}
 }
 
+func TestSafeCleanupFailureWarnsRetainsArtifactsAndPreservesOutcome(t *testing.T) {
+	jobID := "job_safe_cleanup_delete_failure"
+	resultSHA := strings.Repeat("6", 64)
+	fake := &fakeAgentbusClient{
+		hello: helloWithCapabilities(),
+		result: client.JobResult{
+			JobID:              jobID,
+			SessionID:          "session_safe_cleanup_delete_failure",
+			State:              engine.StateCompleted,
+			CleanupDisposition: cleanupDispositionVerifiedAbsent,
+			Result:             &engine.ResultInfo{SHA256: resultSHA},
+		},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	_, inputPath, workspace := prepareCleanupDispositionArtifacts(t, jobID)
+
+	deleteErr := errors.New("delete job input failed")
+	reviewErr := errors.New("delete review workspace failed")
+	oldDelete := deleteJobInputOnTerminalState
+	oldCleanup := cleanupReviewWorkspace
+	deleteJobInputOnTerminalState = func(handoff.JobInput, engine.JobState, string, handoff.Hooks) (bool, error) {
+		return false, deleteErr
+	}
+	cleanupReviewWorkspace = func(string, string) error {
+		return reviewErr
+	}
+	t.Cleanup(func() {
+		deleteJobInputOnTerminalState = oldDelete
+		cleanupReviewWorkspace = oldCleanup
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"result", "--job", jobID, "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("result code=%d stderr=%q stdout=%q, want success despite cleanup failure", code, stderr.String(), stdout.String())
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON: %v; raw=%q", err, stdout.String())
+	}
+	if env.Status != engine.StateCompleted || env.ResultSHA256 == nil || *env.ResultSHA256 != resultSHA {
+		t.Fatalf("terminal envelope=%#v, want completed result %s", env, resultSHA)
+	}
+	if env.CleanupDisposition != cleanupDispositionVerifiedAbsent || !env.LocalArtifactsRetained {
+		t.Fatalf("cleanup fields=%#v, want verified_absent with local_artifacts_retained=true", env)
+	}
+	assertPathExists(t, inputPath)
+	assertPathExists(t, workspace)
+	assertCleanupWarning(t, stderr.String(), "Delegate could not remove local job input")
+	assertCleanupWarning(t, stderr.String(), "Delegate could not remove local review workspace")
+	meta, found, err := loadJobMetadata("", jobID)
+	if err != nil || !found {
+		t.Fatalf("metadata found=%v err=%v", found, err)
+	}
+	if meta.JobInputPath == "" || meta.ReviewWorkspace == "" || meta.CleanupDisposition != cleanupDispositionVerifiedAbsent {
+		t.Fatalf("metadata after failed cleanup=%#v, want artifact paths retained and disposition recorded", meta)
+	}
+}
+
 func TestMissingCleanupDispositionOnTerminalJobRetainsArtifacts(t *testing.T) {
 	jobID := "job_missing_cleanup_disposition"
 	fake := &fakeAgentbusClient{
