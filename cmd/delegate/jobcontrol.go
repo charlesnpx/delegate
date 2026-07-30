@@ -286,6 +286,11 @@ func runCancel(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("delegate cancel requires --job")
 	}
 	ctx := context.Background()
+	// SAFETY INVARIANT: cancel is a MUTATING op and must pass allowCorruptRootFallback=false.
+	// AgentBus job IDs are sequential per state root (job-%020d), so identical IDs recur
+	// across roots; falling back to the default root on corrupt recorded metadata could
+	// cancel an UNRELATED same-ID job. Keep this false (status/result may use true because
+	// they are read-only). Do not flip without cross-root identity verification.
 	stateRoot, err := agentbusStateRootForJob("", *jobID, stderr, false)
 	if err != nil {
 		return 0, err
