@@ -52,7 +52,7 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("--probe-interval must be at least %s", minimumProbeInterval)
 	}
 	ctx := context.Background()
-	stateRoot, err := agentbusStateRootForJob("", *jobID, stderr)
+	stateRoot, err := agentbusStateRootForJob("", *jobID, stderr, true)
 	if err != nil {
 		return 0, err
 	}
@@ -143,16 +143,19 @@ func findJobStatus(status client.JobStatusResult, jobID string) (client.JobStatu
 	return client.JobStatus{}, false
 }
 
-func agentbusStateRootForJob(stateDir, jobID string, stderr io.Writer) (string, error) {
+func agentbusStateRootForJob(stateDir, jobID string, stderr io.Writer, allowCorruptRootFallback bool) (string, error) {
 	if jobID != "" {
 		recordedRoot, found, err := recordedAgentbusStateRootForJob(stateDir, jobID)
 		if err != nil {
+			if !allowCorruptRootFallback {
+				return "", fmt.Errorf("use recorded AgentBus state root for job %q: %w", jobID, err)
+			}
 			stateRoot, resolveErr := resolveAgentbusStateRoot()
 			if resolveErr != nil {
 				return "", resolveErr
 			}
 			if stderr != nil {
-				if _, warnErr := fmt.Fprintf(stderr, "warning: delegate could not use recorded AgentBus state root for job %q; using default resolved AgentBus state root instead, so a job created with a non-default root may be reported as not found: %v\n", jobID, err); warnErr != nil {
+				if _, warnErr := fmt.Fprintf(stderr, "warning: delegate could not use recorded AgentBus state root for job %q; using default resolved AgentBus state root instead, so status/result may report a different same-ID job or not find the intended job: %v\n", jobID, err); warnErr != nil {
 					return "", warnErr
 				}
 			}
@@ -229,7 +232,7 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("delegate result requires --job")
 	}
 	ctx := context.Background()
-	stateRoot, err := agentbusStateRootForJob("", *jobID, stderr)
+	stateRoot, err := agentbusStateRootForJob("", *jobID, stderr, true)
 	if err != nil {
 		return 0, err
 	}
@@ -283,7 +286,7 @@ func runCancel(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("delegate cancel requires --job")
 	}
 	ctx := context.Background()
-	stateRoot, err := agentbusStateRootForJob("", *jobID, stderr)
+	stateRoot, err := agentbusStateRootForJob("", *jobID, stderr, false)
 	if err != nil {
 		return 0, err
 	}

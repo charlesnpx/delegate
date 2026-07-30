@@ -298,16 +298,26 @@ func TestAgentbusStateRootForJobUsesRecordedRootBeforeCurrentEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := agentbusStateRootForJob("", jobID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	want, err := canonicalizeAgentbusStateRoot("recorded root", recordedRootRaw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != want {
-		t.Fatalf("agentbus root=%q, want recorded root %q", got, want)
+	for _, tc := range []struct {
+		name                     string
+		allowCorruptRootFallback bool
+	}{
+		{name: "read fallback allowed", allowCorruptRootFallback: true},
+		{name: "cancel strict", allowCorruptRootFallback: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := agentbusStateRootForJob("", jobID, nil, tc.allowCorruptRootFallback)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != want {
+				t.Fatalf("agentbus root=%q, want recorded root %q", got, want)
+			}
+		})
 	}
 }
 
@@ -315,13 +325,23 @@ func TestAgentbusStateRootForJobFallsBackToCurrentEnvWithoutRecordedRoot(t *test
 	t.Setenv("AGENTBUS_STATE_ROOT", "relative-agentbus")
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
-	_, err := agentbusStateRootForJob("", "job_without_recorded_root", nil)
-	var usageErr agentbusStateRootUsageError
-	if !errors.As(err, &usageErr) {
-		t.Fatalf("agentbusStateRootForJob error=%v, want current env usage error", err)
-	}
-	if usageErr.Name != "AGENTBUS_STATE_ROOT" || usageErr.Value != "relative-agentbus" {
-		t.Fatalf("usage error=%#v, want AGENTBUS_STATE_ROOT relative-agentbus", usageErr)
+	for _, tc := range []struct {
+		name                     string
+		allowCorruptRootFallback bool
+	}{
+		{name: "read fallback allowed", allowCorruptRootFallback: true},
+		{name: "cancel strict", allowCorruptRootFallback: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := agentbusStateRootForJob("", "job_without_recorded_root", nil, tc.allowCorruptRootFallback)
+			var usageErr agentbusStateRootUsageError
+			if !errors.As(err, &usageErr) {
+				t.Fatalf("agentbusStateRootForJob error=%v, want current env usage error", err)
+			}
+			if usageErr.Name != "AGENTBUS_STATE_ROOT" || usageErr.Value != "relative-agentbus" {
+				t.Fatalf("usage error=%#v, want AGENTBUS_STATE_ROOT relative-agentbus", usageErr)
+			}
+		})
 	}
 }
 
@@ -338,7 +358,7 @@ func TestAgentbusStateRootForJobCorruptMetadataFallsBackWithWarning(t *testing.T
 	}
 
 	var stderr bytes.Buffer
-	got, err := agentbusStateRootForJob(stateDir, jobID, &stderr)
+	got, err := agentbusStateRootForJob(stateDir, jobID, &stderr, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,6 +366,37 @@ func TestAgentbusStateRootForJobCorruptMetadataFallsBackWithWarning(t *testing.T
 		t.Fatalf("agentbus root=%q, want default root %q", got, defaultRoot)
 	}
 	assertRecordedRootFallbackWarning(t, stderr.String(), jobID, "unexpected end of JSON input")
+}
+
+func TestAgentbusStateRootForJobCorruptMetadataStrictReturnsError(t *testing.T) {
+	tmp, defaultRoot := agentbusStateRootFallbackTestEnv(t)
+	stateDir := filepath.Join(tmp, "delegate-state")
+	jobID := "job_corrupt_metadata"
+	dir, err := jobMetadataDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, encodedStateFilename(jobID)), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	got, err := agentbusStateRootForJob(stateDir, jobID, &stderr, false)
+	if err == nil {
+		t.Fatal("agentbusStateRootForJob error=nil, want corrupt metadata error")
+	}
+	if got != "" || got == defaultRoot {
+		t.Fatalf("agentbus root=%q, want no fallback to default root %q", got, defaultRoot)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("use recorded AgentBus state root for job %q", jobID)) {
+		t.Fatalf("error=%v, want recorded root context", err)
+	}
+	if !strings.Contains(err.Error(), "unexpected end of JSON input") {
+		t.Fatalf("error=%v, want corrupt JSON detail", err)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr=%q, want no fallback warning", stderr.String())
+	}
 }
 
 func TestAgentbusStateRootForJobUncanonicalizableRecordedRootFallsBackWithWarning(t *testing.T) {
@@ -362,7 +413,7 @@ func TestAgentbusStateRootForJobUncanonicalizableRecordedRootFallsBackWithWarnin
 	}
 
 	var stderr bytes.Buffer
-	got, err := agentbusStateRootForJob(stateDir, jobID, &stderr)
+	got, err := agentbusStateRootForJob(stateDir, jobID, &stderr, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,16 +444,26 @@ func TestAgentbusStateRootForJobValidRecordedRootReturnsRecordedWithoutWarning(t
 		t.Fatal(err)
 	}
 
-	var stderr bytes.Buffer
-	got, err := agentbusStateRootForJob(stateDir, jobID, &stderr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != recordedRoot {
-		t.Fatalf("agentbus root=%q, want recorded root %q", got, recordedRoot)
-	}
-	if stderr.String() != "" {
-		t.Fatalf("stderr=%q, want no warning", stderr.String())
+	for _, tc := range []struct {
+		name                     string
+		allowCorruptRootFallback bool
+	}{
+		{name: "read fallback allowed", allowCorruptRootFallback: true},
+		{name: "cancel strict", allowCorruptRootFallback: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			got, err := agentbusStateRootForJob(stateDir, jobID, &stderr, tc.allowCorruptRootFallback)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != recordedRoot {
+				t.Fatalf("agentbus root=%q, want recorded root %q", got, recordedRoot)
+			}
+			if stderr.String() != "" {
+				t.Fatalf("stderr=%q, want no warning", stderr.String())
+			}
+		})
 	}
 }
 
@@ -417,16 +478,26 @@ func TestAgentbusStateRootForJobFallsBackForAbsentMetadataAndInvalidJobID(t *tes
 		{name: "invalid empty job id", jobID: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var stderr bytes.Buffer
-			got, err := agentbusStateRootForJob(stateDir, tc.jobID, &stderr)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != defaultRoot {
-				t.Fatalf("agentbus root=%q, want default root %q", got, defaultRoot)
-			}
-			if stderr.String() != "" {
-				t.Fatalf("stderr=%q, want no warning", stderr.String())
+			for _, mode := range []struct {
+				name                     string
+				allowCorruptRootFallback bool
+			}{
+				{name: "read fallback allowed", allowCorruptRootFallback: true},
+				{name: "cancel strict", allowCorruptRootFallback: false},
+			} {
+				t.Run(mode.name, func(t *testing.T) {
+					var stderr bytes.Buffer
+					got, err := agentbusStateRootForJob(stateDir, tc.jobID, &stderr, mode.allowCorruptRootFallback)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got != defaultRoot {
+						t.Fatalf("agentbus root=%q, want default root %q", got, defaultRoot)
+					}
+					if stderr.String() != "" {
+						t.Fatalf("stderr=%q, want no warning", stderr.String())
+					}
+				})
 			}
 		})
 	}
@@ -450,7 +521,7 @@ func agentbusStateRootFallbackTestEnv(t *testing.T) (string, string) {
 
 func assertRecordedRootFallbackWarning(t *testing.T, warning, jobID, wantDetail string) {
 	t.Helper()
-	wantPrefix := fmt.Sprintf("warning: delegate could not use recorded AgentBus state root for job %q; using default resolved AgentBus state root instead, so a job created with a non-default root may be reported as not found: ", jobID)
+	wantPrefix := fmt.Sprintf("warning: delegate could not use recorded AgentBus state root for job %q; using default resolved AgentBus state root instead, so status/result may report a different same-ID job or not find the intended job: ", jobID)
 	if !strings.HasPrefix(warning, wantPrefix) {
 		t.Fatalf("warning=%q, want prefix %q", warning, wantPrefix)
 	}
