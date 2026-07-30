@@ -222,3 +222,19 @@ Base SHA: `fb22354` (branch `delegate-v0.6-protocol-v2-cut`). Risk: low/medium. 
 - **Review round 2** (gpt-5.6-sol high, SHA-bound `0fcee56..5bdf9df`, whole unit `fb22354..5bdf9df`): **SHIP** — no Critical/High. One Low: the resolver-level test pins `false`⇒fatal, but not `runCancel`'s actual call site (jobcontrol.go:289) — a future flip to `true` would stay green while wrong-root cancellation reopened. Disposition: call-site comment guard documenting the invariant added (commit `3934fc7`); the suggested seam-level `runCancel` command harness (asserting zero connect/JobCancel calls) rejected as disproportionate for a Low and recorded here as the **deferred guard**. Loop closed at iteration 2 of max 4.
 - **Gates (orchestrator, at head `3934fc7`):** `go vet ./...`=0, `go test ./cmd/delegate/... -count=1`=ok, `gofmt -l cmd/delegate` empty. Scope strictly `cmd/delegate/jobcontrol.go` + `agentbus_state_root_test.go`.
 - **Not pushed yet:** `0fcee56`, `5bdf9df`, `3934fc7` local on `delegate-v0.6-protocol-v2-cut` (ahead 3). Push/PR #17 update pending user approval.
+
+---
+
+## D13 — Deferred-debt closure (dead sweep wrapper; installer --plan sandbox-root accuracy)
+Base SHA: `3558120` (branch `delegate-v0.6-protocol-v2-cut`). Risk: low. Closes the two items the D10/D11 ledger deferred as non-blocking debt (the remaining backlog after D12).
+
+- **Item A — remove dead `sweepTerminalJobInputs` wrapper.** jobcontrol.go:662 had zero callers (grep-verified at base); deleted along with the now-unused `handoff` import. `internal/handoff.SweepTerminalJobInputs` deliberately retained as a tested latent API. No replacement wiring — a new command would be feature work, out of scope.
+- **Item B — installer `--plan` codex sandbox root accuracy.** The shell plan branch reported `{$XDG_STATE_HOME/agentbus, $XDG_STATE_HOME/delegate}`, diverging from what `--install` actually configures via Go `codexSandboxPaths` (codex_sandbox.go): it ignored the `AGENTBUS_STATE_ROOT` override and omitted the agentbus user-cache (autostart-lock) root entirely. Fix: plan now mirrors the configurator's three roots in order — AGENTBUS state root (env override honored, absolute-guarded), agentbus cache root (Darwin `~/Library/Caches/agentbus`, else `${XDG_CACHE_HOME:-~/.cache}/agentbus`), `$XDG_STATE_HOME/delegate`; non-absolute env values route to the skipped warning. One focused test pins the would-configure line under a fully pinned env. No go shell-out for plan (must work without go), no parity harness.
+
+### D13 — COMPLETE (local, unpushed)
+- **Impl** (gpt-5.5 xhigh worker): both items, +1 focused plan test. Commit `ba7d8d7`.
+- **Review round 1** (gpt-5.6-sol high, refute-first, SHA-bound `3558120..ba7d8d7`): **SHIP** — no Critical/High. Two Lows: (1) `uname` failure silently takes the Linux branch on Darwin (reproduced with broken PATH) — accepted; (2) the new test inherits host PATH while the script invokes `uname` — resolved by elimination via fix (1). Reviewer confirmed Item A safe, normal Darwin/Linux parity in configurator order, and ruled the relative-`XDG_CACHE_HOME`-on-Darwin conservatism acceptable.
+- **Fix round 1** (gpt-5.5 xhigh): one hunk — `$(uname -s) == "Darwin"` → `[[ "${OSTYPE:-}" == darwin* ]]` (bash builtin, no subprocess; moots Low 2, so no test change). Commit `97fc933`. Loop closed at iteration 1 of max 4 per the stop rule.
+- **Gates (orchestrator):** `gofmt -l cmd/delegate` empty, `go vet ./...`=0, `go test ./cmd/delegate/... ./internal/handoff/... -count=1`=ok, `bash -n install-skill.sh`=0.
+- **Deferred debt now closed:** dead sweep wrapper (D10/D11) and installer `--plan` root accuracy (D10). Remaining recorded debt: the D12 deferred guard (runCancel command harness, Low) only.
+- **Not pushed yet:** `ba7d8d7`, `97fc933` local. Push/PR #17 update pending user approval.
