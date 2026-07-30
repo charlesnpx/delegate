@@ -201,8 +201,24 @@ Base SHA: `21b6f01` (branch `delegate-v0.6-protocol-v2-cut`). Risk: medium. Foll
 
 - **Gates:** `go build ./...`=0, `gofmt -l cmd/delegate` empty, `go vet ./...`, full `go test ./...`; focused regression per H1/H2/M1/M2. Review: gpt-5.6-sol high, refute-first, SHA-bound, max 4 iterations.
 
-### D11 — COMPLETE (pushed pending)
+### D11 — COMPLETE (pushed)
 - Impl: gpt-5.5 xhigh worker → H1/H2/M1/M2 + dead-code delete. Commit `cefe172`.
 - Orchestrator gate (module env): build/vet/gofmt clean, full `go test ./...`=ok. H1 assumption (JobResult error = observation failure, not result-absence) verified against agentbus v0.6 `authorityResult` (returns successful nil-payload JobResult for resultless terminals; errors only on unknown-job/corruption/fail-stop) → H1 safe for all terminal states, not just orphaned.
 - Review round 1 (gpt-5.6-sol high, SHA-bound `32a1300..cefe172`): **SHIP**, no Critical/High/Medium/worthwhile-Low. Loop closed at iteration 1.
-- Not pushed yet: `32a1300` (ledger), `cefe172` (code) local on `delegate-v0.6-protocol-v2-cut`. Push/PR update pending user approval.
+- Review round 2 (external refute-first, whole unit `21b6f01..fb22354`): no Critical/High. Confirmed all D11 items closed: result errors no longer fabricate resultless successes (H1), fail-stop polling bounded (H2), intent schema fails closed (M2), dead job-ID generator gone. One Medium remained — malformed job metadata still hard-aborts status/result/cancel before AgentBus is contacted, so the D11 M1 corruption-tolerant cleanup/envelope code never runs through the actual CLI (only its helpers were tested). Accepted → spawned unit D12 below.
+- Pushed: `32a1300`, `cefe172`, `fb22354` (ledger) on `origin/delegate-v0.6-protocol-v2-cut`.
+
+---
+
+## D12 — Corruption-tolerant recorded-root resolution for job commands
+Base SHA: `fb22354` (branch `delegate-v0.6-protocol-v2-cut`). Risk: low/medium. Source: the accepted Medium from the D11 round-2 external review (above). `status`/`result`/`cancel` resolve the recorded AgentBus state root first (`agentbusStateRootForJob` → `recordedAgentbusStateRootForJob`, jobcontrol.go:146-171), and a metadata read/parse error or a recorded-root canonicalize error propagated as fatal — each command aborted at the top, before ever contacting AgentBus. This defeated D11 M1's corruption-tolerant paths for exactly the corruption they were built to tolerate and contradicted the D5 invariant (a known authoritative outcome must not be suppressed by local metadata uncertainty). Absent metadata and invalid job IDs already fell back correctly and were out of scope.
+
+- **Fix (accepted, narrow):** treat unusable job metadata as "no usable recorded root" — emit a one-line stderr warning and fall back to `resolveAgentbusStateRoot()`; a genuine default-root resolve failure stays fatal. Warning honestly discloses the degraded routing (default root, so the job may resolve differently). Routing-seam tests T1-T4 in `agentbus_state_root_test.go` (corrupt metadata ⇒ fallback+warn; uncanonicalizable recorded root ⇒ fallback+warn; valid recorded root ⇒ used, no warning; absent metadata unchanged). No live-daemon harness — rejected as disproportionate.
+
+### D12 — COMPLETE (local, unpushed)
+- **Impl** (gpt-5.5 xhigh worker): warn+fallback in jobcontrol.go, all three call sites; T1-T4 seam tests. Commit `0fcee56`.
+- **Review round 1** (gpt-5.6-sol high, SHA-bound `fb22354..0fcee56`): FIX — 1 High accepted: AgentBus job IDs are sequential **per state root** (`job-%020d` from a per-root NextJobSequence), so a corrupt-metadata `cancel` redirected to the default root can cancel an unrelated same-ID job. Warn+fallback is acceptable only for reads.
+- **Fix round 1** (gpt-5.5 xhigh): `agentbusStateRootForJob` gains `allowCorruptRootFallback` — `status`/`result` pass true (warn+fallback; warning now discloses the returned status/result may belong to a different same-ID job or be not-found), `cancel` passes false (corrupt/unreadable/uncanonicalizable recorded root is fatal, aborting before connect/JobCancel — restores safe pre-D12 cancel behavior). Absent-metadata/invalid-job-id fallback unchanged for all commands. Strict-path tests added. Commit `5bdf9df`.
+- **Review round 2** (gpt-5.6-sol high, SHA-bound `0fcee56..5bdf9df`, whole unit `fb22354..5bdf9df`): **SHIP** — no Critical/High. One Low: the resolver-level test pins `false`⇒fatal, but not `runCancel`'s actual call site (jobcontrol.go:289) — a future flip to `true` would stay green while wrong-root cancellation reopened. Disposition: call-site comment guard documenting the invariant added (commit `3934fc7`); the suggested seam-level `runCancel` command harness (asserting zero connect/JobCancel calls) rejected as disproportionate for a Low and recorded here as the **deferred guard**. Loop closed at iteration 2 of max 4.
+- **Gates (orchestrator, at head `3934fc7`):** `go vet ./...`=0, `go test ./cmd/delegate/... -count=1`=ok, `gofmt -l cmd/delegate` empty. Scope strictly `cmd/delegate/jobcontrol.go` + `agentbus_state_root_test.go`.
+- **Not pushed yet:** `0fcee56`, `5bdf9df`, `3934fc7` local on `delegate-v0.6-protocol-v2-cut` (ahead 3). Push/PR #17 update pending user approval.
