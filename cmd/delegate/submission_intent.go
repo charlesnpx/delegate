@@ -128,6 +128,9 @@ func loadSubmissionIntent(stateDir, requestID string) (submissionIntent, bool, e
 	if err := json.Unmarshal(raw, &intent); err != nil {
 		return submissionIntent{}, false, err
 	}
+	if intent.Schema != submissionIntentSchema {
+		return submissionIntent{}, false, fmt.Errorf("submission intent %q has unsupported schema %d", requestID, intent.Schema)
+	}
 	if intent.RequestID != requestID {
 		return submissionIntent{}, false, fmt.Errorf("submission intent %q has request_id %q", requestID, intent.RequestID)
 	}

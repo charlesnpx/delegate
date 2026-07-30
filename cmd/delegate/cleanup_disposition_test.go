@@ -183,7 +183,7 @@ func TestTerminalEnvelopeSchema2FieldsFromResultAndStatus(t *testing.T) {
 	assertCleanupWarning(t, stderr.String(), cleanupDispositionUnresolvedWarning)
 }
 
-func TestTerminalEnvelopeSchema2FieldsFromStatusFallback(t *testing.T) {
+func TestTerminalEnvelopeSchema2FieldsFromOrphanedStatusFallback(t *testing.T) {
 	jobID := "job_status_fallback_schema2"
 	fake := &fakeAgentbusClient{
 		hello:     helloWithCapabilities(),
@@ -191,7 +191,7 @@ func TestTerminalEnvelopeSchema2FieldsFromStatusFallback(t *testing.T) {
 		status: client.JobStatusResult{Jobs: []client.JobStatus{{
 			JobID:              jobID,
 			SessionID:          "session_status_fallback_schema2",
-			State:              engine.StateFailed,
+			State:              engine.StateOrphaned,
 			CleanupDisposition: cleanupDispositionUnresolved,
 			LateFinalization:   true,
 			Warnings:           []string{"terminal status was recovered without a result"},
@@ -203,8 +203,8 @@ func TestTerminalEnvelopeSchema2FieldsFromStatusFallback(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"result", "--job", jobID, "--json"}, nil, &stdout, &stderr)
-	if code != engine.ExitCodeForState(engine.StateFailed) {
-		t.Fatalf("result code=%d stderr=%q stdout=%q, want failed exit", code, stderr.String(), stdout.String())
+	if code != engine.ExitCodeForState(engine.StateOrphaned) {
+		t.Fatalf("result code=%d stderr=%q stdout=%q, want orphaned exit", code, stderr.String(), stdout.String())
 	}
 	if len(fake.results) != 1 || len(fake.statuses) != 1 {
 		t.Fatalf("RPC calls results=%#v statuses=%#v, want one result attempt and one status fallback", fake.results, fake.statuses)
@@ -213,13 +213,13 @@ func TestTerminalEnvelopeSchema2FieldsFromStatusFallback(t *testing.T) {
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
 		t.Fatalf("terminal JSON: %v; raw=%q", err, stdout.String())
 	}
-	if env.Status != engine.StateFailed || env.CleanupDisposition != cleanupDispositionUnresolved || !env.LocalArtifactsRetained || !env.LateFinalization {
+	if env.Status != engine.StateOrphaned || env.CleanupDisposition != cleanupDispositionUnresolved || !env.LocalArtifactsRetained || !env.LateFinalization {
 		t.Fatalf("fallback schema-2 fields=%#v", env)
 	}
 	if len(env.AgentbusWarnings) != 1 || env.AgentbusWarnings[0] != "terminal status was recovered without a result" {
 		t.Fatalf("fallback agentbus_warnings=%#v", env.AgentbusWarnings)
 	}
-	if env.ResultSHA256 != nil || env.ResultUnavailableReason != "failed_without_result" {
+	if env.ResultSHA256 != nil || env.ResultUnavailableReason != "orphaned_without_result" {
 		t.Fatalf("fallback result fields sha=%#v reason=%q", env.ResultSHA256, env.ResultUnavailableReason)
 	}
 	assertPathExists(t, inputPath)

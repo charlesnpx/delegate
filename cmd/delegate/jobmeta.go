@@ -238,8 +238,12 @@ func deleteJobMetadata(stateDir, jobID string) error {
 
 func cleanupJobInput(stateDir, jobID, sessionID string, state engine.JobState, cleanupDisposition string, warnings *localCleanupWarnings) error {
 	meta, found, err := loadJobMetadata(stateDir, jobID)
-	if err != nil || !found {
-		return err
+	if err != nil {
+		_ = warnings.warn(jobID, fmt.Sprintf("Delegate could not read local job metadata; local job artifacts were retained: %v", err))
+		return nil
+	}
+	if !found {
+		return nil
 	}
 	changed := false
 	if sessionID != "" && meta.SessionID != sessionID {

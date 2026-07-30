@@ -119,27 +119,61 @@ func TestCaptureBackendErrorSanitizesPromptSecretsAndBoundsDiagnostic(t *testing
 	}
 }
 
-func TestWaitForJobResultSynthesizesEnvelopeInputAcrossTerminalStates(t *testing.T) {
-	states := []engine.JobState{engine.StateFailed, engine.StateTimedOut, engine.StateInterrupted, engine.StateCanceled, engine.StateReaped, engine.StateQuarantined}
-	for _, state := range states {
-		t.Run(string(state), func(t *testing.T) {
-			stateDir := t.TempDir()
-			if err := os.Chmod(stateDir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			fake := &fakeAgentbusClient{resultErr: errors.New("quarantined record cannot be loaded"), status: client.JobStatusResult{Jobs: []client.JobStatus{{JobID: "job_fallback", SessionID: "session_fallback", State: state}}}}
-			result, err := waitForJobResult(context.Background(), fake, stateDir, "job_fallback", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			env, err := terminalEnvelopeFromJobResult(stateDir, result)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if env.JobID != "job_fallback" || env.Status != state || env.ResultUnavailableReason != resultUnavailableReason(state) {
-				t.Fatalf("fallback envelope = %#v", env)
-			}
-		})
+func TestTerminalEnvelopeAndCleanupIgnoreCorruptLocalMetadata(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	jobID := "job_corrupt_metadata"
+	dir, err := jobMetadataDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, encodedStateFilename(jobID)), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	if err := cleanupJobInput(stateDir, jobID, "session_corrupt", engine.StateCompleted, cleanupDispositionVerifiedAbsent, newLocalCleanupWarnings(&stderr)); err != nil {
+		t.Fatalf("cleanupJobInput err=%v, want corrupt metadata warning only", err)
+	}
+	if !strings.Contains(stderr.String(), "Delegate could not read local job metadata") {
+		t.Fatalf("cleanup warning=%q, want corrupt metadata warning", stderr.String())
+	}
+
+	resultSHA := strings.Repeat("8", 64)
+	env, err := terminalEnvelopeFromJobResult(stateDir, client.JobResult{
+		JobID:  jobID,
+		State:  engine.StateCompleted,
+		Result: &engine.ResultInfo{SHA256: resultSHA},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.JobID != jobID || env.Status != engine.StateCompleted || engine.ExitCodeForState(env.Status) != 0 {
+		t.Fatalf("terminal envelope=%#v, want completed authoritative result", env)
+	}
+	if env.Kind != taskKind || env.ContractKind != contractKindShape || env.ResultSHA256 == nil || *env.ResultSHA256 != resultSHA {
+		t.Fatalf("terminal enrichment/result fields=%#v, want defaults with result sha %s", env, resultSHA)
+	}
+}
+
+func TestWaitForJobResultSynthesizesEnvelopeInputForOrphanedTerminalState(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAgentbusClient{resultErr: errors.New("orphaned record cannot be loaded"), status: client.JobStatusResult{Jobs: []client.JobStatus{{JobID: "job_fallback", SessionID: "session_fallback", State: engine.StateOrphaned}}}}
+	result, err := waitForJobResult(context.Background(), fake, stateDir, "job_fallback", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := terminalEnvelopeFromJobResult(stateDir, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.JobID != "job_fallback" || env.Status != engine.StateOrphaned || env.ResultUnavailableReason != resultUnavailableReason(engine.StateOrphaned) {
+		t.Fatalf("fallback envelope = %#v", env)
 	}
 }
 

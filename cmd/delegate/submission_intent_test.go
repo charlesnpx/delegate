@@ -684,7 +684,7 @@ func TestRecoverRequestRestoresNoContractForBackendFailure(t *testing.T) {
 	}
 }
 
-func TestLoadSubmissionIntentValidatesEmbeddedParamsIdentity(t *testing.T) {
+func TestLoadSubmissionIntentValidatesSchemaAndEmbeddedParamsIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		mutate  func(*submissionIntent)
@@ -692,6 +692,13 @@ func TestLoadSubmissionIntentValidatesEmbeddedParamsIdentity(t *testing.T) {
 	}{
 		{
 			name: "matching identity loads",
+		},
+		{
+			name: "unsupported schema fails closed",
+			mutate: func(intent *submissionIntent) {
+				intent.Schema = submissionIntentSchema + 1
+			},
+			wantErr: true,
 		},
 		{
 			name: "request id mismatch fails closed",

@@ -19,6 +19,8 @@ const (
 	initialJobPollInterval                          = 100 * time.Millisecond
 	maximumJobPollInterval                          = 2 * time.Second
 	maxRetryableJobResultErrorsBeforeStatusFallback = 5
+	// Bounds permanent agentbus fail-stop polling while leaving room for ordinary daemon restarts.
+	maxConsecutiveTransportFailures = 25
 )
 
 var jobPollSleep = sleepContext
@@ -75,8 +77,11 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 				result, resultErr := c.JobResult(ctx, client.JobResultParams{JobID: *jobID})
 				terminalJob := terminalJobResultFromResultAndStatus(result, job, true)
 				if resultErr != nil {
-					terminalJob = terminalJobResultFromStatus(job)
 					cleanupStatus("", job, cleanupWarnings)
+					if !terminalStatusDoesNotExpectJobResult(job) {
+						return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(resultErr))
+					}
+					terminalJob = terminalJobResultFromStatus(job)
 				} else {
 					result = terminalJob.result
 					_ = captureBackendError("", job)
@@ -367,10 +372,12 @@ func (result terminalJobResult) envelopeOptions(option terminalEnvelopeOptions) 
 func waitForTerminalJobResult(ctx context.Context, c agentbusClient, stateDir, jobID string, cleanupWarnings *localCleanupWarnings) (terminalJobResult, error) {
 	interval := initialJobPollInterval
 	consecutiveRetryableResultErrors := 0
+	consecutiveTransportFailures := 0
 	for {
 		result, err := c.JobResult(ctx, client.JobResultParams{JobID: jobID})
 		if err == nil {
 			consecutiveRetryableResultErrors = 0
+			consecutiveTransportFailures = 0
 		}
 		if err == nil && engine.IsTerminal(result.State) {
 			statusJob, statusFound := requestedJobStatusForCleanup(ctx, c, stateDir, jobID)
@@ -394,11 +401,19 @@ func waitForTerminalJobResult(ctx context.Context, c agentbusClient, stateDir, j
 				if !statusRetry {
 					return terminalJobResult{}, statusPollErr
 				}
+				consecutiveTransportFailures++
+				if consecutiveTransportFailures >= maxConsecutiveTransportFailures {
+					return terminalJobResult{}, agentbusOperationError(statusErr)
+				}
 			} else {
+				consecutiveTransportFailures = 0
 				cleanupStatuses(stateDir, status, cleanupWarnings)
 				if job, found := findJobStatus(status, jobID); found && engine.IsTerminal(job.State) {
-					if terminalStatusDoesNotExpectJobResult(job) || consecutiveRetryableResultErrors >= maxRetryableJobResultErrorsBeforeStatusFallback {
+					if terminalStatusDoesNotExpectJobResult(job) {
 						return terminalJobResultFromStatus(job), nil
+					}
+					if consecutiveRetryableResultErrors >= maxRetryableJobResultErrorsBeforeStatusFallback {
+						return terminalJobResult{}, err
 					}
 				}
 			}
@@ -457,6 +472,9 @@ func submittedTerminalJob(ctx context.Context, c agentbusClient, stateDir, jobID
 			if err := cleanupJobInput(stateDir, statusJob.JobID, statusJob.SessionID, statusJob.State, statusJob.CleanupDisposition, cleanupWarnings); err != nil {
 				return terminalJobResult{}, err
 			}
+			if !terminalStatusDoesNotExpectJobResult(statusJob) {
+				return terminalJobResult{}, resultErr
+			}
 			return terminalJobResultFromStatus(statusJob), nil
 		}
 		return terminalJobResult{}, resultErr
@@ -468,7 +486,9 @@ func submittedTerminalJob(ctx context.Context, c agentbusClient, stateDir, jobID
 			if err := cleanupJobInput(stateDir, statusJob.JobID, statusJob.SessionID, statusJob.State, statusJob.CleanupDisposition, cleanupWarnings); err != nil {
 				return terminalJobResult{}, err
 			}
-			return terminalJobResultFromStatus(statusJob), nil
+			if terminalStatusDoesNotExpectJobResult(statusJob) {
+				return terminalJobResultFromStatus(statusJob), nil
+			}
 		}
 		return terminalJobResult{}, fmt.Errorf("submitted job %s reported terminal state but job.result returned %q", jobID, result.State)
 	}
@@ -502,6 +522,9 @@ func terminalJobResultFallbackWithStatus(ctx context.Context, c agentbusClient, 
 	if !found || !engine.IsTerminal(job.State) {
 		return terminalJobResult{}, resultErr
 	}
+	if !terminalStatusDoesNotExpectJobResult(job) {
+		return terminalJobResult{}, resultErr
+	}
 	return terminalJobResultFromStatus(job), nil
 }
 
@@ -511,7 +534,13 @@ func terminalJobFromTerminalStatus(ctx context.Context, c agentbusClient, stateD
 		if err := cleanupJobInput(stateDir, job.JobID, job.SessionID, job.State, job.CleanupDisposition, cleanupWarnings); err != nil {
 			return terminalJobResult{}, err
 		}
-		return terminalJobResultFromStatus(job), nil
+		if terminalStatusDoesNotExpectJobResult(job) {
+			return terminalJobResultFromStatus(job), nil
+		}
+		if err != nil {
+			return terminalJobResult{}, err
+		}
+		return terminalJobResult{}, fmt.Errorf("terminal status for job %s was %q but job.result returned %q", job.JobID, job.State, result.State)
 	}
 	terminalJob := terminalJobResultFromResultAndStatus(result, job, true)
 	result = terminalJob.result
@@ -544,6 +573,7 @@ func cleanupDispositionFromResultAndStatus(result client.JobResult, statusJob cl
 
 func waitForJobStatus(ctx context.Context, c agentbusClient, stateDir, jobID string, cleanupWarnings *localCleanupWarnings) (client.JobStatusResult, error) {
 	interval := initialJobPollInterval
+	consecutiveTransportFailures := 0
 	for {
 		status, err := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
 		if err != nil {
@@ -551,7 +581,12 @@ func waitForJobStatus(ctx context.Context, c agentbusClient, stateDir, jobID str
 			if !retry {
 				return client.JobStatusResult{}, pollErr
 			}
+			consecutiveTransportFailures++
+			if consecutiveTransportFailures >= maxConsecutiveTransportFailures {
+				return client.JobStatusResult{}, agentbusOperationError(err)
+			}
 		} else {
+			consecutiveTransportFailures = 0
 			cleanupStatuses(stateDir, status, cleanupWarnings)
 			for _, job := range status.Jobs {
 				if job.JobID == jobID && engine.IsTerminal(job.State) {
@@ -637,7 +672,8 @@ func terminalEnvelopeFromJobResult(stateDir string, result client.JobResult, mod
 func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.JobResult, option terminalEnvelopeOptions) (TerminalEnvelope, error) {
 	meta, found, err := loadJobMetadata(stateDir, result.JobID)
 	if err != nil {
-		return TerminalEnvelope{}, err
+		// Local metadata only enriches the envelope; the agentbus result is authoritative.
+		found = false
 	}
 	cleanupDisposition := option.CleanupDisposition
 	if cleanupDisposition == "" {
