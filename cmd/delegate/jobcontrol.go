@@ -52,7 +52,7 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("--probe-interval must be at least %s", minimumProbeInterval)
 	}
 	ctx := context.Background()
-	stateRoot, err := agentbusStateRootForJob("", *jobID)
+	stateRoot, err := agentbusStateRootForJob("", *jobID, stderr)
 	if err != nil {
 		return 0, err
 	}
@@ -143,11 +143,20 @@ func findJobStatus(status client.JobStatusResult, jobID string) (client.JobStatu
 	return client.JobStatus{}, false
 }
 
-func agentbusStateRootForJob(stateDir, jobID string) (string, error) {
+func agentbusStateRootForJob(stateDir, jobID string, stderr io.Writer) (string, error) {
 	if jobID != "" {
 		recordedRoot, found, err := recordedAgentbusStateRootForJob(stateDir, jobID)
 		if err != nil {
-			return "", err
+			stateRoot, resolveErr := resolveAgentbusStateRoot()
+			if resolveErr != nil {
+				return "", resolveErr
+			}
+			if stderr != nil {
+				if _, warnErr := fmt.Fprintf(stderr, "warning: delegate could not use recorded AgentBus state root for job %q; using default resolved AgentBus state root instead, so a job created with a non-default root may be reported as not found: %v\n", jobID, err); warnErr != nil {
+					return "", warnErr
+				}
+			}
+			return stateRoot, nil
 		}
 		if found {
 			return recordedRoot, nil
@@ -220,7 +229,7 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("delegate result requires --job")
 	}
 	ctx := context.Background()
-	stateRoot, err := agentbusStateRootForJob("", *jobID)
+	stateRoot, err := agentbusStateRootForJob("", *jobID, stderr)
 	if err != nil {
 		return 0, err
 	}
@@ -274,7 +283,7 @@ func runCancel(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, fmt.Errorf("delegate cancel requires --job")
 	}
 	ctx := context.Background()
-	stateRoot, err := agentbusStateRootForJob("", *jobID)
+	stateRoot, err := agentbusStateRootForJob("", *jobID, stderr)
 	if err != nil {
 		return 0, err
 	}
