@@ -200,3 +200,9 @@ Base SHA: `21b6f01` (branch `delegate-v0.6-protocol-v2-cut`). Risk: medium. Foll
 **Deliberately deferred (non-blocking debt, unchanged):** wiring/removing the dead-code `sweepTerminalJobInputs` wrapper (latent feature, separate unit); installer `--plan` sandbox-root accuracy (low). **Declined:** upstream agentbus typed startup/fail-stop error (separate repo).
 
 - **Gates:** `go build ./...`=0, `gofmt -l cmd/delegate` empty, `go vet ./...`, full `go test ./...`; focused regression per H1/H2/M1/M2. Review: gpt-5.6-sol high, refute-first, SHA-bound, max 4 iterations.
+
+### D11 — COMPLETE (pushed pending)
+- Impl: gpt-5.5 xhigh worker → H1/H2/M1/M2 + dead-code delete. Commit `cefe172`.
+- Orchestrator gate (module env): build/vet/gofmt clean, full `go test ./...`=ok. H1 assumption (JobResult error = observation failure, not result-absence) verified against agentbus v0.6 `authorityResult` (returns successful nil-payload JobResult for resultless terminals; errors only on unknown-job/corruption/fail-stop) → H1 safe for all terminal states, not just orphaned.
+- Review round 1 (gpt-5.6-sol high, SHA-bound `32a1300..cefe172`): **SHIP**, no Critical/High/Medium/worthwhile-Low. Loop closed at iteration 1.
+- Not pushed yet: `32a1300` (ledger), `cefe172` (code) local on `delegate-v0.6-protocol-v2-cut`. Push/PR update pending user approval.
