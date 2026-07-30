@@ -303,7 +303,7 @@ record_codex_sandbox_action() {
         else
           agentbus_state="$state_home/agentbus"
         fi
-        if [[ "$(uname -s)" == "Darwin" ]]; then
+        if [[ "${OSTYPE:-}" == darwin* ]]; then
           agentbus_cache="$HOME/Library/Caches/agentbus"
         else
           cache_home=${XDG_CACHE_HOME:-"$HOME/.cache"}
