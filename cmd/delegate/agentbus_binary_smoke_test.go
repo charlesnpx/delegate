@@ -151,7 +151,7 @@ func agentbusV06SmokeBinary(t *testing.T) (string, string) {
 		t.Skipf("agentbus VERSION = %q, want 0.6.0", tagVersion)
 	}
 	bin := filepath.Join(base, "agentbus")
-	build := exec.Command("go", "build", "-trimpath", "-ldflags", "-X main.version="+tagVersion, "-o", bin, "./cmd/agentbus")
+	build := exec.Command("go", "build", "-modcacherw", "-trimpath", "-ldflags", "-X main.version="+tagVersion, "-o", bin, "./cmd/agentbus")
 	build.Dir = src
 	build.Env = append(os.Environ(),
 		"GOFLAGS=-mod=readonly",

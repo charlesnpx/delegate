@@ -278,17 +278,6 @@ build_delegate() {
     return
   fi
 
-  if [[ -d "$REPO_ROOT/vendor" ]]; then
-    add_warning "go build -mod=readonly failed; used -mod=vendor fallback"
-    if (
-      cd -- "$REPO_ROOT"
-      go build -mod=vendor -trimpath -ldflags "-X main.Version=$VERSION" -o "$output" ./cmd/delegate
-    ) 2>>"$err_file"; then
-      rm -f -- "$err_file"
-      return
-    fi
-  fi
-
   printf 'delegate installer: go build failed\n' >&2
   sed 's/^/go build: /' "$err_file" >&2
   rm -f -- "$err_file"

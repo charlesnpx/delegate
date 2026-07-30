@@ -180,6 +180,7 @@ func TestDelegatedInstallerLiveCodexInstallConfiguresSandbox(t *testing.T) {
 	stateHome := filepath.Join(home, "state")
 	gocache := privateTmpDir(t, "delegate-gocache-*")
 	gomodcache := privateTmpDir(t, "delegate-gomodcache-*")
+	warmDelegateModuleCache(t, gomodcache, gocache)
 	env := []string{
 		"HOME=" + home,
 		"CODEX_HOME=" + codexHome,
@@ -188,6 +189,7 @@ func TestDelegatedInstallerLiveCodexInstallConfiguresSandbox(t *testing.T) {
 		"GOMODCACHE=" + gomodcache,
 		"GOPROXY=off",
 		"GOSUMDB=off",
+		"GOFLAGS=-modcacherw",
 	}
 
 	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "codex", "--json"}, env)
@@ -242,10 +244,14 @@ func TestDelegatedInstallerToolsInstallBuildsDelegate(t *testing.T) {
 	}
 	root := filepath.Join(tmp, "root")
 	gocache := privateTmpDir(t, "delegate-gocache-*")
+	gomodcache := privateTmpDir(t, "delegate-gomodcache-*")
+	warmDelegateModuleCache(t, gomodcache, gocache)
 	env := []string{
 		"GOCACHE=" + gocache,
+		"GOMODCACHE=" + gomodcache,
 		"GOPROXY=off",
 		"GOSUMDB=off",
+		"GOFLAGS=-modcacherw",
 	}
 
 	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "tools", "--json", "--install-root", root}, env)
@@ -322,4 +328,52 @@ func privateTmpDir(t *testing.T, pattern string) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
+}
+
+func warmDelegateModuleCache(t *testing.T, gomodcache, gocache string) {
+	t.Helper()
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "mod", "download", "all")
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(),
+		"GOCACHE="+gocache,
+		"GOMODCACHE="+gomodcache,
+		"GOFLAGS=-modcacherw",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return
+	}
+	msg := strings.TrimSpace(string(out))
+	if moduleCacheWarmupEnvironmentBlocked(msg) {
+		t.Skipf("warm module cache for offline installer test: %v: %s", err, msg)
+	}
+	t.Fatalf("warm module cache for offline installer test: %v\n%s", err, msg)
+}
+
+func moduleCacheWarmupEnvironmentBlocked(output string) bool {
+	lower := strings.ToLower(output)
+	for _, marker := range []string{
+		"goproxy=off",
+		"module lookup disabled",
+		"operation not permitted",
+		"network is unreachable",
+		"no route to host",
+		"no such host",
+		"could not resolve host",
+		"temporary failure in name resolution",
+		"i/o timeout",
+		"tls handshake timeout",
+		"connection refused",
+		"connection reset",
+		"proxyconnect tcp",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
