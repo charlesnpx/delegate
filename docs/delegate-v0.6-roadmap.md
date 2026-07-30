@@ -174,7 +174,7 @@ Base SHA: `e1b03246` (branch `delegate-v0.6-protocol-v2-cut`). Risk: medium. Fol
 
 - **Gates:** `go build ./...`=0, `gofmt -l` empty, `go vet ./...`, full `go test ./...`; focused regression tests for each of F1-F5. Review: gpt-5.6-sol high, refute-first, SHA-bound, max 4 iterations.
 
-### D10 — COMPLETE (local, unpushed)
+### D10 — COMPLETE (pushed to PR #17)
 - **Impl:** gpt-5.5 xhigh worker → all five fixes F1-F5 in `cmd/delegate/*.go` (+8 focused regression tests). Commit `1a36102`.
 - **Review round 1** (gpt-5.6-sol high, SHA-bound `9c3b9de..1a36102`): FIX — 3 High, all accepted as reachable defects introduced by the diff:
   - H1: retry-branch reconnect+persist double-failure could return a plain error → review.go deletes a daemon-owned CWD.
@@ -184,4 +184,19 @@ Base SHA: `e1b03246` (branch `delegate-v0.6-protocol-v2-cut`). Risk: medium. Fol
 - **Review round 2** (gpt-5.6-sol high, SHA-bound `1a36102..456fad8`, full unit `9c3b9de..456fad8`): **SHIP**, no Critical/High/Medium/worthwhile-Low. Loop closed at iteration 2 of max 4.
 - **Gates (orchestrator, network+socket env):** `go build ./...`=0, `gofmt -l cmd/delegate` empty, `go vet ./...`=0, full `go test ./...`=ok. Scope strictly `cmd/delegate/*.go`.
 - **Residual (accepted):** H3 persistent metadata-save double-failure leaves stale on-disk paths (false retained=true) — degraded-disk case; terminal outcome always preserved + warned. Deferred lows (unchanged): dead-code `sweepTerminalJobInputs` wrapper; installer `--plan` root accuracy; PR-body smoke-skip wording.
-- **Not pushed:** commits `9c3b9de` (ledger), `1a36102`, `456fad8` are local on `delegate-v0.6-protocol-v2-cut`. Pushing / updating PR #17 is an external write pending user approval.
+- **Pushed:** commits `9c3b9de` (ledger), `1a36102`, `456fad8`, `21b6f01` (ledger) fast-forwarded to `origin/delegate-v0.6-protocol-v2-cut` (`e1b0324..21b6f01`) under user approval; PR #17 body updated with the D10 section and corrected binary-smoke wording.
+
+---
+
+## D11 — Second-review hardening (result fidelity, fail-stop bound, metadata resilience, schema fail-closed)
+Base SHA: `21b6f01` (branch `delegate-v0.6-protocol-v2-cut`). Risk: medium. Follow-up to the round-2 external review of PR #17. Two Highs are extensions of D10 fixes I under-scoped; two Mediums are cheap fail-closed/resilience hardening. Orchestrator triage recorded; the upstream "agentbus should expose a typed startup/fail-stop error" ask is a separate-repo enhancement and is OUT OF SCOPE (noted as an upstream follow-up).
+
+- **H1 — result fidelity on the non-wait paths (completes D10 F2).** F2 only fixed the `--wait` loop. The single-shot paths still replace ANY `JobResult` error with a status-only, resultless envelope: `terminalJobResultFallbackWithStatus` (jobcontrol.go:495, used by `result` no-wait), `runStatus` terminal branch (jobcontrol.go:72-88), cancel's `terminalJobFromTerminalStatus`, and dedup/replay's `submittedTerminalJob` (jobcontrol.go:455-460). A transient blip on a `completed` job then exits 0 as `completed_without_result`, dropping the real hash+contract. Fix: status-only fallback is permitted ONLY for intrinsically resultless terminal states (reuse `terminalStatusDoesNotExpectJobResult` = orphaned); for a normally-resultful terminal, surface the observation error (single-shot → non-zero exit) instead of a false resultless success. Also gate `--wait`'s post-retry-cap fallback on the same predicate.
+- **H2 — bound consecutive transport failures so a real fail-stop can't loop `--wait` forever.** `agentbusOperationError` turns every non-RPC/startup error into retryable transport; the wait loops (`waitForTerminalJobResult`, `waitForJobStatus`) have no total transport budget. On a permanent fail-stop where BOTH result and status fail with untyped errors, the loop never terminalizes. Fix: add a consecutive-transport-failure budget (reset on any successful observation; generous enough to survive an ordinary daemon restart) after which the wait returns the transport error (exit 11). Deterministic count-based cap for testability.
+- **M1 — corrupt/unreadable local job metadata must not suppress the authoritative outcome.** `terminalEnvelopeFromJobResultWithOptions` hard-fails on a metadata read/parse error (jobcontrol.go:631-634) and `cleanupJobInput` returns it (jobmeta.go:239-243). Local bookkeeping is enrichment, not the source of truth. Fix (narrow): treat a metadata read/parse error like not-found — best-effort warn, proceed with defaults, still emit the authoritative terminal envelope; `cleanupJobInput` warns and returns nil on an unreadable-metadata load error.
+- **M2 — fail closed on unsupported submission-intent schema (revises the earlier YAGNI rejection).** The intent file is durable state that outlives the binary version, so `loadSubmissionIntent` must reject an unsupported `schema` rather than silently treating 0/2/any as schema 1 and resubmitting with possibly-misread params. Fix: reject `intent.Schema != submissionIntentSchema` with a clear fail-closed error. ~2 lines + a test.
+- **Cleanups:** delete the dead, unreferenced `job_<hex>` generator (`cmd/delegate/jobid.go` — `newJobID`/`randomJobID`, no callers). Fix the now-stale roadmap D10 "local, unpushed" note (done, orchestrator).
+
+**Deliberately deferred (non-blocking debt, unchanged):** wiring/removing the dead-code `sweepTerminalJobInputs` wrapper (latent feature, separate unit); installer `--plan` sandbox-root accuracy (low). **Declined:** upstream agentbus typed startup/fail-stop error (separate repo).
+
+- **Gates:** `go build ./...`=0, `gofmt -l cmd/delegate` empty, `go vet ./...`, full `go test ./...`; focused regression per H1/H2/M1/M2. Review: gpt-5.6-sol high, refute-first, SHA-bound, max 4 iterations.
