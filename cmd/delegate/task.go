@@ -518,10 +518,7 @@ func submitIntentWithRetry(ctx context.Context, c agentbusClient, hello client.H
 				if err := transitionSubmissionIntent(stateDir, intent, submissionPhaseBlocked, func(intent *submissionIntent) {
 					intent.LastError = lastError
 				}); err != nil {
-					if classification.Retryable || classification.PreserveIntent {
-						return client.JobSubmitResult{}, c, hello, submissionUnresolvedError{RequestID: intent.RequestID, Err: opErr}
-					}
-					return client.JobSubmitResult{}, c, hello, opErr
+					return client.JobSubmitResult{}, c, hello, submissionUnresolvedError{RequestID: intent.RequestID, Err: opErr}
 				}
 				return client.JobSubmitResult{}, c, hello, submissionUnresolvedError{RequestID: intent.RequestID, Err: opErr}
 			}

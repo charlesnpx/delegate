@@ -373,6 +373,59 @@ func TestSubmitIntentWithRetryRetryablePersistFailureIsUnresolved(t *testing.T) 
 	}
 }
 
+func TestSubmitIntentWithRetryReconnectPersistFailureIsUnresolved(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	params := testSubmitParams(t, "delegate-55555555555555555555555555555555", "retryable reconnect persist failure", nil)
+	intent := testSubmissionIntent(params, t.TempDir())
+	fake := &fakeAgentbusClient{
+		hello:     helloWithCapabilities(),
+		submitErr: errors.New("lost response after accept"),
+	}
+	oldConnect := connectAgentbus
+	oldLookPath := lookPath
+	connectAgentbus = func(context.Context, client.Options) (agentbusClient, error) {
+		return nil, client.ErrProtocolVersionMismatch
+	}
+	lookPath = func(string) (string, error) {
+		return "", errors.New("agentbus not found")
+	}
+	t.Cleanup(func() {
+		connectAgentbus = oldConnect
+		lookPath = oldLookPath
+	})
+
+	persistErr := errors.New("persist blocked transition")
+	realSave := saveSubmissionIntent
+	saveSubmissionIntent = func(stateDir string, intent submissionIntent) error {
+		if intent.Phase == submissionPhaseBlocked {
+			return persistErr
+		}
+		return realSave(stateDir, intent)
+	}
+	defer func() { saveSubmissionIntent = realSave }()
+
+	_, _, _, err := submitIntentWithRetry(context.Background(), fake, fake.hello, stateDir, &intent, nil)
+	if err == nil {
+		t.Fatal("submitIntentWithRetry error = nil, want unresolved error")
+	}
+	var unresolved submissionUnresolvedError
+	if !errors.As(err, &unresolved) {
+		t.Fatalf("error = %T %[1]v, want submissionUnresolvedError", err)
+	}
+	if unresolved.RequestID != params.RequestID {
+		t.Fatalf("unresolved request_id=%q, want %q", unresolved.RequestID, params.RequestID)
+	}
+	if !errors.Is(err, client.ErrProtocolVersionMismatch) {
+		t.Fatalf("unresolved cause=%T %[1]v, want protocol mismatch", errors.Unwrap(err))
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("JobSubmit calls=%d, want one attempted submit", len(fake.submits))
+	}
+}
+
 func TestSubmitIntentWithRetryDefinitivePersistFailureIsNotUnresolved(t *testing.T) {
 	stateDir := t.TempDir()
 	if err := os.Chmod(stateDir, 0o700); err != nil {

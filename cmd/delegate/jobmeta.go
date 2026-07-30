@@ -162,7 +162,9 @@ func captureBackendError(stateDir string, job client.JobStatus) error {
 	return saveJobMetadata(stateDir, meta)
 }
 
-func saveJobMetadata(stateDir string, meta jobMetadata) error {
+var saveJobMetadata = saveJobMetadataFile
+
+func saveJobMetadataFile(stateDir string, meta jobMetadata) error {
 	if err := validateDelegateJobID(meta.JobID); err != nil {
 		return err
 	}
@@ -255,39 +257,41 @@ func cleanupJobInput(stateDir, jobID, sessionID string, state engine.JobState, c
 	cleanupSafe := engine.IsTerminal(state) && localCleanupSafe(cleanupDisposition)
 	retainedArtifacts := meta.JobInputPath != "" || meta.ReviewWorkspace != ""
 	if retainedArtifacts && !cleanupSafe {
-		if err := warnLocalArtifactsRetained(warnings, jobID, state, cleanupDisposition); err != nil {
-			return err
-		}
+		_ = warnLocalArtifactsRetained(warnings, jobID, state, cleanupDisposition)
 	}
+	clearedArtifacts := false
 	if meta.JobInputPath != "" && cleanupSafe {
 		input := handoff.JobInput{JobID: jobID, Path: meta.JobInputPath}
 		_, err = deleteJobInputOnTerminalState(input, state, cleanupDisposition, handoff.Hooks{})
 		if err != nil {
-			if warnErr := warnLocalCleanupFailure(warnings, jobID, "job input", err); warnErr != nil {
-				return warnErr
-			}
+			_ = warnLocalCleanupFailure(warnings, jobID, "job input", err)
 		} else {
 			meta.JobInputPath = ""
 			changed = true
+			clearedArtifacts = true
 		}
 	}
 	if meta.ReviewWorkspace != "" && cleanupSafe {
 		if err := cleanupReviewWorkspace(stateDir, meta.ReviewWorkspace); err != nil {
-			if warnErr := warnLocalCleanupFailure(warnings, jobID, "review workspace", err); warnErr != nil {
-				return warnErr
-			}
+			_ = warnLocalCleanupFailure(warnings, jobID, "review workspace", err)
 		} else {
 			meta.ReviewWorkspace = ""
 			changed = true
+			clearedArtifacts = true
 		}
 	}
 	if !changed {
 		return nil
 	}
 	if err := saveJobMetadata(stateDir, meta); err != nil {
-		if warnErr := warnings.warn(jobID, fmt.Sprintf("Delegate could not persist local cleanup metadata; terminal outcome was preserved: %v", err)); warnErr != nil {
-			return warnErr
+		if clearedArtifacts {
+			if retryErr := saveJobMetadata(stateDir, meta); retryErr == nil {
+				return nil
+			} else {
+				err = retryErr
+			}
 		}
+		_ = warnings.warn(jobID, fmt.Sprintf("Delegate could not persist local cleanup metadata; terminal outcome was preserved: %v", err))
 	}
 	return nil
 }

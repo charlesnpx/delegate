@@ -323,6 +323,107 @@ func TestSafeCleanupFailureWarnsRetainsArtifactsAndPreservesOutcome(t *testing.T
 	if meta.JobInputPath == "" || meta.ReviewWorkspace == "" || meta.CleanupDisposition != cleanupDispositionVerifiedAbsent {
 		t.Fatalf("metadata after failed cleanup=%#v, want artifact paths retained and disposition recorded", meta)
 	}
+
+	jobID = "job_safe_cleanup_warning_writer_failure"
+	resultSHA = strings.Repeat("7", 64)
+	fake.result = client.JobResult{
+		JobID:              jobID,
+		SessionID:          "session_safe_cleanup_warning_writer_failure",
+		State:              engine.StateCompleted,
+		CleanupDisposition: cleanupDispositionVerifiedAbsent,
+		Result:             &engine.ResultInfo{SHA256: resultSHA},
+	}
+	_, inputPath, workspace = prepareCleanupDispositionArtifacts(t, jobID)
+
+	stdout.Reset()
+	failingStderr := &failingCleanupWarningWriter{err: errors.New("warning writer failed")}
+	code = run([]string{"result", "--job", jobID, "--json"}, nil, &stdout, failingStderr)
+	if code != 0 {
+		t.Fatalf("result code=%d stdout=%q, want success despite cleanup and warning-writer failures", code, stdout.String())
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON: %v; raw=%q", err, stdout.String())
+	}
+	if env.Status != engine.StateCompleted || env.ResultSHA256 == nil || *env.ResultSHA256 != resultSHA {
+		t.Fatalf("terminal envelope=%#v, want completed result %s", env, resultSHA)
+	}
+	if env.CleanupDisposition != cleanupDispositionVerifiedAbsent || !env.LocalArtifactsRetained {
+		t.Fatalf("cleanup fields=%#v, want verified_absent with local_artifacts_retained=true", env)
+	}
+	assertPathExists(t, inputPath)
+	assertPathExists(t, workspace)
+	if failingStderr.writes == 0 {
+		t.Fatal("warning writer writes=0, want cleanup warnings attempted")
+	}
+}
+
+func TestSafeCleanupMetadataSaveRetryKeepsRetainedFlagAccurate(t *testing.T) {
+	jobID := "job_safe_cleanup_save_retry"
+	resultSHA := strings.Repeat("8", 64)
+	fake := &fakeAgentbusClient{
+		hello: helloWithCapabilities(),
+		result: client.JobResult{
+			JobID:              jobID,
+			SessionID:          "session_safe_cleanup_save_retry",
+			State:              engine.StateCompleted,
+			CleanupDisposition: cleanupDispositionVerifiedAbsent,
+			Result:             &engine.ResultInfo{SHA256: resultSHA},
+		},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	_, inputPath, workspace := prepareCleanupDispositionArtifacts(t, jobID)
+
+	realSave := saveJobMetadata
+	cleanedSaveCalls := 0
+	saveJobMetadata = func(stateDir string, meta jobMetadata) error {
+		if meta.JobID == jobID && meta.JobInputPath == "" && meta.ReviewWorkspace == "" {
+			cleanedSaveCalls++
+			if cleanedSaveCalls == 1 {
+				return errors.New("persist cleaned metadata failed")
+			}
+		}
+		return realSave(stateDir, meta)
+	}
+	defer func() { saveJobMetadata = realSave }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"result", "--job", jobID, "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("result code=%d stderr=%q stdout=%q, want success despite transient metadata save failure", code, stderr.String(), stdout.String())
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON: %v; raw=%q", err, stdout.String())
+	}
+	if env.Status != engine.StateCompleted || env.ResultSHA256 == nil || *env.ResultSHA256 != resultSHA {
+		t.Fatalf("terminal envelope=%#v, want completed result %s", env, resultSHA)
+	}
+	if env.CleanupDisposition != cleanupDispositionVerifiedAbsent || env.LocalArtifactsRetained {
+		t.Fatalf("cleanup fields=%#v, want verified_absent with local_artifacts_retained=false", env)
+	}
+	if cleanedSaveCalls != 2 {
+		t.Fatalf("cleaned metadata save calls=%d, want initial failure plus retry", cleanedSaveCalls)
+	}
+	assertPathMissing(t, inputPath)
+	assertPathMissing(t, workspace)
+	meta, found, err := loadJobMetadata("", jobID)
+	if err != nil || !found {
+		t.Fatalf("metadata found=%v err=%v", found, err)
+	}
+	if meta.JobInputPath != "" || meta.ReviewWorkspace != "" || meta.CleanupDisposition != cleanupDispositionVerifiedAbsent {
+		t.Fatalf("metadata after cleanup retry=%#v, want removed artifacts and disposition recorded", meta)
+	}
+}
+
+type failingCleanupWarningWriter struct {
+	err    error
+	writes int
+}
+
+func (w *failingCleanupWarningWriter) Write([]byte) (int, error) {
+	w.writes++
+	return 0, w.err
 }
 
 func TestMissingCleanupDispositionOnTerminalJobRetainsArtifacts(t *testing.T) {
