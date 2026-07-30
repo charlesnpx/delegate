@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -60,6 +61,33 @@ func TestDelegatedInstallerPlanReportsSetupWhenToolsMissing(t *testing.T) {
 	}
 	if !setup["go"] || !setup["agentbus"] {
 		t.Fatalf("setup = %#v, want go and agentbus executable requirements", result.Setup)
+	}
+}
+
+func TestDelegatedInstallerCodexPlanReportsSandboxRootsFromEnv(t *testing.T) {
+	tmp := privateTmpDir(t, "delegate-plan-sandbox-*")
+	home := filepath.Join(tmp, "home")
+	codexHome := filepath.Join(tmp, "codex-home")
+	stateHome := filepath.Join(tmp, "state")
+	agentbusState := filepath.Join(tmp, "agentbus-state")
+	cacheHome := filepath.Join(tmp, "cache")
+	agentbusCache := filepath.Join(cacheHome, "agentbus")
+	if runtime.GOOS == "darwin" {
+		agentbusCache = filepath.Join(home, "Library", "Caches", "agentbus")
+	}
+
+	result := runDelegatedInstallerScript(t, []string{"--plan", "--target", "codex", "--json"}, []string{
+		"HOME=" + home,
+		"CODEX_HOME=" + codexHome,
+		"XDG_STATE_HOME=" + stateHome,
+		"AGENTBUS_STATE_ROOT=" + agentbusState,
+		"XDG_CACHE_HOME=" + cacheHome,
+	})
+	wantWarning := "codex sandbox writable_roots would-configure: " +
+		agentbusState + ", " + agentbusCache + ", " + filepath.Join(stateHome, "delegate") +
+		" (config " + filepath.Join(codexHome, "config.toml") + ")"
+	if len(result.Warnings) != 1 || result.Warnings[0] != wantWarning {
+		t.Fatalf("warnings = %#v, want [%q]", result.Warnings, wantWarning)
 	}
 }
 

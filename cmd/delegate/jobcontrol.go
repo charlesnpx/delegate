@@ -11,7 +11,6 @@ import (
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
 	"github.com/charlesnpx/delegate/internal/config"
-	"github.com/charlesnpx/delegate/internal/handoff"
 	"github.com/charlesnpx/delegate/internal/policy"
 )
 
@@ -657,25 +656,6 @@ func requestedJobStatusForCleanup(ctx context.Context, c agentbusClient, stateDi
 		return job, true
 	}
 	return client.JobStatus{}, false
-}
-
-func sweepTerminalJobInputs(ctx context.Context, c agentbusClient, stateDir string) error {
-	removed, terminalSweepErr := handoff.SweepTerminalJobInputs(stateDir, func(jobID string) (engine.JobState, string, bool, error) {
-		status, err := c.JobStatus(ctx, client.JobStatusParams{JobID: jobID})
-		if err != nil {
-			return "", "", false, err
-		}
-		job, found := findJobStatus(status, jobID)
-		if !found {
-			return "", "", false, nil
-		}
-		return job.State, job.CleanupDisposition, true, nil
-	}, handoff.Hooks{})
-	sweepErr := terminalSweepErr
-	for _, input := range removed {
-		sweepErr = errors.Join(sweepErr, cleanupJobInput(stateDir, input.JobID, "", input.State, input.CleanupDisposition, nil))
-	}
-	return sweepErr
 }
 
 func terminalEnvelopeFromJobResult(stateDir string, result client.JobResult, modelsReportedCapable ...bool) (TerminalEnvelope, error) {
