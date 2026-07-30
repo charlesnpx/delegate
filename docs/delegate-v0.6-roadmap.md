@@ -50,8 +50,10 @@ Each unit lands with its own behavioral tests. D8 is the black-box closure, not 
 - **D7** ✅ `fa5d6fb` — cancel→status/result + gated cleanup; wait/poll reclassification (no infinite loops); ctx-cancel preserves intent. review1 SHIP (reviewer cross-checked against tagged agentbus v0.6.0 source). gate green.
 - **D8** ✅ `fe2aa82` + fix `16b128a` — setup readiness (writable+strict), narrow codex sandbox roots, observational probe verdicts, docs/skills/README rewrite (skill content v0.6.0), acceptance battery + real agentbus-v0.6 binary integration smoke (passes in socket-capable env). review: iter1 FIX (2 High: setup `ready` ignored writable checks; smoke skip-guard masked real failures — both accepted+fixed; +1 Low: over-broad public-surface guard, fixed), iter2 SHIP.
 
-## CAMPAIGN COMPLETE (pending whole-tree review + approval-gated push/PR)
-All eight units D1–D8 implemented, independently gated (build/vet/gofmt/`go test ./...` = 0), and adversarially reviewed to SHIP (D5 and D8 took 2 review iterations; the rest 1). The real agentbus v0.6.0 binary integration smoke drives a live identified submit→status→result and passes. Remaining: whole-tree integration review, then the approval-gated `git push` of `delegate-v0.6-protocol-v2-cut` + PR open (external writes — NOT yet authorized).
+## CAMPAIGN COMPLETE (pending approval-gated push/PR)
+All eight units D1–D8 implemented, independently gated (build/vet/gofmt/`go test ./...` = 0), and adversarially reviewed to SHIP (D5 and D8 took 2 review iterations; the rest 1). A **whole-tree integration review** (`74e4b3f`) returned SHIP (no Critical/High) with 3 Medium + 1 Low cross-unit seam findings, all applied and gate-verified: setup delegate-state readiness (D2↔D8), handoff-payload recovery ownership + truthful `local_artifacts_retained` (D3↔D5/D6), `--no-contract` recovery fidelity (D3↔D6), and a README `status --all` doc fix. The real agentbus v0.6.0 binary integration smoke drives a live identified submit→status→result and passes.
+
+Tip: `74e4b3f`. Remaining work is ONLY approval-gated external writes: `git push` of `delegate-v0.6-protocol-v2-cut` to origin and opening the PR (base `main`). NOT yet authorized.
 
 ---
 
