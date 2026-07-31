@@ -14,7 +14,7 @@ import (
 	"github.com/charlesnpx/agentbus/engine"
 )
 
-func TestRunStatusProbeFlatWithInjectedProcessSocketAndFS(t *testing.T) {
+func TestRunStatusProbeNoActivityObservedWithInjectedProcessSocketAndFS(t *testing.T) {
 	restoreProbe := stubProbeOps(t, probeOps{
 		ProcessIdentity: matchingProcessIdentity(200, "backend-start"),
 		Process: sequenceProcess(
@@ -37,6 +37,8 @@ func TestRunStatusProbeFlatWithInjectedProcessSocketAndFS(t *testing.T) {
 		status: client.JobStatusResult{Jobs: []client.JobStatus{{
 			JobID:                 "job_probe",
 			State:                 engine.StateRunning,
+			CleanupDisposition:    cleanupDispositionUnresolved,
+			Warnings:              []string{"authority warning"},
 			WorkerPID:             100,
 			WorkerStartTime:       "worker-start",
 			BackendChildPID:       200,
@@ -56,8 +58,11 @@ func TestRunStatusProbeFlatWithInjectedProcessSocketAndFS(t *testing.T) {
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
 		t.Fatalf("probe JSON invalid: %v; raw = %q", err, stdout.String())
 	}
-	if result.Verdict != probeVerdictStalled {
-		t.Fatalf("verdict = %q, want %q", result.Verdict, probeVerdictStalled)
+	if result.Verdict != probeVerdictNoActivityObserved {
+		t.Fatalf("verdict = %q, want %q", result.Verdict, probeVerdictNoActivityObserved)
+	}
+	if result.AuthorityState != engine.StateRunning || result.CleanupDisposition != cleanupDispositionUnresolved || len(result.AuthorityWarnings) != 1 || result.AuthorityWarnings[0] != "authority warning" {
+		t.Fatalf("authority fields = state:%q cleanup:%q warnings:%#v", result.AuthorityState, result.CleanupDisposition, result.AuthorityWarnings)
 	}
 	if result.ProbedPID != 200 {
 		t.Fatalf("probed pid = %d, want backend child pid 200", result.ProbedPID)
@@ -69,7 +74,7 @@ func TestRunStatusProbeFlatWithInjectedProcessSocketAndFS(t *testing.T) {
 	}
 }
 
-func TestRunStatusProbeExpiredLeaseIsImmediateStallSignal(t *testing.T) {
+func TestRunStatusProbeExpiredLeaseIsInconclusive(t *testing.T) {
 	restoreProbe := stubProbeOps(t, probeOps{
 		Process: func(context.Context, int) processObservation {
 			t.Fatal("process probe should not run for expired lease")
@@ -106,8 +111,11 @@ func TestRunStatusProbeExpiredLeaseIsImmediateStallSignal(t *testing.T) {
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
 		t.Fatalf("probe JSON invalid: %v; raw = %q", err, stdout.String())
 	}
-	if result.Verdict != probeVerdictStalledExpiredLease || !result.LeaseExpired {
-		t.Fatalf("probe result = %#v, want expired lease stall", result)
+	if result.Verdict != probeVerdictInconclusive || !result.LeaseExpired {
+		t.Fatalf("probe result = %#v, want expired lease inconclusive", result)
+	}
+	if !strings.Contains(result.VerdictReason, "authority state remains authoritative") {
+		t.Fatalf("verdict reason = %q, want authority-state caveat", result.VerdictReason)
 	}
 	if len(result.Probes) != 3 {
 		t.Fatalf("probes = %d, want skipped triple", len(result.Probes))
@@ -345,8 +353,8 @@ func TestLivenessVerdictActiveWhenAnyProbeMoves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := livenessVerdict(probes); got != probeVerdictActive {
-		t.Fatalf("verdict = %q, want active", got)
+	if got := livenessVerdict(probes); got != probeVerdictActivityObserved {
+		t.Fatalf("verdict = %q, want activity observed", got)
 	}
 }
 

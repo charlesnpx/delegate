@@ -49,10 +49,10 @@ func TestResolveTurnPolicyFlagMatrix(t *testing.T) {
 				t.Fatal("ResolveTurnPolicy() = nil, want policy")
 			}
 			if got.Prologue != DelegateContractDigest() {
-				t.Fatal("policy prologue does not match embedded digest")
+				t.Fatal("policy prologue does not match bundled digest")
 			}
 			if got.Contract == nil || !reflect.DeepEqual(*got.Contract, spec) {
-				t.Fatalf("policy contract = %#v, want embedded spec %#v", got.Contract, spec)
+				t.Fatalf("policy contract = %#v, want bundled spec %#v", got.Contract, spec)
 			}
 			if tc.wantRetry {
 				if got.Retry == nil {
@@ -127,7 +127,7 @@ func TestDelegateReportSpecAndRegistryImmutability(t *testing.T) {
 		t.Fatalf("RegisterDelegateReport() error = %v", err)
 	}
 	if gotHash != hash {
-		t.Fatalf("registered hash = %q, want embedded data hash %q", gotHash, hash)
+		t.Fatalf("registered hash = %q, want bundled data hash %q", gotHash, hash)
 	}
 	gotHash, err = RegisterDelegateReport(registry)
 	if err != nil {
@@ -198,16 +198,16 @@ func TestDelegateReportSpecShape(t *testing.T) {
 	}
 }
 
-func TestDigestEmbeddedEqualsFile(t *testing.T) {
+func TestDigestBundleEqualsFile(t *testing.T) {
 	if strings.TrimSpace(DelegateContractDigest()) == "" {
-		t.Fatal("embedded digest is empty")
+		t.Fatal("bundled digest is empty")
 	}
 	file, err := os.ReadFile("digest/delegate-contract.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if DelegateContractDigest() != string(file) {
-		t.Fatal("embedded digest does not match digest/delegate-contract.md")
+		t.Fatal("bundled digest does not match digest/delegate-contract.md")
 	}
 }
 

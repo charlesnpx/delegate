@@ -21,27 +21,104 @@ const (
 	backendDiagnosticMaxBytes  = 2 * 1024
 	backendDiagnosticReadBytes = 64 * 1024
 	backendDiagnosticTruncated = "\n[truncated]"
+	jobMetadataSchema          = 1
+
+	cleanupDispositionNoExecutionPossible = "no_execution_possible"
+	cleanupDispositionVerifiedAbsent      = "verified_absent"
+	cleanupDispositionUnresolved          = "unresolved"
+
+	cleanupDispositionUnresolvedWarning = "Agentbus reported cleanupDisposition=unresolved; delegate retained local job artifacts because backend absence is unproven"
+)
+
+var (
+	deleteJobInputOnTerminalState = handoff.DeleteJobInputOnTerminalState
+	cleanupReviewWorkspace        = reviewpkg.CleanupWorkspace
 )
 
 type jobMetadata struct {
-	Schema          int                        `json:"schema"`
-	JobID           string                     `json:"job_id"`
-	Kind            string                     `json:"kind"`
-	Backend         string                     `json:"backend,omitempty"`
-	CWD             string                     `json:"cwd,omitempty"`
-	SessionID       string                     `json:"session_id,omitempty"`
-	ContractKind    string                     `json:"contractKind"`
-	NoContract      bool                       `json:"no_contract,omitempty"`
-	JobInputPath    string                     `json:"job_input_path,omitempty"`
-	ReviewWorkspace string                     `json:"review_workspace,omitempty"`
-	Provisional     bool                       `json:"provisional,omitempty"`
-	AdoptedJobID    string                     `json:"adopted_job_id,omitempty"`
-	BackendError    string                     `json:"backend_error,omitempty"`
-	Model           config.DimensionResolution `json:"model,omitempty"`
-	Effort          config.DimensionResolution `json:"effort,omitempty"`
-	Origin          *envelopeOrigin            `json:"origin,omitempty"`
-	CreatedAt       time.Time                  `json:"created_at"`
-	UpdatedAt       time.Time                  `json:"updated_at"`
+	Schema             int                        `json:"schema"`
+	JobID              string                     `json:"job_id"`
+	RequestID          string                     `json:"request_id,omitempty"`
+	WorkspaceKey       string                     `json:"workspace_key,omitempty"`
+	Kind               string                     `json:"kind"`
+	Backend            string                     `json:"backend,omitempty"`
+	CWD                string                     `json:"cwd,omitempty"`
+	SessionID          string                     `json:"session_id,omitempty"`
+	ContractKind       string                     `json:"contractKind"`
+	NoContract         bool                       `json:"no_contract,omitempty"`
+	JobInputPath       string                     `json:"job_input_path,omitempty"`
+	ReviewWorkspace    string                     `json:"review_workspace,omitempty"`
+	AgentbusStateRoot  string                     `json:"agentbus_state_root,omitempty"`
+	SubmissionState    engine.JobState            `json:"submission_state,omitempty"`
+	State              engine.JobState            `json:"state,omitempty"`
+	CleanupDisposition string                     `json:"cleanupDisposition,omitempty"`
+	Deduplicated       bool                       `json:"deduplicated,omitempty"`
+	BackendError       string                     `json:"backend_error,omitempty"`
+	Model              config.DimensionResolution `json:"model,omitempty"`
+	Effort             config.DimensionResolution `json:"effort,omitempty"`
+	Origin             *envelopeOrigin            `json:"origin,omitempty"`
+	CreatedAt          time.Time                  `json:"created_at"`
+	UpdatedAt          time.Time                  `json:"updated_at"`
+}
+
+func localCleanupSafe(disposition string) bool {
+	return disposition == cleanupDispositionNoExecutionPossible || disposition == cleanupDispositionVerifiedAbsent
+}
+
+type localCleanupWarnings struct {
+	writer io.Writer
+	seen   map[string]struct{}
+}
+
+func newLocalCleanupWarnings(writer io.Writer) *localCleanupWarnings {
+	if writer == nil {
+		return nil
+	}
+	return &localCleanupWarnings{writer: writer, seen: map[string]struct{}{}}
+}
+
+func (warnings *localCleanupWarnings) warn(jobID, message string) error {
+	if warnings == nil || warnings.writer == nil || message == "" {
+		return nil
+	}
+	key := jobID + "\x00" + message
+	if _, ok := warnings.seen[key]; ok {
+		return nil
+	}
+	warnings.seen[key] = struct{}{}
+	_, err := fmt.Fprintf(warnings.writer, "warning: %s\n", message)
+	return err
+}
+
+func warnLocalArtifactsRetained(warnings *localCleanupWarnings, jobID string, state engine.JobState, cleanupDisposition string) error {
+	message, ok := localArtifactsRetainedWarning(state, cleanupDisposition)
+	if !ok {
+		return nil
+	}
+	return warnings.warn(jobID, message)
+}
+
+func localArtifactsRetainedWarning(state engine.JobState, cleanupDisposition string) (string, bool) {
+	if !engine.IsTerminal(state) {
+		return "", false
+	}
+	if cleanupDisposition == cleanupDispositionUnresolved {
+		return cleanupDispositionUnresolvedWarning, true
+	}
+	if cleanupDisposition == "" {
+		return "Agentbus did not report cleanupDisposition for a terminal job; delegate retained local job artifacts because backend absence is unproven", true
+	}
+	if !localCleanupSafe(cleanupDisposition) {
+		return fmt.Sprintf("Agentbus reported cleanupDisposition=%s; delegate retained local job artifacts because backend absence is unproven", cleanupDisposition), true
+	}
+	return "", false
+}
+
+func warnLocalCleanupFailure(warnings *localCleanupWarnings, jobID, artifact string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return warnings.warn(jobID, fmt.Sprintf("Delegate could not remove local %s; local job artifacts were retained: %v", artifact, err))
 }
 
 func captureBackendError(stateDir string, job client.JobStatus) error {
@@ -85,12 +162,14 @@ func captureBackendError(stateDir string, job client.JobStatus) error {
 	return saveJobMetadata(stateDir, meta)
 }
 
-func saveJobMetadata(stateDir string, meta jobMetadata) error {
+var saveJobMetadata = saveJobMetadataFile
+
+func saveJobMetadataFile(stateDir string, meta jobMetadata) error {
 	if err := validateDelegateJobID(meta.JobID); err != nil {
 		return err
 	}
 	if meta.Schema == 0 {
-		meta.Schema = envelopeSchema
+		meta.Schema = jobMetadataSchema
 	}
 	now := time.Now().UTC()
 	if meta.CreatedAt.IsZero() {
@@ -106,7 +185,7 @@ func saveJobMetadata(stateDir string, meta jobMetadata) error {
 		return err
 	}
 	raw = append(raw, '\n')
-	return atomicWriteMetadata(filepath.Join(dir, meta.JobID+".json"), raw, 0o600)
+	return atomicWriteMetadata(filepath.Join(dir, encodedStateFilename(meta.JobID)), raw, 0o600)
 }
 
 func loadJobMetadata(stateDir, jobID string) (jobMetadata, bool, error) {
@@ -117,7 +196,7 @@ func loadJobMetadata(stateDir, jobID string) (jobMetadata, bool, error) {
 	if err != nil {
 		return jobMetadata{}, false, err
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, jobID+".json"))
+	raw, err := os.ReadFile(filepath.Join(dir, encodedStateFilename(jobID)))
 	if errors.Is(err, os.ErrNotExist) {
 		return jobMetadata{}, false, nil
 	}
@@ -142,7 +221,7 @@ func deleteJobMetadata(stateDir, jobID string) error {
 	if err != nil {
 		return err
 	}
-	err = os.Remove(filepath.Join(dir, jobID+".json"))
+	err = os.Remove(filepath.Join(dir, encodedStateFilename(jobID)))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -157,151 +236,68 @@ func deleteJobMetadata(stateDir, jobID string) error {
 	return dirFile.Sync()
 }
 
-func cleanupJobInput(stateDir, jobID, sessionID string, state engine.JobState) error {
+func cleanupJobInput(stateDir, jobID, sessionID string, state engine.JobState, cleanupDisposition string, warnings *localCleanupWarnings) error {
 	meta, found, err := loadJobMetadata(stateDir, jobID)
-	if err != nil || !found {
-		return err
+	if err != nil {
+		_ = warnings.warn(jobID, fmt.Sprintf("Delegate could not read local job metadata; local job artifacts were retained: %v", err))
+		return nil
+	}
+	if !found {
+		return nil
 	}
 	changed := false
 	if sessionID != "" && meta.SessionID != sessionID {
 		meta.SessionID = sessionID
 		changed = true
 	}
-	if meta.JobInputPath != "" && (sessionID != "" || engine.IsTerminal(state)) {
-		input := handoff.JobInput{JobID: jobID, Path: meta.JobInputPath}
-		if sessionID != "" {
-			_, err = handoff.DeleteJobInputOnSessionRecorded(input, handoff.Hooks{})
-		} else {
-			_, err = handoff.DeleteJobInputOnTerminalState(input, state, handoff.Hooks{})
-		}
-		if err != nil {
-			return err
-		}
-		meta.JobInputPath = ""
+	if meta.State != state {
+		meta.State = state
 		changed = true
 	}
-	if meta.ReviewWorkspace != "" && engine.IsTerminal(state) {
-		if err := reviewpkg.CleanupWorkspace(stateDir, meta.ReviewWorkspace); err != nil {
-			return err
-		}
-		meta.ReviewWorkspace = ""
+	if meta.CleanupDisposition != cleanupDisposition {
+		meta.CleanupDisposition = cleanupDisposition
 		changed = true
+	}
+	cleanupSafe := engine.IsTerminal(state) && localCleanupSafe(cleanupDisposition)
+	retainedArtifacts := meta.JobInputPath != "" || meta.ReviewWorkspace != ""
+	if retainedArtifacts && !cleanupSafe {
+		_ = warnLocalArtifactsRetained(warnings, jobID, state, cleanupDisposition)
+	}
+	clearedArtifacts := false
+	if meta.JobInputPath != "" && cleanupSafe {
+		input := handoff.JobInput{JobID: jobID, Path: meta.JobInputPath}
+		_, err = deleteJobInputOnTerminalState(input, state, cleanupDisposition, handoff.Hooks{})
+		if err != nil {
+			_ = warnLocalCleanupFailure(warnings, jobID, "job input", err)
+		} else {
+			meta.JobInputPath = ""
+			changed = true
+			clearedArtifacts = true
+		}
+	}
+	if meta.ReviewWorkspace != "" && cleanupSafe {
+		if err := cleanupReviewWorkspace(stateDir, meta.ReviewWorkspace); err != nil {
+			_ = warnLocalCleanupFailure(warnings, jobID, "review workspace", err)
+		} else {
+			meta.ReviewWorkspace = ""
+			changed = true
+			clearedArtifacts = true
+		}
 	}
 	if !changed {
 		return nil
 	}
-	return saveJobMetadata(stateDir, meta)
-}
-
-func mostRecentDelegateSession(stateDir, backend, cwd string) (string, bool, error) {
-	dir, err := jobMetadataDir(stateDir)
-	if err != nil {
-		return "", false, err
+	if err := saveJobMetadata(stateDir, meta); err != nil {
+		if clearedArtifacts {
+			if retryErr := saveJobMetadata(stateDir, meta); retryErr == nil {
+				return nil
+			} else {
+				err = retryErr
+			}
+		}
+		_ = warnings.warn(jobID, fmt.Sprintf("Delegate could not persist local cleanup metadata; terminal outcome was preserved: %v", err))
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return "", false, err
-	}
-	var latest jobMetadata
-	found := false
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		jobID := strings.TrimSuffix(entry.Name(), ".json")
-		if err := validateDelegateJobID(jobID); err != nil {
-			continue
-		}
-		meta, exists, err := loadJobMetadata(stateDir, jobID)
-		if err != nil {
-			return "", false, err
-		}
-		if !exists || meta.SessionID == "" || meta.Backend != backend || filepath.Clean(meta.CWD) != filepath.Clean(cwd) {
-			continue
-		}
-		if !found || metadataIsNewer(meta, latest) {
-			latest = meta
-			found = true
-		}
-	}
-	if !found {
-		return "", false, nil
-	}
-	return latest.SessionID, true, nil
-}
-
-func delegateSessionMetadata(stateDir, sessionID string) (jobMetadata, bool, error) {
-	dir, err := jobMetadataDir(stateDir)
-	if err != nil {
-		return jobMetadata{}, false, err
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return jobMetadata{}, false, err
-	}
-	var latest jobMetadata
-	found := false
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		jobID := strings.TrimSuffix(entry.Name(), ".json")
-		if err := validateDelegateJobID(jobID); err != nil {
-			continue
-		}
-		meta, exists, err := loadJobMetadata(stateDir, jobID)
-		if err != nil {
-			return jobMetadata{}, false, err
-		}
-		if !exists || meta.SessionID != sessionID {
-			continue
-		}
-		if !found || metadataIsNewer(meta, latest) {
-			latest = meta
-			found = true
-		}
-	}
-	return latest, found, nil
-}
-
-func provisionalJobMetadataOlderThan(stateDir string, cutoff time.Time) ([]jobMetadata, error) {
-	dir, err := jobMetadataDir(stateDir)
-	if err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	var provisional []jobMetadata
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		jobID := strings.TrimSuffix(entry.Name(), ".json")
-		if err := validateDelegateJobID(jobID); err != nil {
-			continue
-		}
-		meta, found, err := loadJobMetadata(stateDir, jobID)
-		if err != nil {
-			return nil, err
-		}
-		if !found || !meta.Provisional || meta.CreatedAt.IsZero() || meta.CreatedAt.After(cutoff) {
-			continue
-		}
-		provisional = append(provisional, meta)
-	}
-	return provisional, nil
-}
-
-func metadataIsNewer(candidate, current jobMetadata) bool {
-	if !candidate.CreatedAt.Equal(current.CreatedAt) {
-		return candidate.CreatedAt.After(current.CreatedAt)
-	}
-	if !candidate.UpdatedAt.Equal(current.UpdatedAt) {
-		return candidate.UpdatedAt.After(current.UpdatedAt)
-	}
-	return candidate.JobID > current.JobID
+	return nil
 }
 
 func jobMetadataDir(stateDir string) (string, error) {
@@ -323,13 +319,7 @@ func jobMetadataDir(stateDir string) (string, error) {
 }
 
 func validateDelegateJobID(jobID string) error {
-	if !strings.HasPrefix(jobID, "job_") || len(jobID) <= len("job_") || len(jobID) > 128 {
-		return fmt.Errorf("invalid job id %q", jobID)
-	}
-	for _, r := range jobID {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
-			continue
-		}
+	if jobID == "" {
 		return fmt.Errorf("invalid job id %q", jobID)
 	}
 	return nil

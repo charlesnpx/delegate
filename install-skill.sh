@@ -278,17 +278,6 @@ build_delegate() {
     return
   fi
 
-  if [[ -d "$REPO_ROOT/vendor" ]]; then
-    add_warning "go build -mod=readonly failed; used -mod=vendor fallback"
-    if (
-      cd -- "$REPO_ROOT"
-      go build -mod=vendor -trimpath -ldflags "-X main.Version=$VERSION" -o "$output" ./cmd/delegate
-    ) 2>>"$err_file"; then
-      rm -f -- "$err_file"
-      return
-    fi
-  fi
-
   printf 'delegate installer: go build failed\n' >&2
   sed 's/^/go build: /' "$err_file" >&2
   rm -f -- "$err_file"
@@ -303,22 +292,32 @@ live_install_root() {
 record_codex_sandbox_action() {
   codex_requested || return 0
 
-  local config_path agentbus_state delegate_state codex_home state_home
+  local config_path agentbus_state agentbus_cache delegate_state codex_home state_home cache_home
   case "$OPERATION" in
     plan)
       if [[ -n "${HOME:-}" && "$HOME" == /* ]]; then
         codex_home=${CODEX_HOME:-"$HOME/.codex"}
         state_home=${XDG_STATE_HOME:-"$HOME/.local/state"}
-        if [[ "$codex_home" == /* && "$state_home" == /* ]]; then
-          config_path="$codex_home/config.toml"
-          agentbus_state="$state_home/agentbus"
-          delegate_state="$state_home/delegate"
-        add_warning "codex sandbox writable_roots would-configure: $agentbus_state, $delegate_state (config $config_path)"
+        if [[ -n "${AGENTBUS_STATE_ROOT:-}" ]]; then
+          agentbus_state=$AGENTBUS_STATE_ROOT
         else
-          add_warning "codex sandbox writable_roots skipped: HOME, CODEX_HOME, and XDG_STATE_HOME must resolve to absolute paths"
+          agentbus_state="$state_home/agentbus"
+        fi
+        if [[ "${OSTYPE:-}" == darwin* ]]; then
+          agentbus_cache="$HOME/Library/Caches/agentbus"
+        else
+          cache_home=${XDG_CACHE_HOME:-"$HOME/.cache"}
+          agentbus_cache="$cache_home/agentbus"
+        fi
+        if [[ "$codex_home" == /* && "$state_home" == /* && "$agentbus_state" == /* && "$agentbus_cache" == /* && ( -z "${XDG_CACHE_HOME:-}" || "$XDG_CACHE_HOME" == /* ) ]]; then
+          config_path="$codex_home/config.toml"
+          delegate_state="$state_home/delegate"
+          add_warning "codex sandbox writable_roots would-configure: $agentbus_state, $agentbus_cache, $delegate_state (config $config_path)"
+        else
+          add_warning "codex sandbox writable_roots skipped: HOME, CODEX_HOME, AGENTBUS_STATE_ROOT, XDG_CACHE_HOME, and XDG_STATE_HOME must resolve to absolute paths"
         fi
       else
-        add_warning "codex sandbox writable_roots skipped: HOME, CODEX_HOME, and XDG_STATE_HOME must resolve to absolute paths"
+        add_warning "codex sandbox writable_roots skipped: HOME, CODEX_HOME, AGENTBUS_STATE_ROOT, XDG_CACHE_HOME, and XDG_STATE_HOME must resolve to absolute paths"
       fi
       ;;
     uninstall)

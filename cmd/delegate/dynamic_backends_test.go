@@ -14,17 +14,42 @@ import (
 )
 
 func TestTerminalEnvelopeWithoutResultAcrossTerminalStates(t *testing.T) {
-	states := []engine.JobState{engine.StateFailed, engine.StateTimedOut, engine.StateInterrupted, engine.StateCanceled, engine.StateReaped, engine.StateQuarantined}
-	for _, state := range states {
-		t.Run(string(state), func(t *testing.T) {
-			env, err := newTerminalEnvelope("job_terminal", state, taskKind, contractKindShape, skippedDelegateContractStamp(engine.SkipResultUnavailable), "", "")
+	cases := []struct {
+		state  engine.JobState
+		reason string
+	}{
+		{state: engine.StateFailed, reason: "failed_without_result"},
+		{state: engine.StateTimedOut, reason: "timed_out_without_result"},
+		{state: engine.StateInterrupted, reason: "interrupted_without_result"},
+		{state: engine.StateCanceled, reason: "canceled_without_result"},
+		{state: engine.StateOrphaned, reason: "orphaned_without_result"},
+		{state: engine.StateReaped, reason: "reaped_without_result"},
+		{state: engine.StateQuarantined, reason: "quarantined_without_result"},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.state), func(t *testing.T) {
+			env, err := newTerminalEnvelope("job_terminal", tc.state, taskKind, contractKindShape, skippedDelegateContractStamp(engine.SkipResultUnavailable), "", "")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if env.ResultSHA256 != nil || env.ResultUnavailableReason != "result_unavailable" || env.Contract.Status != engine.ContractSkipped {
+			if env.ResultSHA256 != nil || env.ResultUnavailableReason != tc.reason || env.Contract.Status != engine.ContractSkipped {
 				t.Fatalf("terminal envelope = %#v", env)
 			}
 		})
+	}
+}
+
+func TestResultUnavailableReasonDiffersByTerminalState(t *testing.T) {
+	orphaned, err := newTerminalEnvelope("job_orphaned", engine.StateOrphaned, taskKind, contractKindShape, skippedDelegateContractStamp(engine.SkipResultUnavailable), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled, err := newTerminalEnvelope("job_canceled", engine.StateCanceled, taskKind, contractKindShape, skippedDelegateContractStamp(engine.SkipResultUnavailable), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if orphaned.ResultUnavailableReason != "orphaned_without_result" || canceled.ResultUnavailableReason != "canceled_without_result" || orphaned.ResultUnavailableReason == canceled.ResultUnavailableReason {
+		t.Fatalf("reasons orphaned=%q canceled=%q, want distinct state-specific reasons", orphaned.ResultUnavailableReason, canceled.ResultUnavailableReason)
 	}
 }
 
@@ -94,27 +119,61 @@ func TestCaptureBackendErrorSanitizesPromptSecretsAndBoundsDiagnostic(t *testing
 	}
 }
 
-func TestWaitForJobResultSynthesizesEnvelopeInputAcrossTerminalStates(t *testing.T) {
-	states := []engine.JobState{engine.StateFailed, engine.StateTimedOut, engine.StateInterrupted, engine.StateCanceled, engine.StateReaped, engine.StateQuarantined}
-	for _, state := range states {
-		t.Run(string(state), func(t *testing.T) {
-			stateDir := t.TempDir()
-			if err := os.Chmod(stateDir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			fake := &fakeAgentbusClient{resultErr: errors.New("quarantined record cannot be loaded"), status: client.JobStatusResult{Jobs: []client.JobStatus{{JobID: "job_fallback", SessionID: "session_fallback", State: state}}}}
-			result, err := waitForJobResult(context.Background(), fake, stateDir, "job_fallback")
-			if err != nil {
-				t.Fatal(err)
-			}
-			env, err := terminalEnvelopeFromJobResult(stateDir, result)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if env.JobID != "job_fallback" || env.Status != state || env.ResultUnavailableReason != "result_unavailable" {
-				t.Fatalf("fallback envelope = %#v", env)
-			}
-		})
+func TestTerminalEnvelopeAndCleanupIgnoreCorruptLocalMetadata(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	jobID := "job_corrupt_metadata"
+	dir, err := jobMetadataDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, encodedStateFilename(jobID)), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	if err := cleanupJobInput(stateDir, jobID, "session_corrupt", engine.StateCompleted, cleanupDispositionVerifiedAbsent, newLocalCleanupWarnings(&stderr)); err != nil {
+		t.Fatalf("cleanupJobInput err=%v, want corrupt metadata warning only", err)
+	}
+	if !strings.Contains(stderr.String(), "Delegate could not read local job metadata") {
+		t.Fatalf("cleanup warning=%q, want corrupt metadata warning", stderr.String())
+	}
+
+	resultSHA := strings.Repeat("8", 64)
+	env, err := terminalEnvelopeFromJobResult(stateDir, client.JobResult{
+		JobID:  jobID,
+		State:  engine.StateCompleted,
+		Result: &engine.ResultInfo{SHA256: resultSHA},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.JobID != jobID || env.Status != engine.StateCompleted || engine.ExitCodeForState(env.Status) != 0 {
+		t.Fatalf("terminal envelope=%#v, want completed authoritative result", env)
+	}
+	if env.Kind != taskKind || env.ContractKind != contractKindShape || env.ResultSHA256 == nil || *env.ResultSHA256 != resultSHA {
+		t.Fatalf("terminal enrichment/result fields=%#v, want defaults with result sha %s", env, resultSHA)
+	}
+}
+
+func TestWaitForJobResultSynthesizesEnvelopeInputForOrphanedTerminalState(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAgentbusClient{resultErr: errors.New("orphaned record cannot be loaded"), status: client.JobStatusResult{Jobs: []client.JobStatus{{JobID: "job_fallback", SessionID: "session_fallback", State: engine.StateOrphaned}}}}
+	result, err := waitForJobResult(context.Background(), fake, stateDir, "job_fallback", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := terminalEnvelopeFromJobResult(stateDir, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.JobID != "job_fallback" || env.Status != engine.StateOrphaned || env.ResultUnavailableReason != resultUnavailableReason(engine.StateOrphaned) {
+		t.Fatalf("fallback envelope = %#v", env)
 	}
 }
 

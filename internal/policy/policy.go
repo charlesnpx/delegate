@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	// DelegateReportContractName is the immutable cache name for the embedded v1 report shape.
+	// DelegateReportContractName is the immutable cache name for the bundled v1 report shape.
 	DelegateReportContractName = "delegate/delegate-report@1"
 
 	// NoContractFlagReason is stamped by envelope code when CLI policy enforcement is disabled.
@@ -35,7 +35,7 @@ type Flags struct {
 	JSONSchema     json.RawMessage
 }
 
-// DelegateReportSpec returns a fresh copy of the embedded concrete report contract.
+// DelegateReportSpec returns a new copy of the bundled concrete report contract.
 func DelegateReportSpec() (engine.ContractSpec, error) {
 	var spec engine.ContractSpec
 	if err := json.Unmarshal(delegateReportSpecJSON, &spec); err != nil {
@@ -44,17 +44,17 @@ func DelegateReportSpec() (engine.ContractSpec, error) {
 	return spec, nil
 }
 
-// DelegateReportSpecJSON returns a copy of the embedded declarative contract data.
+// DelegateReportSpecJSON returns a copy of the bundled declarative contract data.
 func DelegateReportSpecJSON() []byte {
 	return append([]byte(nil), delegateReportSpecJSON...)
 }
 
-// DelegateContractDigest returns the embedded delegate-contract prompt digest.
+// DelegateContractDigest returns the bundled delegate-contract prompt digest.
 func DelegateContractDigest() string {
 	return delegateContractDigest
 }
 
-// RegisterDelegateReport stores the embedded delegate-report shape under its immutable name.
+// RegisterDelegateReport stores the bundled delegate-report shape under its immutable name.
 func RegisterDelegateReport(registry *engine.PolicyRegistry) (string, error) {
 	spec, err := DelegateReportSpec()
 	if err != nil {

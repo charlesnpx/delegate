@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	"github.com/charlesnpx/agentbus/client"
@@ -35,22 +37,22 @@ type taskOptions struct {
 	Wait              bool
 	JSON              bool
 	CWD               string
-	Resume            bool
-	ResumeSession     string
-	Fresh             bool
 	Model             string
 	ModelSet          bool
 	Effort            string
 	EffortSet         bool
 	Timeout           time.Duration
+	TimeoutSet        bool
 	Write             bool
+	WriteSet          bool
 	StrictContract    bool
+	StrictContractSet bool
 	NoContract        bool
+	NoContractSet     bool
 	Origin            string
 	ParentClient      optionalStringFlag
 	ParentSession     optionalStringFlag
 	AuditOrigin       envelopeOrigin
-	Embedded          bool
 	Prompt            optionalStringFlag
 	PromptFile        string
 	PromptStdin       bool
@@ -59,10 +61,17 @@ type taskOptions struct {
 	OutputSchemaFile  optionalStringFlag
 	OutputSchemaStdin bool
 	Positional        []string
+	RecoverRequest    string
 	StateDir          string
 	Kind              string
 	ReviewWorkspace   string
 	ModelEffort       config.ModelEffortResolution
+	AgentbusStateRoot string
+	RequestID         string
+	WorkspaceKey      string
+	LogicalWorkspace  string
+	SubmissionState   engine.JobState
+	Deduplicated      bool
 }
 
 type taskRunResult struct {
@@ -72,12 +81,22 @@ type taskRunResult struct {
 	Submitted bool
 }
 
-const provisionalJobIDTag = "delegate.provisional_job_id"
+const (
+	delegateRequestIDTag = "delegate.request_id"
+	agentbusMaxTimeout   = 4 * time.Hour
+)
 
 func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	opts, err := parseTaskOptions(args, stdin, stderr)
 	if err != nil {
 		return 0, err
+	}
+	if opts.RecoverRequest != "" {
+		result, err := recoverTaskSubmission(opts, stderr)
+		if err != nil {
+			return agentbusCommandErrorResult(opts.JSON, stdout, err)
+		}
+		return writeTaskRunResult(result, stdout, stderr)
 	}
 	if err := resolveTaskModelEffort(&opts); err != nil {
 		return 0, err
@@ -110,21 +129,12 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 	}
 	result, err := executeTask(opts, resolved, turnPolicy, stderr)
 	if err != nil {
-		return 0, err
+		return agentbusCommandErrorResult(opts.JSON, stdout, err)
 	}
 	return writeTaskRunResult(result, stdout, stderr)
 }
 
 func resolveTaskModelEffort(opts *taskOptions) error {
-	if opts.ResumeSession != "" {
-		if opts.ModelSet || opts.EffortSet {
-			return fmt.Errorf("model/effort cannot be changed when resuming a session; the session keeps the values it was started with")
-		}
-		opts.Model = ""
-		opts.Effort = ""
-		opts.ModelEffort = sessionModelEffortResolution()
-		return nil
-	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -138,9 +148,6 @@ func resolveTaskModelEffort(opts *taskOptions) error {
 
 func executeTask(opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy, stderr io.Writer) (taskRunResult, error) {
 	ctx := context.Background()
-	if opts.Embedded {
-		return runEmbeddedTask(ctx, opts, resolved, turnPolicy)
-	}
 	return runDaemonTask(ctx, opts, resolved, turnPolicy, stderr)
 }
 
@@ -172,12 +179,9 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	var background bool
 	fs.StringVar(&opts.Backend, "backend", "", "backend name")
 	fs.BoolVar(&background, "background", false, "return after launch")
-	fs.BoolVar(&opts.Wait, "wait", false, "wait for terminal result (required with resume flags in v0.1.0)")
+	fs.BoolVar(&opts.Wait, "wait", false, "wait for terminal result")
 	fs.BoolVar(&opts.JSON, "json", false, "emit JSON")
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute working directory")
-	fs.BoolVar(&opts.Resume, "resume", false, "resume the last session (requires --wait in v0.1.0)")
-	fs.StringVar(&opts.ResumeSession, "resume-session", "", "resume a session id (requires --wait in v0.1.0)")
-	fs.BoolVar(&opts.Fresh, "fresh", false, "start a fresh session")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
 	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout")
@@ -187,7 +191,6 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	fs.StringVar(&opts.Origin, "origin", "", "originating skill")
 	fs.Var(&opts.ParentClient, "parent-client", "explicit parent client for audit linkage")
 	fs.Var(&opts.ParentSession, "parent-session", "explicit parent session id for audit linkage")
-	fs.BoolVar(&opts.Embedded, "embedded", false, "run through the embedded engine path")
 	fs.Var(&opts.Prompt, "prompt", handoff.PromptFlagUsage)
 	fs.StringVar(&opts.PromptFile, "prompt-file", "", "read prompt from file")
 	fs.BoolVar(&opts.PromptStdin, "prompt-stdin", false, "read prompt from stdin")
@@ -195,18 +198,47 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	fs.Var(&opts.OutputSchema, "output-schema", "inline JSON Schema output contract")
 	fs.Var(&opts.OutputSchemaFile, "output-schema-file", "read JSON Schema output contract from file")
 	fs.BoolVar(&opts.OutputSchemaStdin, "output-schema-stdin", false, "read JSON Schema output contract from stdin")
+	fs.StringVar(&opts.RecoverRequest, "recover-request", "", "recover a durable submission request")
 	if err := fs.Parse(args); err != nil {
 		return taskOptions{}, err
 	}
 	opts.Positional = fs.Args()
+	visited := map[string]bool{}
 	fs.Visit(func(flag *flag.Flag) {
+		visited[flag.Name] = true
 		switch flag.Name {
 		case "model":
 			opts.ModelSet = true
 		case "effort":
 			opts.EffortSet = true
+		case "timeout":
+			opts.TimeoutSet = true
+		case "write":
+			opts.WriteSet = true
+		case "strict-contract":
+			opts.StrictContractSet = true
+		case "no-contract":
+			opts.NoContractSet = true
 		}
 	})
+	if opts.RecoverRequest != "" {
+		if background && opts.Wait {
+			return taskOptions{}, fmt.Errorf("use only one of --background or --wait")
+		}
+		if err := validateRecoverRequestFlags(visited, opts.Positional); err != nil {
+			return taskOptions{}, err
+		}
+		if err := validateRequestID(opts.RecoverRequest); err != nil {
+			return taskOptions{}, err
+		}
+		stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+		if err != nil {
+			return taskOptions{}, err
+		}
+		opts.StateDir = stateDir
+		opts.Kind = taskKind
+		return opts, nil
+	}
 	if opts.Backend == "" {
 		return taskOptions{}, fmt.Errorf("delegate task requires --backend")
 	}
@@ -235,20 +267,8 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	if opts.OutputSchemaStdin && opts.PromptStdin {
 		return taskOptions{}, fmt.Errorf("--output-schema-stdin cannot be used with --prompt-stdin")
 	}
-	if opts.Resume && opts.ResumeSession != "" {
-		return taskOptions{}, fmt.Errorf("use only one of --resume or --resume-session")
-	}
-	if opts.Resume && opts.Fresh || opts.ResumeSession != "" && opts.Fresh {
-		return taskOptions{}, fmt.Errorf("use only one of resume flags or --fresh")
-	}
-	if (opts.Resume || opts.ResumeSession != "") && !opts.Wait {
-		return taskOptions{}, fmt.Errorf("--resume and --resume-session require --wait in v0.1.0; background resume lands post-v0.1.0")
-	}
-	if (opts.Resume || opts.ResumeSession != "") && (opts.ModelSet || opts.EffortSet) {
-		return taskOptions{}, fmt.Errorf("model/effort cannot be changed when resuming a session; the session keeps the values it was started with")
-	}
-	if opts.Embedded && !opts.Wait {
-		return taskOptions{}, fmt.Errorf("--embedded requires --wait; background supervision is daemon-only")
+	if err := validateTimeoutOption(opts.Timeout, opts.TimeoutSet); err != nil {
+		return taskOptions{}, err
 	}
 	cwd := opts.CWD
 	if cwd == "" {
@@ -262,27 +282,49 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 		return taskOptions{}, fmt.Errorf("--cwd must be absolute")
 	}
 	opts.CWD = filepath.Clean(cwd)
+	opts.LogicalWorkspace = opts.CWD
 	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
 	if err != nil {
 		return taskOptions{}, err
 	}
 	opts.StateDir = stateDir
 	opts.Kind = taskKind
-	if opts.Resume {
-		sessionID, found, err := mostRecentDelegateSession(opts.StateDir, opts.Backend, opts.CWD)
-		if err != nil {
-			return taskOptions{}, err
-		}
-		if !found {
-			return taskOptions{}, fmt.Errorf("no resumable delegate session for backend %q in cwd %q; run a fresh task first or pass --resume-session <id>", opts.Backend, opts.CWD)
-		}
-		opts.ResumeSession = sessionID
-	}
 	if stdin == nil {
 		stdin = os.Stdin
 	}
 	opts.AuditOrigin = captureTaskOrigin(opts.Origin, opts.ParentClient, opts.ParentSession, nil)
 	return opts, nil
+}
+
+func validateRecoverRequestFlags(visited map[string]bool, positional []string) error {
+	rejected := []string{
+		"backend", "cwd", "model", "effort", "timeout", "write", "strict-contract", "no-contract",
+		"origin", "parent-client", "parent-session",
+		"prompt", "prompt-file", "prompt-stdin", "handoff-prompt-file",
+		"output-schema", "output-schema-file", "output-schema-stdin",
+	}
+	for _, name := range rejected {
+		if visited[name] {
+			return fmt.Errorf("delegate task --recover-request cannot be used with --%s", name)
+		}
+	}
+	if len(positional) > 0 {
+		return fmt.Errorf("delegate task --recover-request does not accept a prompt or positional arguments")
+	}
+	return nil
+}
+
+func validateTimeoutOption(timeout time.Duration, set bool) error {
+	if !set {
+		return nil
+	}
+	if timeout < 0 {
+		return fmt.Errorf("--timeout must be non-negative")
+	}
+	if timeout > agentbusMaxTimeout {
+		return fmt.Errorf("--timeout must be at most %s", agentbusMaxTimeout)
+	}
+	return nil
 }
 
 func resolveTaskOutputSchema(opts taskOptions, stdin io.Reader) (json.RawMessage, error) {
@@ -310,219 +352,326 @@ func resolveTaskOutputSchema(opts taskOptions, stdin io.Reader) (json.RawMessage
 }
 
 func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy, stderr io.Writer) (taskRunResult, error) {
-	c, hello, err := connectAgentbusCommand(ctx, requiredCapabilitiesForPolicy(turnPolicy))
+	requiredCapabilities := requiredCapabilitiesForPolicy(turnPolicy)
+	c, hello, agentbusStateRoot, err := connectAgentbusCommand(ctx, requiredCapabilities)
 	if err != nil {
 		return taskRunResult{}, err
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
+	opts.AgentbusStateRoot = agentbusStateRoot
 	if err := validateBackend(hello, opts.Backend, opts.Model, opts.Effort, stderr); err != nil {
 		return taskRunResult{}, err
 	}
-	spec := client.TaskSpec{
-		Backend:   opts.Backend,
-		CWD:       opts.CWD,
-		Write:     opts.Write,
-		Model:     opts.Model,
-		Effort:    opts.Effort,
-		Prompt:    resolved.Prompt,
-		Policy:    turnPolicy,
-		Tags:      taskTags(opts),
-		TimeoutMs: timeoutMillis(opts.Timeout),
-	}
-	if opts.ResumeSession != "" {
-		return runDaemonSessionTask(ctx, c, opts, resolved, turnPolicy, hello.Capabilities["models.reported"])
-	}
-	input, err := persistPreLaunchJobInput(opts, resolved)
+	intent, err := prepareNewSubmissionIntent(opts, resolved, turnPolicy)
 	if err != nil {
 		return taskRunResult{}, err
 	}
-	contractKind := contractKindForPolicy(turnPolicy, opts.NoContract)
-	if _, err := persistProvisionalJobMetadata(opts, input, input.JobID, contractKind); err != nil {
-		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
-		return taskRunResult{}, fmt.Errorf("persist metadata before launch: %w", err)
+	if err := saveSubmissionIntent(opts.StateDir, intent); err != nil {
+		return taskRunResult{}, fmt.Errorf("persist submission intent before launch: %w", err)
 	}
-	pendingJobID := input.JobID
-	spec.Tags[provisionalJobIDTag] = pendingJobID
-	submitted, err := c.JobSubmit(ctx, client.JobSubmitParams{TaskSpec: spec})
+	submitted, currentClient, currentHello, err := submitIntentWithRetry(ctx, c, hello, opts.StateDir, &intent, requiredCapabilities)
+	c = currentClient
+	hello = currentHello
 	if err != nil {
-		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
-		_ = deleteJobMetadata(opts.StateDir, pendingJobID)
 		return taskRunResult{}, err
 	}
 	var warnings []string
-	input, warnings = reassociateSubmittedJobInput(input, submitted.JobID, warnings)
-	if warning, err := persistLaunchedJobMetadata(opts, input, submitted.JobID, contractKind); err != nil {
-		warnings = append(warnings, err.Error())
-		env, envelopeErr := newLaunchEnvelopeWithOrigin(submitted.JobID, submitted.State, taskEnvelopeOrigin(opts), taskModelEffort(opts))
+	opts.RequestID = intent.RequestID
+	opts.WorkspaceKey = intent.WorkspaceKey
+	opts.SubmissionState = submitted.State
+	opts.Deduplicated = submitted.Deduplicated
+	contractKind := intent.ContractKind
+	ackWarnings, acknowledged, err := acknowledgeSubmittedTask(opts, resolved, submitted, contractKind, "after submission")
+	warnings = append(warnings, ackWarnings...)
+	if err != nil {
+		return taskRunResult{Submitted: true, Warnings: warnings}, err
+	}
+	if !acknowledged {
+		env, envelopeErr := newLaunchEnvelopeForTask(submitted.JobID, submitted.State, opts)
 		if envelopeErr != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, envelopeErr
 		}
 		return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
-	} else if warning != "" {
-		warnings = append(warnings, warning)
 	}
-	if pendingJobID != submitted.JobID && input.JobID == submitted.JobID {
-		if err := deleteJobMetadata(opts.StateDir, pendingJobID); err != nil {
-			warnings = append(warnings, fmt.Sprintf("pending metadata for %s could not be removed: %v", pendingJobID, err))
-		}
-	}
-	err = cleanupJobInput(opts.StateDir, submitted.JobID, "", submitted.State)
-	if err != nil {
+	if err := transitionSubmissionIntent(opts.StateDir, &intent, submissionPhaseAcknowledged, func(intent *submissionIntent) {
+		intent.JobID = submitted.JobID
+		intent.Deduplicated = submitted.Deduplicated
+		intent.LastError = nil
+	}); err != nil {
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
-	if opts.Wait {
-		jobResult, err := waitForJobResult(ctx, c, opts.StateDir, submitted.JobID)
-		if err != nil {
-			return taskRunResult{Submitted: true, Warnings: warnings}, err
-		}
-		env, err := terminalEnvelopeFromJobResult(opts.StateDir, jobResult, hello.Capabilities["models.reported"])
-		if err != nil {
-			return taskRunResult{Submitted: true, Warnings: warnings}, err
-		}
-		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
-	}
-	env, err := newLaunchEnvelopeWithOrigin(submitted.JobID, submitted.State, taskEnvelopeOrigin(opts), taskModelEffort(opts))
-	if err != nil {
-		return taskRunResult{Submitted: true, Warnings: warnings}, err
-	}
-	return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
+	return submittedTaskRunResult(ctx, c, hello, opts, submitted, warnings, stderr)
 }
 
-func runDaemonSessionTask(ctx context.Context, c agentbusClient, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy, modelsReportedCapabilities ...bool) (taskRunResult, error) {
-	modelsReportedCapable := false
-	if len(modelsReportedCapabilities) > 0 {
-		modelsReportedCapable = modelsReportedCapabilities[0]
+const maxSubmissionAttempts = 3
+
+type submissionUnresolvedError struct {
+	RequestID string
+	Err       error
+}
+
+func (err submissionUnresolvedError) Error() string {
+	if err.Err == nil {
+		return submissionRecoveryMessage(err.RequestID)
 	}
-	target, err := resumableSessionInfo(ctx, c, opts.StateDir, opts.ResumeSession)
+	return fmt.Sprintf("%s: %v", submissionRecoveryMessage(err.RequestID), err.Err)
+}
+
+func (err submissionUnresolvedError) Unwrap() error {
+	return err.Err
+}
+
+func submissionRecoveryMessage(requestID string) string {
+	return fmt.Sprintf("submission request %s is unresolved; recover with: delegate task --recover-request %s", requestID, requestID)
+}
+
+func prepareNewSubmissionIntent(opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy) (submissionIntent, error) {
+	requestID, err := newRequestID()
+	if err != nil {
+		return submissionIntent{}, err
+	}
+	logicalWorkspace := opts.LogicalWorkspace
+	if logicalWorkspace == "" {
+		logicalWorkspace = opts.CWD
+	}
+	workspaceKey, err := workspaceKeyForLogicalWorkspace(logicalWorkspace)
+	if err != nil {
+		return submissionIntent{}, err
+	}
+	tags := taskTags(opts)
+	tags[delegateRequestIDTag] = requestID
+	params := client.JobSubmitParams{
+		WorkspaceKey: workspaceKey,
+		RequestID:    requestID,
+		TaskSpec: client.TaskSpec{
+			Backend:   opts.Backend,
+			CWD:       opts.CWD,
+			Write:     opts.Write,
+			Model:     opts.Model,
+			Effort:    opts.Effort,
+			Prompt:    resolved.Prompt,
+			Policy:    turnPolicy,
+			Tags:      tags,
+			TimeoutMs: timeoutMillis(opts.Timeout, opts.TimeoutSet),
+		},
+	}
+	modelEffort := normalizedModelEffort(taskModelEffort(opts))
+	now := time.Now().UTC()
+	return submissionIntent{
+		Schema:             submissionIntentSchema,
+		RequestID:          requestID,
+		WorkspaceKey:       workspaceKey,
+		AgentbusStateRoot:  opts.AgentbusStateRoot,
+		Params:             params,
+		Kind:               effectiveTaskKind(opts),
+		ContractKind:       contractKindForPolicy(turnPolicy, opts.NoContract),
+		NoContract:         opts.NoContract,
+		HandoffSource:      resolved.Source == handoff.SourceHandoffPromptFile,
+		HandoffPayloadPath: handoffPayloadPathForIntent(resolved),
+		Model:              modelEffort.Model,
+		Effort:             modelEffort.Effort,
+		Origin:             envelopeOriginPointer(taskEnvelopeOrigin(opts)),
+		ReviewWorkspace:    opts.ReviewWorkspace,
+		Phase:              submissionPhasePrepared,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}, nil
+}
+
+func handoffPayloadPathForIntent(resolved handoff.ResolvedPrompt) string {
+	if resolved.Source != handoff.SourceHandoffPromptFile {
+		return ""
+	}
+	return resolved.HandoffPath
+}
+
+func submitIntentWithRetry(ctx context.Context, c agentbusClient, hello client.HelloResult, stateDir string, intent *submissionIntent, requiredCapabilities []string) (client.JobSubmitResult, agentbusClient, client.HelloResult, error) {
+	if intent == nil {
+		return client.JobSubmitResult{}, c, hello, errors.New("submission intent is nil")
+	}
+	if err := transitionSubmissionIntent(stateDir, intent, submissionPhaseInFlight, nil); err != nil {
+		return client.JobSubmitResult{}, c, hello, err
+	}
+	for attempt := 1; attempt <= maxSubmissionAttempts; attempt++ {
+		submitted, err := c.JobSubmit(ctx, intent.Params)
+		if err == nil {
+			return submitted, c, hello, nil
+		}
+		opErr := agentbusOperationError(err)
+		classification, ok := classifyAgentbusError(opErr)
+		if !ok {
+			return client.JobSubmitResult{}, c, hello, opErr
+		}
+		lastError := agentbusErrorFromClassification(classification)
+		if classification.Retryable && attempt < maxSubmissionAttempts {
+			if err := transitionSubmissionIntent(stateDir, intent, submissionPhaseInFlight, func(intent *submissionIntent) {
+				intent.LastError = lastError
+			}); err != nil {
+				return client.JobSubmitResult{}, c, hello, submissionUnresolvedError{RequestID: intent.RequestID, Err: opErr}
+			}
+			_ = c.Close()
+			next, nextHello, connectErr := connectAgentbusCommandAtRoot(ctx, requiredCapabilities, intent.AgentbusStateRoot)
+			if connectErr != nil {
+				opErr = agentbusOperationError(connectErr)
+				classification, _ = classifyAgentbusError(opErr)
+				lastError = agentbusErrorFromClassification(classification)
+				if err := transitionSubmissionIntent(stateDir, intent, submissionPhaseBlocked, func(intent *submissionIntent) {
+					intent.LastError = lastError
+				}); err != nil {
+					return client.JobSubmitResult{}, c, hello, submissionUnresolvedError{RequestID: intent.RequestID, Err: opErr}
+				}
+				return client.JobSubmitResult{}, c, hello, submissionUnresolvedError{RequestID: intent.RequestID, Err: opErr}
+			}
+			c = next
+			hello = nextHello
+			continue
+		}
+		phase := submissionPhaseForError(classification)
+		if err := transitionSubmissionIntent(stateDir, intent, phase, func(intent *submissionIntent) {
+			intent.LastError = lastError
+		}); err != nil {
+			if classification.Retryable || classification.PreserveIntent {
+				return client.JobSubmitResult{}, c, hello, submissionUnresolvedError{RequestID: intent.RequestID, Err: opErr}
+			}
+			return client.JobSubmitResult{}, c, hello, opErr
+		}
+		if classification.Retryable || classification.PreserveIntent {
+			return client.JobSubmitResult{}, c, hello, submissionUnresolvedError{RequestID: intent.RequestID, Err: opErr}
+		}
+		return client.JobSubmitResult{}, c, hello, opErr
+	}
+	return client.JobSubmitResult{}, c, hello, submissionUnresolvedError{RequestID: intent.RequestID, Err: errors.New("submission retry attempts exhausted")}
+}
+
+func submissionPhaseForError(classification agentbusErrorClassification) string {
+	if classification.Retryable || classification.PreserveIntent {
+		return submissionPhaseBlocked
+	}
+	return submissionPhaseRejected
+}
+
+func recoverTaskSubmission(opts taskOptions, stderr io.Writer) (taskRunResult, error) {
+	ctx := context.Background()
+	intent, found, err := loadSubmissionIntent(opts.StateDir, opts.RecoverRequest)
 	if err != nil {
 		return taskRunResult{}, err
 	}
-	if err := validateResumeTarget(opts, target); err != nil {
-		return taskRunResult{}, err
+	if !found {
+		return taskRunResult{}, fmt.Errorf("no local submission intent for request %s; recover with: delegate task --recover-request %s", opts.RecoverRequest, opts.RecoverRequest)
 	}
-	session, err := c.SessionResume(ctx, client.SessionResumeParams{SessionID: opts.ResumeSession})
+	recordedRoot, err := canonicalizeAgentbusStateRoot("submission intent agentbus_state_root", intent.AgentbusStateRoot)
 	if err != nil {
 		return taskRunResult{}, err
 	}
-	input, err := persistPreLaunchJobInput(opts, resolved)
+	intent.AgentbusStateRoot = recordedRoot
+	requiredCapabilities := requiredCapabilitiesForPolicy(intent.Params.TaskSpec.Policy)
+	c, hello, err := connectAgentbusCommandAtRoot(ctx, requiredCapabilities, intent.AgentbusStateRoot)
+	if err != nil {
+		return taskRunResult{}, agentbusOperationError(err)
+	}
+	defer func() { _ = c.Close() }()
+	submitted, currentClient, currentHello, err := submitIntentWithRetry(ctx, c, hello, opts.StateDir, &intent, requiredCapabilities)
+	c = currentClient
+	hello = currentHello
 	if err != nil {
 		return taskRunResult{}, err
 	}
-	contractKind := contractKindForPolicy(turnPolicy, opts.NoContract)
-	if _, err := persistProvisionalJobMetadata(opts, input, input.JobID, contractKind); err != nil {
-		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
-		return taskRunResult{}, fmt.Errorf("persist metadata before launch: %w", err)
-	}
-	pendingJobID := input.JobID
-	write := opts.Write
-	started, notifications, err := c.TurnStart(ctx, client.TurnStartParams{
-		SessionID: session.SessionID,
-		Prompt:    resolved.Prompt,
-		Write:     &write,
-		Policy:    turnPolicy,
-		TimeoutMs: timeoutMillis(opts.Timeout),
-	})
-	if err != nil {
-		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
-		_ = deleteJobMetadata(opts.StateDir, pendingJobID)
-		return taskRunResult{}, err
-	}
+	taskOpts := taskOptionsFromIntent(opts.StateDir, intent, submitted)
+	taskOpts.Wait = opts.Wait
 	var warnings []string
-	if err := persistProvisionalJobAdoption(opts.StateDir, pendingJobID, started.JobID); err != nil {
-		warnings = append(warnings, fmt.Sprintf("provisional metadata for %s could not record adopted job %s: %v", pendingJobID, started.JobID, err))
+	resolved := resolvedPromptFromIntent(intent)
+	ackWarnings, acknowledged, err := acknowledgeSubmittedTask(taskOpts, resolved, submitted, intent.ContractKind, "after recovery")
+	warnings = append(warnings, ackWarnings...)
+	if err != nil {
+		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
-	input, warnings = reassociateSubmittedJobInput(input, started.JobID, warnings)
-	if warning, err := persistLaunchedJobMetadata(opts, input, started.JobID, contractKind); err != nil {
-		warnings = append(warnings, err.Error())
-		env, envelopeErr := newLaunchEnvelopeWithOrigin(started.JobID, engine.StateRunning, taskEnvelopeOrigin(opts), taskModelEffort(opts))
+	if !acknowledged {
+		env, envelopeErr := newLaunchEnvelopeForTask(submitted.JobID, submitted.State, taskOpts)
 		if envelopeErr != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, envelopeErr
 		}
 		return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
-	} else if warning != "" {
-		warnings = append(warnings, warning)
 	}
-	if pendingJobID != started.JobID && input.JobID == started.JobID {
-		if err := deleteJobMetadata(opts.StateDir, pendingJobID); err != nil {
-			warnings = append(warnings, fmt.Sprintf("pending metadata for %s could not be removed: %v", pendingJobID, err))
-		}
-	}
-	err = cleanupJobInput(opts.StateDir, started.JobID, started.SessionID, engine.StateRunning)
-	if err != nil {
+	if err := transitionSubmissionIntent(opts.StateDir, &intent, submissionPhaseAcknowledged, func(intent *submissionIntent) {
+		intent.JobID = submitted.JobID
+		intent.Deduplicated = submitted.Deduplicated
+		intent.LastError = nil
+	}); err != nil {
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
-	if opts.Wait {
-		jobResult, err := waitForTurnResult(ctx, c, opts.StateDir, started.JobID, notifications)
-		if err != nil {
-			return taskRunResult{Submitted: true, Warnings: warnings}, err
-		}
-		env, err := terminalEnvelopeFromJobResult(opts.StateDir, jobResult, modelsReportedCapable)
-		if err != nil {
-			return taskRunResult{Submitted: true, Warnings: warnings}, err
-		}
-		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
-	}
-	env, err := newLaunchEnvelopeWithOrigin(started.JobID, engine.StateRunning, taskEnvelopeOrigin(opts), taskModelEffort(opts))
-	if err != nil {
-		return taskRunResult{Submitted: true, Warnings: warnings}, err
-	}
-	return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
+	return submittedTaskRunResult(ctx, c, hello, taskOpts, submitted, warnings, stderr)
 }
 
-func validateResumeTarget(opts taskOptions, target client.SessionInfo) error {
-	actualCWD := filepath.Clean(target.CWD)
-	requestedCWD := filepath.Clean(opts.CWD)
-	if target.Backend != opts.Backend || actualCWD != requestedCWD {
-		return fmt.Errorf("session %q has backend %q and cwd %q, which do not match requested --backend %q and effective --cwd %q; use --fresh to start a new session", opts.ResumeSession, target.Backend, actualCWD, opts.Backend, requestedCWD)
+func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted client.JobSubmitResult) taskOptions {
+	modelEffort := config.ModelEffortResolution{Model: intent.Model, Effort: intent.Effort}
+	origin := envelopeOrigin{}
+	if intent.Origin != nil {
+		origin = *intent.Origin
+	}
+	spec := intent.Params.TaskSpec
+	return taskOptions{
+		Backend:           spec.Backend,
+		CWD:               spec.CWD,
+		Model:             spec.Model,
+		Effort:            spec.Effort,
+		Write:             spec.Write,
+		NoContract:        intent.NoContract,
+		StateDir:          stateDir,
+		Kind:              intent.Kind,
+		ReviewWorkspace:   intent.ReviewWorkspace,
+		ModelEffort:       modelEffort,
+		AuditOrigin:       origin,
+		AgentbusStateRoot: intent.AgentbusStateRoot,
+		RequestID:         intent.RequestID,
+		WorkspaceKey:      intent.WorkspaceKey,
+		SubmissionState:   submitted.State,
+		Deduplicated:      submitted.Deduplicated,
+	}
+}
+
+func resolvedPromptFromIntent(intent submissionIntent) handoff.ResolvedPrompt {
+	resolved := handoff.ResolvedPrompt{Prompt: intent.Params.TaskSpec.Prompt, Source: handoff.SourcePrompt}
+	if intent.HandoffSource {
+		resolved.Source = handoff.SourceHandoffPromptFile
+		resolved.HandoffPath = intent.HandoffPayloadPath
+	}
+	return resolved
+}
+
+func persistDelegateJobInputWithoutPayloadCleanup(opts taskOptions, resolved handoff.ResolvedPrompt, jobID string) (handoff.JobInput, error) {
+	if input, found, err := acknowledgedJobInputFromMetadata(opts, jobID); err != nil || found {
+		return input, err
+	}
+	if resolved.Source == handoff.SourceHandoffPromptFile {
+		resolved.Source = handoff.SourcePrompt
+		resolved.HandoffPath = ""
+	}
+	return persistDelegateJobInput(opts, resolved, jobID)
+}
+
+func removeResolvedPromptPayload(resolved handoff.ResolvedPrompt) error {
+	if resolved.Source != handoff.SourceHandoffPromptFile || resolved.HandoffPath == "" {
+		return nil
+	}
+	if err := os.Remove(resolved.HandoffPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("handoff prompt payload %q could not be removed after acknowledgement: %w", resolved.HandoffPath, err)
+	}
+	dir, err := os.Open(filepath.Dir(resolved.HandoffPath))
+	if err != nil {
+		return fmt.Errorf("sync handoff prompt directory after acknowledgement: %w", err)
+	}
+	defer dir.Close()
+	if err := dir.Sync(); err != nil {
+		return fmt.Errorf("sync handoff prompt directory after acknowledgement: %w", err)
 	}
 	return nil
 }
 
-func resumableSessionInfo(ctx context.Context, c agentbusClient, stateDir, sessionID string) (client.SessionInfo, error) {
-	listed, listErr := c.SessionList(ctx, client.SessionListParams{})
-	if listErr == nil {
-		for _, session := range listed.Sessions {
-			if session.SessionID == sessionID && session.Backend != "" && session.CWD != "" {
-				return session, nil
-			}
-		}
-	}
-	meta, found, err := delegateSessionMetadata(stateDir, sessionID)
-	if err != nil {
-		return client.SessionInfo{}, err
-	}
-	if found && meta.Backend != "" && meta.CWD != "" {
-		return client.SessionInfo{SessionID: sessionID, Backend: meta.Backend, CWD: meta.CWD}, nil
-	}
-	if listErr != nil {
-		return client.SessionInfo{}, fmt.Errorf("inspect session %q before resume: %w; use --fresh to start a new session", sessionID, listErr)
-	}
-	return client.SessionInfo{}, fmt.Errorf("cannot verify backend and cwd for session %q before resume; use --fresh to start a new session", sessionID)
-}
-
 var saveDelegateJobMetadata = saveJobMetadata
 var saveLaunchedJobMetadataFallback = saveJobMetadata
-
-func persistDelegateJob(opts taskOptions, resolved handoff.ResolvedPrompt, jobID, contractKind string) (jobMetadata, error) {
-	input, err := persistDelegateJobInput(opts, resolved, jobID)
-	if err != nil {
-		return jobMetadata{}, err
-	}
-	meta, err := persistDelegateJobMetadata(opts, input, jobID, contractKind)
-	if err != nil {
-		_, _ = handoff.DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, handoff.Hooks{})
-		return jobMetadata{}, err
-	}
-	return meta, nil
-}
-
-func persistPreLaunchJobInput(opts taskOptions, resolved handoff.ResolvedPrompt) (handoff.JobInput, error) {
-	jobID, err := newJobID()
-	if err != nil {
-		return handoff.JobInput{}, err
-	}
-	return persistDelegateJobInput(opts, resolved, jobID)
-}
 
 func persistDelegateJobInput(opts taskOptions, resolved handoff.ResolvedPrompt, jobID string) (handoff.JobInput, error) {
 	return handoff.PersistJobInput(handoff.JobInputOptions{
@@ -532,69 +681,44 @@ func persistDelegateJobInput(opts taskOptions, resolved handoff.ResolvedPrompt, 
 	})
 }
 
-func persistDelegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) (jobMetadata, error) {
-	meta := delegateJobMetadata(opts, input, jobID, contractKind)
-	if err := saveDelegateJobMetadata(opts.StateDir, meta); err != nil {
-		return jobMetadata{}, err
-	}
-	return meta, nil
-}
-
-func persistProvisionalJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) (jobMetadata, error) {
-	meta := delegateJobMetadata(opts, input, jobID, contractKind)
-	meta.Provisional = true
-	if err := saveDelegateJobMetadata(opts.StateDir, meta); err != nil {
-		return jobMetadata{}, err
-	}
-	return meta, nil
-}
-
-func persistProvisionalJobAdoption(stateDir, provisionalID, jobID string) error {
-	meta, found, err := loadJobMetadata(stateDir, provisionalID)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return fmt.Errorf("provisional metadata not found")
-	}
-	meta.AdoptedJobID = jobID
-	return saveJobMetadata(stateDir, meta)
-}
-
 func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) jobMetadata {
 	modelEffort := normalizedModelEffort(taskModelEffort(opts))
 	return jobMetadata{
-		Schema:          envelopeSchema,
-		JobID:           jobID,
-		Kind:            effectiveTaskKind(opts),
-		Backend:         opts.Backend,
-		CWD:             opts.CWD,
-		ContractKind:    contractKind,
-		NoContract:      opts.NoContract,
-		JobInputPath:    input.Path,
-		ReviewWorkspace: opts.ReviewWorkspace,
-		Model:           modelEffort.Model,
-		Effort:          modelEffort.Effort,
-		Origin:          envelopeOriginPointer(taskEnvelopeOrigin(opts)),
+		Schema:            jobMetadataSchema,
+		JobID:             jobID,
+		RequestID:         opts.RequestID,
+		WorkspaceKey:      opts.WorkspaceKey,
+		Kind:              effectiveTaskKind(opts),
+		Backend:           opts.Backend,
+		CWD:               opts.CWD,
+		ContractKind:      contractKind,
+		NoContract:        opts.NoContract,
+		JobInputPath:      input.Path,
+		ReviewWorkspace:   opts.ReviewWorkspace,
+		AgentbusStateRoot: opts.AgentbusStateRoot,
+		SubmissionState:   opts.SubmissionState,
+		State:             opts.SubmissionState,
+		Deduplicated:      opts.Deduplicated,
+		Model:             modelEffort.Model,
+		Effort:            modelEffort.Effort,
+		Origin:            envelopeOriginPointer(taskEnvelopeOrigin(opts)),
 	}
 }
 
 func taskModelEffort(opts taskOptions) config.ModelEffortResolution {
-	if opts.ResumeSession != "" {
-		return sessionModelEffortResolution()
-	}
 	return opts.ModelEffort
-}
-
-func sessionModelEffortResolution() config.ModelEffortResolution {
-	return config.ModelEffortResolution{
-		Model:  config.DimensionResolution{Source: "session"},
-		Effort: config.DimensionResolution{Source: "session"},
-	}
 }
 
 func persistLaunchedJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) (string, error) {
 	meta := delegateJobMetadata(opts, input, jobID, contractKind)
+	if existing, found, err := acknowledgedJobMetadata(opts, jobID); err != nil {
+		return "", err
+	} else if found {
+		meta = mergeAcknowledgedJobMetadata(existing, meta)
+		if reflect.DeepEqual(existing, meta) {
+			return "", nil
+		}
+	}
 	if err := saveDelegateJobMetadata(opts.StateDir, meta); err != nil {
 		if fallbackErr := saveLaunchedJobMetadataFallback(opts.StateDir, meta); fallbackErr != nil {
 			return "", fmt.Errorf("persist launched job metadata for %s: primary: %v; state-dir fallback: %w", jobID, err, fallbackErr)
@@ -604,15 +728,151 @@ func persistLaunchedJobMetadata(opts taskOptions, input handoff.JobInput, jobID,
 	return "", nil
 }
 
-func reassociateSubmittedJobInput(input handoff.JobInput, jobID string, warnings []string) (handoff.JobInput, []string) {
-	reassociated, err := handoff.ReassociateJobInput(input, jobID, handoff.Hooks{})
-	if reassociated.Path != "" {
-		input = reassociated
+func acknowledgeSubmittedTask(opts taskOptions, resolved handoff.ResolvedPrompt, submitted client.JobSubmitResult, contractKind, inputContext string) ([]string, bool, error) {
+	var warnings []string
+	input, inputErr := persistDelegateJobInputWithoutPayloadCleanup(opts, resolved, submitted.JobID)
+	if inputErr != nil {
+		warnings = append(warnings, fmt.Sprintf("job input for %s could not be persisted %s: %v", submitted.JobID, inputContext, inputErr))
 	}
+	if warning, err := persistLaunchedJobMetadata(opts, input, submitted.JobID, contractKind); err != nil {
+		warnings = append(warnings, err.Error())
+		return warnings, false, nil
+	} else if warning != "" {
+		warnings = append(warnings, warning)
+	}
+	if err := removeResolvedPromptPayload(resolved); err != nil {
+		warnings = append(warnings, err.Error())
+	}
+	return warnings, true, nil
+}
+
+func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.HelloResult, opts taskOptions, submitted client.JobSubmitResult, warnings []string, stderr io.Writer) (taskRunResult, error) {
+	terminalOptions := terminalEnvelopeOptions{
+		ModelsReportedCapable: hello.Capabilities["models.reported"],
+		RequestID:             opts.RequestID,
+		Deduplicated:          opts.Deduplicated,
+		DeduplicatedSet:       true,
+	}
+	cleanupWarnings := newLocalCleanupWarnings(stderr)
+	if engine.IsTerminal(submitted.State) {
+		jobResult, err := submittedTerminalJob(ctx, c, opts.StateDir, submitted.JobID, cleanupWarnings)
+		if err != nil {
+			return taskRunResult{Submitted: true, Warnings: warnings}, err
+		}
+		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, jobResult.result, jobResult.envelopeOptions(terminalOptions))
+		if err != nil {
+			return taskRunResult{Submitted: true, Warnings: warnings}, err
+		}
+		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
+	}
+	if opts.Wait {
+		jobResult, err := waitForTerminalJobResult(ctx, c, opts.StateDir, submitted.JobID, cleanupWarnings)
+		if err != nil {
+			return taskRunResult{Submitted: true, Warnings: warnings}, err
+		}
+		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, jobResult.result, jobResult.envelopeOptions(terminalOptions))
+		if err != nil {
+			return taskRunResult{Submitted: true, Warnings: warnings}, err
+		}
+		return taskRunResult{Terminal: &env, Warnings: warnings, Submitted: true}, nil
+	}
+	env, err := newLaunchEnvelopeForTask(submitted.JobID, submitted.State, opts)
 	if err != nil {
-		warnings = append(warnings, fmt.Sprintf("job input for %s could not be re-associated: %v", jobID, err))
+		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
-	return input, warnings
+	return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
+}
+
+func newLaunchEnvelopeForTask(jobID string, state engine.JobState, opts taskOptions) (LaunchEnvelope, error) {
+	return newLaunchEnvelopeWithOptions(jobID, state, launchEnvelopeOptions{
+		ModelEffort:  taskModelEffort(opts),
+		Origin:       taskEnvelopeOrigin(opts),
+		RequestID:    opts.RequestID,
+		Deduplicated: opts.Deduplicated,
+	})
+}
+
+func acknowledgedJobInputFromMetadata(opts taskOptions, jobID string) (handoff.JobInput, bool, error) {
+	meta, found, err := acknowledgedJobMetadata(opts, jobID)
+	if err != nil || !found {
+		return handoff.JobInput{}, false, err
+	}
+	return handoff.JobInput{JobID: jobID, Path: meta.JobInputPath}, true, nil
+}
+
+func acknowledgedJobMetadata(opts taskOptions, jobID string) (jobMetadata, bool, error) {
+	meta, found, err := loadJobMetadata(opts.StateDir, jobID)
+	if err != nil || !found {
+		return jobMetadata{}, false, err
+	}
+	if err := validateAcknowledgedJobMetadata(meta, opts, jobID); err != nil {
+		return jobMetadata{}, false, err
+	}
+	return meta, true, nil
+}
+
+func validateAcknowledgedJobMetadata(meta jobMetadata, opts taskOptions, jobID string) error {
+	if meta.JobID != jobID {
+		return fmt.Errorf("delegate job metadata %q has job_id %q", jobID, meta.JobID)
+	}
+	if opts.RequestID != "" && meta.RequestID != "" && meta.RequestID != opts.RequestID {
+		return fmt.Errorf("delegate job metadata for %s belongs to request %s, not %s", jobID, meta.RequestID, opts.RequestID)
+	}
+	if opts.WorkspaceKey != "" && meta.WorkspaceKey != "" && meta.WorkspaceKey != opts.WorkspaceKey {
+		return fmt.Errorf("delegate job metadata for %s belongs to workspace %s, not %s", jobID, meta.WorkspaceKey, opts.WorkspaceKey)
+	}
+	return nil
+}
+
+func mergeAcknowledgedJobMetadata(existing, next jobMetadata) jobMetadata {
+	merged := existing
+	if merged.Schema == 0 || merged.Schema < next.Schema {
+		merged.Schema = next.Schema
+	}
+	if merged.RequestID == "" {
+		merged.RequestID = next.RequestID
+	}
+	if merged.WorkspaceKey == "" {
+		merged.WorkspaceKey = next.WorkspaceKey
+	}
+	if merged.Kind == "" {
+		merged.Kind = next.Kind
+	}
+	if merged.Backend == "" {
+		merged.Backend = next.Backend
+	}
+	if merged.CWD == "" {
+		merged.CWD = next.CWD
+	}
+	if merged.ContractKind == "" {
+		merged.ContractKind = next.ContractKind
+	}
+	if next.NoContract {
+		merged.NoContract = true
+	}
+	if merged.AgentbusStateRoot == "" {
+		merged.AgentbusStateRoot = next.AgentbusStateRoot
+	}
+	if next.SubmissionState != "" {
+		merged.SubmissionState = next.SubmissionState
+	}
+	if next.Deduplicated {
+		merged.Deduplicated = true
+	}
+	if dimensionResolutionEmpty(merged.Model) {
+		merged.Model = next.Model
+	}
+	if dimensionResolutionEmpty(merged.Effort) {
+		merged.Effort = next.Effort
+	}
+	if merged.Origin == nil {
+		merged.Origin = next.Origin
+	}
+	return merged
+}
+
+func dimensionResolutionEmpty(value config.DimensionResolution) bool {
+	return value.Requested == "" && value.Effective == "" && value.Source == ""
 }
 
 func taskTags(opts taskOptions) map[string]string {
@@ -643,9 +903,13 @@ func effectiveTaskKind(opts taskOptions) string {
 	return opts.Kind
 }
 
-func timeoutMillis(timeout time.Duration) *int64 {
-	if timeout <= 0 {
+func timeoutMillis(timeout time.Duration, set bool) *int64 {
+	if !set {
 		return nil
+	}
+	if timeout == 0 {
+		var zero int64
+		return &zero
 	}
 	ms := timeout.Milliseconds()
 	if ms == 0 {

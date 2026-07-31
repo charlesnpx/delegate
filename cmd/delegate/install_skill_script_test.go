@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -60,6 +61,33 @@ func TestDelegatedInstallerPlanReportsSetupWhenToolsMissing(t *testing.T) {
 	}
 	if !setup["go"] || !setup["agentbus"] {
 		t.Fatalf("setup = %#v, want go and agentbus executable requirements", result.Setup)
+	}
+}
+
+func TestDelegatedInstallerCodexPlanReportsSandboxRootsFromEnv(t *testing.T) {
+	tmp := privateTmpDir(t, "delegate-plan-sandbox-*")
+	home := filepath.Join(tmp, "home")
+	codexHome := filepath.Join(tmp, "codex-home")
+	stateHome := filepath.Join(tmp, "state")
+	agentbusState := filepath.Join(tmp, "agentbus-state")
+	cacheHome := filepath.Join(tmp, "cache")
+	agentbusCache := filepath.Join(cacheHome, "agentbus")
+	if runtime.GOOS == "darwin" {
+		agentbusCache = filepath.Join(home, "Library", "Caches", "agentbus")
+	}
+
+	result := runDelegatedInstallerScript(t, []string{"--plan", "--target", "codex", "--json"}, []string{
+		"HOME=" + home,
+		"CODEX_HOME=" + codexHome,
+		"XDG_STATE_HOME=" + stateHome,
+		"AGENTBUS_STATE_ROOT=" + agentbusState,
+		"XDG_CACHE_HOME=" + cacheHome,
+	})
+	wantWarning := "codex sandbox writable_roots would-configure: " +
+		agentbusState + ", " + agentbusCache + ", " + filepath.Join(stateHome, "delegate") +
+		" (config " + filepath.Join(codexHome, "config.toml") + ")"
+	if len(result.Warnings) != 1 || result.Warnings[0] != wantWarning {
+		t.Fatalf("warnings = %#v, want [%q]", result.Warnings, wantWarning)
 	}
 }
 
@@ -180,6 +208,7 @@ func TestDelegatedInstallerLiveCodexInstallConfiguresSandbox(t *testing.T) {
 	stateHome := filepath.Join(home, "state")
 	gocache := privateTmpDir(t, "delegate-gocache-*")
 	gomodcache := privateTmpDir(t, "delegate-gomodcache-*")
+	warmDelegateModuleCache(t, gomodcache, gocache)
 	env := []string{
 		"HOME=" + home,
 		"CODEX_HOME=" + codexHome,
@@ -188,6 +217,7 @@ func TestDelegatedInstallerLiveCodexInstallConfiguresSandbox(t *testing.T) {
 		"GOMODCACHE=" + gomodcache,
 		"GOPROXY=off",
 		"GOSUMDB=off",
+		"GOFLAGS=-modcacherw",
 	}
 
 	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "codex", "--json"}, env)
@@ -203,7 +233,11 @@ func TestDelegatedInstallerLiveCodexInstallConfiguresSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("configured config does not parse: %v\n%s", err, raw)
 	}
-	wantRoots := []string{filepath.Join(stateHome, "agentbus"), filepath.Join(stateHome, "delegate")}
+	agentbusRoot, err := canonicalizeAgentbusStateRoot("test agentbus root", filepath.Join(stateHome, "agentbus"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoots := []string{agentbusRoot, filepath.Join(stateHome, "delegate")}
 	if !allWritableRootsPresent(parsed.SandboxWorkspaceWrite.WritableRoots, wantRoots) {
 		t.Fatalf("writable roots = %#v, want %#v", parsed.SandboxWorkspaceWrite.WritableRoots, wantRoots)
 	}
@@ -238,10 +272,14 @@ func TestDelegatedInstallerToolsInstallBuildsDelegate(t *testing.T) {
 	}
 	root := filepath.Join(tmp, "root")
 	gocache := privateTmpDir(t, "delegate-gocache-*")
+	gomodcache := privateTmpDir(t, "delegate-gomodcache-*")
+	warmDelegateModuleCache(t, gomodcache, gocache)
 	env := []string{
 		"GOCACHE=" + gocache,
+		"GOMODCACHE=" + gomodcache,
 		"GOPROXY=off",
 		"GOSUMDB=off",
+		"GOFLAGS=-modcacherw",
 	}
 
 	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "tools", "--json", "--install-root", root}, env)
@@ -318,4 +356,52 @@ func privateTmpDir(t *testing.T, pattern string) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
+}
+
+func warmDelegateModuleCache(t *testing.T, gomodcache, gocache string) {
+	t.Helper()
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "mod", "download", "all")
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(),
+		"GOCACHE="+gocache,
+		"GOMODCACHE="+gomodcache,
+		"GOFLAGS=-modcacherw",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return
+	}
+	msg := strings.TrimSpace(string(out))
+	if moduleCacheWarmupEnvironmentBlocked(msg) {
+		t.Skipf("warm module cache for offline installer test: %v: %s", err, msg)
+	}
+	t.Fatalf("warm module cache for offline installer test: %v\n%s", err, msg)
+}
+
+func moduleCacheWarmupEnvironmentBlocked(output string) bool {
+	lower := strings.ToLower(output)
+	for _, marker := range []string{
+		"goproxy=off",
+		"module lookup disabled",
+		"operation not permitted",
+		"network is unreachable",
+		"no route to host",
+		"no such host",
+		"could not resolve host",
+		"temporary failure in name resolution",
+		"i/o timeout",
+		"tls handshake timeout",
+		"connection refused",
+		"connection reset",
+		"proxyconnect tcp",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }

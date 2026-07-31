@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -23,11 +24,11 @@ type reviewOptions struct {
 	Model             string
 	Effort            string
 	Timeout           time.Duration
+	TimeoutSet        bool
 	StrictContract    bool
 	Origin            string
 	ParentClient      optionalStringFlag
 	ParentSession     optionalStringFlag
-	Embedded          bool
 	Base              string
 	Scope             string
 	AllowLiveRepoRead bool
@@ -68,30 +69,34 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		return 0, err
 	}
 	taskOpts := taskOptions{
-		Backend:         opts.Backend,
-		Wait:            opts.Wait,
-		JSON:            opts.JSON,
-		CWD:             assembled.BackendCWD,
-		Model:           opts.Model,
-		Effort:          opts.Effort,
-		Timeout:         opts.Timeout,
-		StrictContract:  opts.StrictContract,
-		Origin:          opts.Origin,
-		AuditOrigin:     captureTaskOrigin(opts.Origin, opts.ParentClient, opts.ParentSession, nil),
-		Embedded:        opts.Embedded,
-		StateDir:        assembled.StateDir,
-		Kind:            kind,
-		ReviewWorkspace: assembled.Workspace,
-		ModelEffort:     taskDefaults.ModelEffort,
+		Backend:          opts.Backend,
+		Wait:             opts.Wait,
+		JSON:             opts.JSON,
+		CWD:              assembled.BackendCWD,
+		Model:            opts.Model,
+		Effort:           opts.Effort,
+		Timeout:          opts.Timeout,
+		TimeoutSet:       opts.TimeoutSet,
+		StrictContract:   opts.StrictContract,
+		Origin:           opts.Origin,
+		AuditOrigin:      captureTaskOrigin(opts.Origin, opts.ParentClient, opts.ParentSession, nil),
+		StateDir:         assembled.StateDir,
+		Kind:             kind,
+		ReviewWorkspace:  assembled.Workspace,
+		ModelEffort:      taskDefaults.ModelEffort,
+		LogicalWorkspace: assembled.RepositoryRoot,
 	}
 	result, err := executeTask(taskOpts, handoff.ResolvedPrompt{Prompt: prompt, Source: handoff.SourcePrompt}, turnPolicy, stderr)
 	if result.Submitted {
 		// A successful daemon submission owns the workspace even if later local
-		// bookkeeping fails; provisional metadata and the launch envelope recover it.
+		// bookkeeping fails; the durable submission intent and launch envelope recover it.
 		ownsWorkspace = false
 	}
 	if err != nil {
-		return 0, err
+		if submissionErrorPreservesReviewWorkspace(err) {
+			ownsWorkspace = false
+		}
+		return agentbusCommandErrorResult(opts.JSON, stdout, err)
 	}
 	if result.Launch != nil {
 		// Job metadata owns the workspace until a terminal state is observed.
@@ -134,13 +139,17 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	fs.StringVar(&opts.Origin, "origin", "", "originating skill")
 	fs.Var(&opts.ParentClient, "parent-client", "explicit parent client for audit linkage")
 	fs.Var(&opts.ParentSession, "parent-session", "explicit parent session id for audit linkage")
-	fs.BoolVar(&opts.Embedded, "embedded", false, "run through the embedded engine path")
 	fs.StringVar(&opts.Base, "base", "", "comparison base ref")
 	fs.StringVar(&opts.Scope, "scope", reviewpkg.ScopeAuto, "review scope: auto combines branch and working-tree changes; or working-tree, branch")
 	fs.BoolVar(&opts.AllowLiveRepoRead, "allow-live-repo-read", false, "use live repository as backend cwd (makes backend file reads easier; does not prevent backend file reads)")
 	if err := fs.Parse(args); err != nil {
 		return reviewOptions{}, err
 	}
+	fs.Visit(func(flag *flag.Flag) {
+		if flag.Name == "timeout" {
+			opts.TimeoutSet = true
+		}
+	})
 	if fs.NArg() != 0 {
 		return reviewOptions{}, fmt.Errorf("%s does not accept positional arguments", command)
 	}
@@ -150,11 +159,11 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	if background && opts.Wait {
 		return reviewOptions{}, fmt.Errorf("use only one of --background or --wait")
 	}
-	if opts.Embedded && !opts.Wait {
-		return reviewOptions{}, fmt.Errorf("--embedded requires --wait; background supervision is daemon-only")
-	}
 	if opts.Scope == reviewpkg.ScopeWorkingTree && opts.Base != "" {
 		return reviewOptions{}, fmt.Errorf("--base cannot be used with --scope working-tree")
+	}
+	if err := validateTimeoutOption(opts.Timeout, opts.TimeoutSet); err != nil {
+		return reviewOptions{}, err
 	}
 	if opts.CWD == "" {
 		cwd, err := os.Getwd()
@@ -164,4 +173,9 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 		opts.CWD = cwd
 	}
 	return opts, nil
+}
+
+func submissionErrorPreservesReviewWorkspace(err error) bool {
+	var unresolved submissionUnresolvedError
+	return errors.As(err, &unresolved)
 }

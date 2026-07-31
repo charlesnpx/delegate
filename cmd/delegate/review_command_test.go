@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -37,11 +38,12 @@ func TestReviewCommandsUseReadOnlySanitizedTaskPipelineAndEnvelopeKinds(t *testi
 			fake := &fakeAgentbusClient{
 				hello: helloWithCapabilities(),
 				result: client.JobResult{
-					JobID:     "job_" + strings.ReplaceAll(tc.command, "-", "_"),
-					SessionID: "session_review",
-					State:     engine.StateCompleted,
-					Result:    &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-					Contract:  ptr(compliantContractStamp(t, report)),
+					JobID:              "job_" + strings.ReplaceAll(tc.command, "-", "_"),
+					SessionID:          "session_review",
+					State:              engine.StateCompleted,
+					CleanupDisposition: cleanupDispositionVerifiedAbsent,
+					Result:             &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
+					Contract:           ptr(compliantContractStamp(t, report)),
 				},
 			}
 			restore := stubAgentbusGlobals(t, fake)
@@ -100,6 +102,83 @@ func TestReviewCommandsUseReadOnlySanitizedTaskPipelineAndEnvelopeKinds(t *testi
 	}
 }
 
+func TestReviewWaitCleanupUsesStatusDispositionWhenResultOmitsIt(t *testing.T) {
+	repo := newCommandGitFixture(t)
+	writeCommandFixture(t, repo, "visible.txt", "change\n")
+	report := compliantReport()
+	jobID := "job_review_wait_status_cleanup"
+	sessionID := "session_review_wait_status_cleanup"
+	fake := &reviewWaitStatusCleanupClient{fakeAgentbusClient: fakeAgentbusClient{
+		hello: helloWithCapabilities(),
+		result: client.JobResult{
+			JobID:     jobID,
+			SessionID: sessionID,
+			State:     engine.StateCompleted,
+			Result:    &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
+			Contract:  ptr(compliantContractStamp(t, report)),
+		},
+	}}
+	restore := stubAgentbusClientGlobals(t, fake)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--wait", "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("review code=%d stderr=%q stdout=%q, want success", code, stderr.String(), stdout.String())
+	}
+	if fake.captureErr != nil {
+		t.Fatalf("capture artifacts before status cleanup: %v", fake.captureErr)
+	}
+	if fake.inputPath == "" || fake.workspace == "" {
+		t.Fatalf("captured input=%q workspace=%q, want both paths before cleanup", fake.inputPath, fake.workspace)
+	}
+	assertPathMissing(t, fake.inputPath)
+	assertPathMissing(t, fake.workspace)
+	meta, found, err := loadJobMetadata("", jobID)
+	if err != nil || !found {
+		t.Fatalf("metadata found=%v err=%v", found, err)
+	}
+	if meta.JobInputPath != "" || meta.ReviewWorkspace != "" || meta.CleanupDisposition != cleanupDispositionVerifiedAbsent {
+		t.Fatalf("metadata after cleanup=%#v, want removed artifacts and status fallback disposition", meta)
+	}
+	if strings.Contains(stderr.String(), "retained local job artifacts") {
+		t.Fatalf("stderr=%q, want no retention warning", stderr.String())
+	}
+}
+
+type reviewWaitStatusCleanupClient struct {
+	fakeAgentbusClient
+	inputPath  string
+	workspace  string
+	captureErr error
+}
+
+func (f *reviewWaitStatusCleanupClient) JobStatus(_ context.Context, params client.JobStatusParams) (client.JobStatusResult, error) {
+	f.statuses = append(f.statuses, params)
+	meta, found, err := loadJobMetadata("", params.JobID)
+	if err != nil {
+		f.captureErr = err
+	} else if !found {
+		f.captureErr = errors.New("metadata missing before wait cleanup")
+	} else {
+		f.inputPath = meta.JobInputPath
+		f.workspace = meta.ReviewWorkspace
+		if f.inputPath == "" || f.workspace == "" {
+			f.captureErr = errors.New("metadata missing artifact paths before wait cleanup")
+		} else if _, err := os.Stat(f.inputPath); err != nil {
+			f.captureErr = err
+		} else if _, err := os.Stat(f.workspace); err != nil {
+			f.captureErr = err
+		}
+	}
+	return client.JobStatusResult{Jobs: []client.JobStatus{{
+		JobID:              params.JobID,
+		SessionID:          "session_review_wait_status_cleanup",
+		State:              engine.StateCompleted,
+		CleanupDisposition: cleanupDispositionVerifiedAbsent,
+	}}}, nil
+}
+
 func TestReviewBackgroundArtifactPersistsUntilTerminalResultCleanup(t *testing.T) {
 	repo := newCommandGitFixture(t)
 	writeCommandFixture(t, repo, "large.txt", strings.Repeat("x", reviewpkg.MaxInlineBytes+1))
@@ -107,11 +186,12 @@ func TestReviewBackgroundArtifactPersistsUntilTerminalResultCleanup(t *testing.T
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		result: client.JobResult{
-			JobID:     "job_review_artifact",
-			SessionID: "session_review_artifact",
-			State:     engine.StateCompleted,
-			Result:    &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-			Contract:  ptr(compliantContractStamp(t, report)),
+			JobID:              "job_review_artifact",
+			SessionID:          "session_review_artifact",
+			State:              engine.StateCompleted,
+			CleanupDisposition: cleanupDispositionVerifiedAbsent,
+			Result:             &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
+			Contract:           ptr(compliantContractStamp(t, report)),
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)
@@ -159,17 +239,17 @@ func TestReviewBackgroundArtifactPersistsUntilTerminalResultCleanup(t *testing.T
 	}
 }
 
-func TestReviewMetadataFailureBeforeLaunchAbortsAndCleansWorkspace(t *testing.T) {
+func TestReviewSubmissionIntentFailureBeforeLaunchAbortsAndCleansWorkspace(t *testing.T) {
 	repo := newCommandGitFixture(t)
 	writeCommandFixture(t, repo, "visible.txt", "change\n")
 	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
-	oldSave := saveDelegateJobMetadata
-	saveDelegateJobMetadata = func(string, jobMetadata) error {
-		return errors.New("metadata unavailable before launch")
+	oldSave := saveSubmissionIntent
+	saveSubmissionIntent = func(string, submissionIntent) error {
+		return errors.New("intent store unavailable before launch")
 	}
-	defer func() { saveDelegateJobMetadata = oldSave }()
+	defer func() { saveSubmissionIntent = oldSave }()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
 	var stdout, stderr bytes.Buffer
@@ -185,7 +265,7 @@ func TestReviewMetadataFailureBeforeLaunchAbortsAndCleansWorkspace(t *testing.T)
 	if err != nil || len(workspaces) != 0 {
 		t.Fatalf("review workspaces after aborted launch=%#v, %v", workspaces, err)
 	}
-	if !strings.Contains(stderr.String(), "persist metadata before launch") {
+	if !strings.Contains(stderr.String(), "persist submission intent before launch") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
@@ -197,23 +277,19 @@ func TestReviewMetadataFailureAfterLaunchUsesDurableFallbackAndPreservesKind(t *
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		result: client.JobResult{
-			JobID:     "job_review_metadata_fallback",
-			SessionID: "session_review_metadata_fallback",
-			State:     engine.StateCompleted,
-			Result:    &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-			Contract:  ptr(compliantContractStamp(t, report)),
+			JobID:              "job_review_metadata_fallback",
+			SessionID:          "session_review_metadata_fallback",
+			State:              engine.StateCompleted,
+			CleanupDisposition: cleanupDispositionVerifiedAbsent,
+			Result:             &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
+			Contract:           ptr(compliantContractStamp(t, report)),
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
 	oldSave := saveDelegateJobMetadata
-	saveCalls := 0
 	saveDelegateJobMetadata = func(string, jobMetadata) error {
-		saveCalls++
-		if saveCalls == 2 {
-			return errors.New("primary metadata write failed after launch")
-		}
-		return nil
+		return errors.New("primary metadata write failed after launch")
 	}
 	defer func() { saveDelegateJobMetadata = oldSave }()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -253,13 +329,8 @@ func TestReviewMetadataFailureAfterSubmitReturnsRealJobEnvelopeAndKeepsWorkspace
 	defer restore()
 	oldPrimary := saveDelegateJobMetadata
 	oldFallback := saveLaunchedJobMetadataFallback
-	primaryCalls := 0
 	saveDelegateJobMetadata = func(stateDir string, meta jobMetadata) error {
-		primaryCalls++
-		if primaryCalls > 1 {
-			return errors.New("primary metadata unavailable after submit")
-		}
-		return saveJobMetadata(stateDir, meta)
+		return errors.New("primary metadata unavailable after submit")
 	}
 	saveLaunchedJobMetadataFallback = func(string, jobMetadata) error {
 		return errors.New("fallback metadata unavailable after submit")
@@ -294,10 +365,16 @@ func TestReviewMetadataFailureAfterSubmitReturnsRealJobEnvelopeAndKeepsWorkspace
 			t.Fatalf("stderr=%q, want warning %q", stderr.String(), warning)
 		}
 	}
-	provisionalID := fake.submits[0].TaskSpec.Tags[provisionalJobIDTag]
-	meta, found, err := loadJobMetadata("", provisionalID)
-	if err != nil || !found || !meta.Provisional || meta.ReviewWorkspace != workspace {
-		t.Fatalf("provisional metadata=%#v found=%v err=%v", meta, found, err)
+	requestID := fake.submits[0].RequestID
+	intent, found, err := loadSubmissionIntent("", requestID)
+	if err != nil || !found {
+		t.Fatalf("submission intent found=%v err=%v", found, err)
+	}
+	if intent.Phase != submissionPhaseInFlight || intent.ReviewWorkspace != workspace || intent.JobID != "" {
+		t.Fatalf("submission intent=%#v, want in-flight intent retaining review workspace and no ack job", intent)
+	}
+	if _, found, err := loadJobMetadata("", "job_review_metadata_orphan"); err != nil || found {
+		t.Fatalf("metadata found=%v err=%v, want absent after primary+fallback failure", found, err)
 	}
 }
 

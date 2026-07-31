@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -15,12 +17,7 @@ import (
 
 type agentbusClient interface {
 	Close() error
-	Hello(context.Context) (client.HelloResult, error)
 	HelloResult() client.HelloResult
-	SessionStart(context.Context, client.SessionStartParams) (client.SessionStartResult, error)
-	SessionResume(context.Context, client.SessionResumeParams) (client.SessionStartResult, error)
-	SessionList(context.Context, client.SessionListParams) (client.SessionListResult, error)
-	TurnStart(context.Context, client.TurnStartParams) (client.TurnStartResult, <-chan client.TurnNotification, error)
 	JobSubmit(context.Context, client.JobSubmitParams) (client.JobSubmitResult, error)
 	JobStatus(context.Context, client.JobStatusParams) (client.JobStatusResult, error)
 	JobResult(context.Context, client.JobResultParams) (client.JobResult, error)
@@ -85,17 +82,9 @@ var commandOutput = func(name string, args ...string) ([]byte, error) {
 func connectCheckedAgentbus(ctx context.Context, opts client.Options, required []string, version string) (agentbusClient, client.HelloResult, error) {
 	c, err := connectAgentbus(ctx, opts)
 	if err != nil {
-		return nil, client.HelloResult{}, err
+		return nil, client.HelloResult{}, agentbusOperationError(err)
 	}
 	hello := c.HelloResult()
-	if hello.ProtocolVersion == 0 {
-		var helloErr error
-		hello, helloErr = c.Hello(ctx)
-		if helloErr != nil {
-			_ = c.Close()
-			return nil, client.HelloResult{}, helloErr
-		}
-	}
 	if err := requireCapabilities(hello, version, required); err != nil {
 		_ = c.Close()
 		return nil, client.HelloResult{}, err
@@ -103,13 +92,119 @@ func connectCheckedAgentbus(ctx context.Context, opts client.Options, required [
 	return c, hello, nil
 }
 
-func connectAgentbusCommand(ctx context.Context, required []string) (agentbusClient, client.HelloResult, error) {
+func connectAgentbusCommand(ctx context.Context, required []string) (agentbusClient, client.HelloResult, string, error) {
+	stateRoot, err := resolveAgentbusStateRoot()
+	if err != nil {
+		return nil, client.HelloResult{}, "", err
+	}
+	c, hello, err := connectAgentbusCommandAtRoot(ctx, required, stateRoot)
+	return c, hello, stateRoot, err
+}
+
+func connectAgentbusCommandAtRoot(ctx context.Context, required []string, stateRoot string) (agentbusClient, client.HelloResult, error) {
+	stateRoot, err := canonicalizeAgentbusStateRoot("agentbus state root", stateRoot)
+	if err != nil {
+		return nil, client.HelloResult{}, err
+	}
 	path, version := optionalAgentbusBinaryVersion()
-	opts := client.Options{}
+	opts := client.Options{StateRoot: stateRoot}
 	if path != "" {
 		opts.CommandPath = path
 	}
 	return connectCheckedAgentbus(ctx, opts, required, version)
+}
+
+type agentbusStateRootUsageError struct {
+	Name  string
+	Value string
+}
+
+func (err agentbusStateRootUsageError) Error() string {
+	return fmt.Sprintf("%s %q must be absolute", err.Name, err.Value)
+}
+
+func resolveAgentbusStateRoot() (string, error) {
+	return resolveAgentbusStateRootFrom(os.Getenv, os.UserHomeDir)
+}
+
+func resolveAgentbusUserCacheRoot() (string, error) {
+	return resolveAgentbusUserCacheRootFrom(os.UserCacheDir)
+}
+
+func resolveAgentbusUserCacheRootFrom(userCacheDir func() (string, error)) (string, error) {
+	cacheDir, err := userCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user cache dir for Agentbus autostart locks: %w", err)
+	}
+	if cacheDir == "" {
+		return "", errors.New("user cache directory is empty")
+	}
+	return canonicalizeAgentbusStateRoot("user cache directory", filepath.Join(cacheDir, "agentbus"))
+}
+
+func resolveAgentbusAutostartLockRoot() (string, error) {
+	return resolveAgentbusAutostartLockRootFrom(os.UserCacheDir)
+}
+
+func resolveAgentbusAutostartLockRootFrom(userCacheDir func() (string, error)) (string, error) {
+	cacheRoot, err := resolveAgentbusUserCacheRootFrom(userCacheDir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(cacheRoot, "start-locks"), nil
+}
+
+func resolveAgentbusStateRootFrom(env func(string) string, userHomeDir func() (string, error)) (string, error) {
+	if root := env("AGENTBUS_STATE_ROOT"); root != "" {
+		return canonicalizeAgentbusStateRoot("AGENTBUS_STATE_ROOT", root)
+	}
+	if stateHome := env("XDG_STATE_HOME"); stateHome != "" {
+		if !filepath.IsAbs(stateHome) {
+			return "", agentbusStateRootUsageError{Name: "XDG_STATE_HOME", Value: stateHome}
+		}
+		return canonicalizeAgentbusStateRoot("agentbus state root", filepath.Join(stateHome, "agentbus"))
+	}
+	home, err := userHomeDir()
+	if err != nil {
+		return "", err
+	}
+	if home == "" {
+		return "", errors.New("home directory is empty")
+	}
+	return canonicalizeAgentbusStateRoot("agentbus state root", filepath.Join(home, ".local", "state", "agentbus"))
+}
+
+func canonicalizeAgentbusStateRoot(label, root string) (string, error) {
+	if root == "" {
+		return "", fmt.Errorf("%s is empty", label)
+	}
+	if !filepath.IsAbs(root) {
+		return "", agentbusStateRootUsageError{Name: label, Value: root}
+	}
+	clean := filepath.Clean(root)
+	if evaluated, err := filepath.EvalSymlinks(clean); err == nil {
+		return filepath.Clean(evaluated), nil
+	}
+	return evalSymlinksAsFeasible(clean), nil
+}
+
+func evalSymlinksAsFeasible(path string) string {
+	missing := []string{}
+	for current := path; ; current = filepath.Dir(current) {
+		if _, err := os.Lstat(current); err == nil {
+			if evaluated, evalErr := filepath.EvalSymlinks(current); evalErr == nil {
+				parts := append([]string{evaluated}, missing...)
+				return filepath.Clean(filepath.Join(parts...))
+			}
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		missing = append([]string{filepath.Base(current)}, missing...)
+	}
+	return path
 }
 
 func requireCapabilities(hello client.HelloResult, version string, required []string) error {
@@ -122,7 +217,7 @@ func requireCapabilities(hello client.HelloResult, version string, required []st
 }
 
 func requiredCapabilitiesForPolicy(policy *engine.TurnPolicy) []string {
-	var required []string
+	required := []string{"admission.strictContainment"}
 	if policy != nil && policy.Contract != nil {
 		if policy.Contract.Shape != nil {
 			required = append(required, "policy.shape")
@@ -141,7 +236,17 @@ func requiredCapabilitiesForPolicy(policy *engine.TurnPolicy) []string {
 }
 
 func setupRequiredCapabilities() []string {
-	return []string{"policy.shape", "policy.retry"}
+	return []string{"admission.strictContainment", "policy.shape", "policy.retry"}
+}
+
+func missingCapabilities(hello client.HelloResult, required []string) []string {
+	var missing []string
+	for _, capName := range required {
+		if !hello.Capabilities[capName] {
+			missing = append(missing, capName)
+		}
+	}
+	return missing
 }
 
 func capabilityMissingError(hello client.HelloResult, version, capName string) error {

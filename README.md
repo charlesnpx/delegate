@@ -1,8 +1,8 @@
 # delegate
 
-`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.4.2 ships `task`, rescue, sanitized review, adversarial-review, job-control workflows, and parent-session audit linkage.
+`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.6.0 ships `task`, rescue, sanitized review, adversarial-review, job-control workflows, and parent-session audit linkage.
 
-agentbus owns execution, supervision, and generic policy enforcement. delegate owns the delegation-specific data and decisions it passes to agentbus: the embedded `delegate-report` contract, the delegate-contract digest, policy tiers, handoff lifecycle, skill matrix, and result envelopes.
+agentbus owns execution, supervision, and generic policy enforcement. delegate owns the delegation-specific data and decisions it passes to agentbus: the bundled `delegate-report` contract, the delegate-contract digest, policy tiers, handoff lifecycle, skill matrix, and result envelopes.
 
 ## Install
 
@@ -26,7 +26,7 @@ The delegated installers build from source, so Go must be on `PATH`. `delegate` 
 
 `agentbus` must be installed before using delegate skills; installing it first also ensures that `delegate setup --json` can discover its binary and validate required capabilities.
 
-On a live Codex install, delegate minimally updates `${CODEX_HOME:-~/.codex}/config.toml` so the default `workspace-write` sandbox can write both agentbus and delegate state directories. It adds only missing values under `[sandbox_workspace_write].writable_roots`, preserving unrelated TOML text and comments. The roots are `${XDG_STATE_HOME:-~/.local/state}/agentbus` and `${XDG_STATE_HOME:-~/.local/state}/delegate`. `--plan` reports the intended change without writing it; staged `--install-root` invocations do not touch the live Codex config. Uninstall intentionally leaves these security settings in place rather than trying to remove possibly user-managed entries.
+On a live Codex install, delegate minimally updates `${CODEX_HOME:-~/.codex}/config.toml` so the default `workspace-write` sandbox can write the resolved Agentbus state root, the narrow Agentbus cache subtree used for autostart locks, and the Delegate state root. It adds only missing values under `[sandbox_workspace_write].writable_roots`, preserving unrelated TOML text and comments. The Agentbus state root is `AGENTBUS_STATE_ROOT` when set, otherwise `${XDG_STATE_HOME:-~/.local/state}/agentbus`; the cache root is `<UserCacheDir>/agentbus`, not the whole user cache; the Delegate state root is `${XDG_STATE_HOME:-~/.local/state}/delegate`. `--plan` reports the intended change without writing it; staged `--install-root` invocations do not touch the live Codex config. Uninstall intentionally leaves these security settings in place rather than trying to remove possibly user-managed entries.
 
 ## CLI
 
@@ -38,14 +38,15 @@ delegate install-skills [--plan|--install|--uninstall] [--target claude|codex|al
 delegate handoff create --json
 
 delegate task --backend claude|codex [--background|--wait] [--json] [--cwd <abs>]
-              [(--resume|--resume-session <id>) --wait|--fresh] [--model <model>] [--effort <effort>]
+              [--model <model>] [--effort <effort>]
               [--timeout <duration>] [--write] [--strict-contract|--no-contract]
-              [--origin <skill>] [--parent-client <client>] [--parent-session <id>] [--embedded] [prompt source]
+              [--origin <skill>] [--parent-client <client>] [--parent-session <id>] [prompt source]
+delegate task --recover-request <request-id> [--background|--wait] [--json]
 
 delegate review|adversarial-review --backend claude|codex [--background|--wait] [--json] [--cwd <abs>]
               [--base <ref>] [--scope auto|working-tree|branch] [--allow-live-repo-read]
               [--model <model>] [--effort <effort>] [--timeout <duration>]
-              [--strict-contract] [--origin <skill>] [--parent-client <client>] [--parent-session <id>] [--embedded]
+              [--strict-contract] [--origin <skill>] [--parent-client <client>] [--parent-session <id>]
 
 delegate status [--job <id>] [--wait|--probe] [--json]
 delegate result --job <id> [--wait] [--json]
@@ -54,9 +55,7 @@ delegate cancel --job <id> [--json]
 
 Prompt sources are mutually exclusive: `--prompt`, `--prompt-file`, `--prompt-stdin`, `--handoff-prompt-file`, or positional text. `--prompt` and positional text are visible in process arguments and shell history; use stdin, a prompt file, or a handoff file for sensitive input.
 
-Use `--resume-session <id>` to resume an explicit agentbus session. `--resume` selects the most recent session recorded in delegate job metadata for the selected backend and cwd. Before resuming, delegate verifies that the session's actual backend and cwd match the requested `--backend` and effective `--cwd`; use `--fresh` instead when they differ. In v0.1.x, both resume forms require `--wait` because background resume is not yet supported. Omitting the resume flags, or passing `--fresh` explicitly, starts a new session.
-
-Daemon mode is the default. It connects through `agentbus/client`, checks the protocol capabilities required by the selected policy, and returns a launch envelope unless `--wait` is set. `--embedded --wait` uses the vendored `agentbus/engine` for tests and foreground-only local execution; it intentionally cannot supervise a background job after the CLI exits.
+Delegate connects through `agentbus/client`, requires `admission.strictContainment` plus the policy capabilities used by the selected contract, persists a durable request identity before submission, and returns a launch envelope unless `--wait` is set.
 
 ## Rescue workflow
 
@@ -73,7 +72,7 @@ delegate task --backend codex --origin delegate:rescue:codex --cwd "$PWD" \
   --handoff-prompt-file "$HANDOFF_PATH" --background --json
 ```
 
-`delegate handoff create --json` creates a private `0600` handoff file in delegate state. `task` copies it to the job input, fsyncs it, and removes the handoff before launch. The job input is removed when a backend session is recorded or when a terminal job state is observed.
+`delegate handoff create --json` creates a private `0600` handoff file in delegate state. `task` persists the exact Agentbus submission parameters, copies the prompt to the job input after acknowledgement, fsyncs it, and removes the handoff. The job input is removed only when Agentbus reports `cleanupDisposition` of `verified_absent` or `no_execution_possible`; it is retained when cleanup is `unresolved` or absent.
 
 ## Review workflow and security model
 
@@ -85,7 +84,7 @@ Before collecting content, delegate applies a case-insensitive secret-path heuri
 
 After every diff has been assembled, a final gitleaks-style content gate scans the shared payload used for both inline prompts and spilled artifacts. It detects AWS access keys, high-entropy API-key/token/secret assignments, private-key headers, JWTs, GitHub and Slack tokens, password-bearing connection strings, and high-entropy base64 or hex assignment values longer than 32 characters. A matching hunk is replaced with `[redacted: secret-like content]` while its path and status remain visible. These path, history, and content heuristics implement the accident-prevention model; they do not expand it into an adversarial security boundary.
 
-Sanitized context for at most 10 files and 256 KiB is embedded in the prompt. Larger changesets are written to a private `0600` `review.patch` in a per-review `0700` delegate-state workspace. By default that workspace—not the live repository—is the backend cwd. This only limits the context delegate assembles: a same-user backend can still read repository or other filesystem files itself when its process permissions allow it. The workspace and artifact remain available for a background job and are removed when delegate observes a terminal result, status, or cancellation.
+Sanitized context for at most 10 files and 256 KiB is included in the prompt. Larger changesets are written to a private `0600` `review.patch` in a per-review `0700` delegate-state workspace. By default that workspace—not the live repository—is the backend cwd. This only limits the context delegate assembles: a same-user backend can still read repository or other filesystem files itself when its process permissions allow it. The workspace and artifact remain available for a background job and are removed only when Agentbus cleanup disposition proves local cleanup is safe.
 
 `--allow-live-repo-read` is an explicit escape hatch. It makes the live repository the backend cwd and permits self-collection, making backend reads of `.env` and other sensitive files easier. Delegate still applies its path/history redaction and final content scan to the context it assembles; the flag does not add or remove OS filesystem permissions. Delegate emits a warning whenever this flag is used. Managed review skills do not add it unless the user explicitly requests it.
 
@@ -100,7 +99,7 @@ The source directories escape `:` as `__colon__`; the installer decodes the name
 
 Launch skills preflight shared filesystem and state access, no-fork execution, agentbus capabilities, and target-backend reachability. Rescue skills launch through `delegate task`; review skills launch through the sanitized `delegate review` commands. All return the launch envelope verbatim and never add `--no-contract`. Job-control skills use the same status, result, cancellation, evidence-preservation, and no-substitute-answer discipline. Review prose requires findings ordered by severity, preservation of evidence labels, and no automatic fixes after review.
 
-v0.4.2 retains the breaking namespace rename. On install or upgrade, the managed installer removes the legacy `codex:{rescue,review,adversarial-review,status,result,cancel}` names from Claude Code and the corresponding `claude:{...}` names from Codex; `--plan --json`, `--install --json`, and `--uninstall --json` report them in each target's additive `removed` array (entries of `{"path": ...}`); the `files` array contains only installed skill files.
+v0.6.0 retains the breaking namespace rename. On install or upgrade, the managed installer removes the legacy `codex:{rescue,review,adversarial-review,status,result,cancel}` names from Claude Code and the corresponding `claude:{...}` names from Codex; `--plan --json`, `--install --json`, and `--uninstall --json` report them in each target's additive `removed` array (entries of `{"path": ...}`); the `files` array contains only installed skill files.
 
 ## Contract tiers
 
@@ -109,67 +108,90 @@ v0.4.2 retains the breaking namespace rename. On install or upgrade, the managed
 | Invocation | Contract result | Retry behavior |
 | --- | --- | --- |
 | Default read-only task | Inject digest, validate, stamp | No corrective retry; a malformed result is `completed_noncompliant`. |
-| `--write` or `--strict-contract` | Inject digest, validate, stamp | At most one corrective resume. The resume is always read-only and instructs the backend to emit only the corrected report and make no further changes. |
+| `--write` or `--strict-contract` | Inject digest, validate, stamp | At most one corrective retry. The retry is always read-only and instructs the backend to emit only the corrected report and make no further changes. |
 | `--no-contract` | Enforcement disabled | No retry; terminal envelope has `contract.status: "disabled"` and `reason: "no_contract_flag"`. This is for direct CLI use only, never managed skills. |
 
-## Envelope reference
+## State Roots And Recovery
 
-Every envelope has `schema: 1` and `sha256`, where `sha256` is the SHA-256 of canonical JSON for that envelope with its own hash field excluded. `result_sha256` is agentbus's SHA-256 over the raw final assistant message bytes. When captured, the additive `origin` block carries `skill`, `parent_client`, `parent_session_id`, `parent_agent`, and `depth`; it is absent for jobs with no recorded linkage. Claude Code capture reads `CLAUDECODE=1`, `CLAUDE_CODE_SESSION_ID`, and `AI_AGENT`. Codex has no confirmed offline parent-session environment signal, so use `--parent-client` and `--parent-session` there when needed. `DELEGATE_DEPTH` is incremented for the recorded audit tag; propagation into the spawned backend is not yet supported.
+Delegate resolves Agentbus state with the same rule for setup, launch, recovery, status, result, cancel, and Codex sandbox configuration: `AGENTBUS_STATE_ROOT` when set, otherwise `${XDG_STATE_HOME:-~/.local/state}/agentbus`. The resolved root is persisted in submission intents and acknowledged job metadata. `delegate task --recover-request <request-id>` reconnects to the request's recorded root and resubmits the exact persisted `job.submit` parameters; it does not reconstruct prompts, timeouts, policy, model, effort, or tags from current flags.
+
+`status`, `result`, and `cancel` use the job metadata's recorded Agentbus root when available and otherwise use the current resolved root. Running `delegate status` without `--job` lists all jobs from only the current resolved root. Delegate never scans arbitrary roots and never performs Agentbus admission recovery, reset, seal, or fail-stop clearing automatically.
+
+## Envelope Reference
+
+Every envelope has `schema: 2` and `sha256`, where `sha256` is the SHA-256 of canonical JSON for that envelope with its own hash field excluded. `request_id` is Delegate's durable logical request identity; `submission_deduplicated` is true when Agentbus accepted the same request earlier and returned the existing job. `result_sha256` is Agentbus's SHA-256 over the raw final assistant message bytes when a result exists. When captured, the additive `origin` block carries `skill`, `parent_client`, `parent_session_id`, `parent_agent`, and `depth`.
 
 Launch envelopes are returned by a non-waiting task:
 
 ```json
 {
-  "schema": 1,
-  "job_id": "job_…",
+  "schema": 2,
+  "job_id": "opaque-agentbus-id",
+  "request_id": "delegate-0123456789abcdef0123456789abcdef",
   "status": "queued",
+  "deduplicated": false,
+  "submission_deduplicated": false,
   "result_sha256": null,
-  "sha256": "…"
+  "sha256": "..."
 }
 ```
 
-Terminal envelopes are returned by `delegate result --job <id>` and `delegate task --wait`:
+Terminal envelopes are returned by `delegate result --job <id>`, terminal `status`, `cancel`, and `delegate task --wait`:
 
 ```json
 {
-  "schema": 1,
-  "job_id": "job_…",
+  "schema": 2,
+  "job_id": "opaque-agentbus-id",
+  "request_id": "delegate-0123456789abcdef0123456789abcdef",
   "status": "completed",
   "kind": "task",
   "contractKind": "shape",
+  "cleanup_disposition": "verified_absent",
+  "late_finalization": false,
+  "agentbus_warnings": [],
+  "local_artifacts_retained": false,
+  "submission_deduplicated": false,
   "contract": {
     "status": "compliant",
     "missing": [],
     "reason": "",
     "attempts": 1,
     "retryUsed": false,
-    "contractSha256": "sha256:…",
+    "contractSha256": "sha256:...",
     "validatedAt": "2026-01-01T00:00:00Z"
   },
-  "result_sha256": "…",
-  "sha256": "…"
+  "result_sha256": "...",
+  "sha256": "..."
 }
 ```
 
-Possible contract statuses are `compliant`, `retried`, `noncompliant`, `skipped`, and `disabled`. A terminal `result_sha256` is mandatory. `kind` is `task`, `review`, or `adversarial_review`.
+Possible contract statuses are `compliant`, `retried`, `noncompliant`, `skipped`, and `disabled`. `kind` is `task`, `review`, or `adversarial_review`. `orphaned` is a first-class terminal state with exit code 14; it does not fabricate a result, and `result_unavailable_reason` explains the missing result.
 
-## Setup and stall monitoring
+## Cleanup Disposition
+
+Agentbus reports terminal outcome and cleanup proof separately. Delegate removes job inputs and review workspaces only when `cleanup_disposition` is `verified_absent` or `no_execution_possible`. When the disposition is `unresolved` or missing on a terminal job, Delegate retains local artifacts and warns that backend absence is unproven. A successful job remains successful when cleanup is unresolved.
+
+## Setup And Monitoring
 
 `delegate setup --json` reports:
 
-- agentbus discovery (`found`, path, version, protocol, and advertised backends);
-- the full capability map, required delegate capabilities, and `capabilitiesOK` result;
-- `stateRootWritable`, `agentbusStateRootWritable`, and `daemonReachable` preflight booleans;
-- a status for every managed skill (`installed`, `missing`, `outdated`, or `unreadable`); and
-- `stop_review_gate: "not available (planned v0.2)"`.
+- Agentbus discovery (`found`, path, version, protocol, advertised backends, backend metadata);
+- the full capability map, required delegate capabilities, missing capabilities, `capabilitiesOK`, and explicit `admissionStrictContainment`;
+- resolved `agentbusStateRoot` plus `agentbusStateRootWritable`;
+- resolved `agentbusAutostartLockRoot` (`<UserCacheDir>/agentbus/start-locks`) plus `agentbusAutostartLockRootWritable`;
+- `pendingSubmissionIntentCount` for prepared, in-flight, and blocked local submission intents;
+- `unresolvedCleanupArtifactCount` for retained terminal local artifacts whose cleanup is not proven safe;
+- `stateRootWritable`, `daemonReachable`, `ready`, managed skill statuses, and `stop_review_gate`.
 
-The non-JSON setup output always includes this exact line:
+Missing `admission.strictContainment` makes setup not ready and returns nonzero. The non-JSON setup output always includes this exact line:
 
 ```text
 stop-review-gate: not available (planned v0.2)
 ```
 
-Launch with `--background`, then poll `delegate status --job <id>` every 2–5 minutes while a job is outstanding. Long `--wait` calls can block a host agent loop for 100+ seconds; reserve them for short, explicitly bounded terminal checks. An expired heartbeat lease is an immediate stall signal. Otherwise run `delegate status --job <id> --probe`: it samples child-process CPU/elapsed state twice, checks established TCP sockets twice, and compares captured-log size over 60 seconds. Only cancel after all three probes are flat. Report the job ID and last phase, then cancel and relaunch (fresh or `--resume-session`) or continue waiting; never silently drop the job or replace it with an orchestrator-authored answer. Escalate after 30 minutes without progress.
+Launch with `--background`, then poll `delegate status --job <id>` every 2-5 minutes while a job is outstanding. Long `--wait` calls can block a host agent loop for 100+ seconds; reserve them for short, explicitly bounded terminal checks.
+
+`delegate status --job <id> --probe --json` is observational. It samples child-process CPU/elapsed state, established TCP sockets, and captured-log size, then returns one of `activity_observed`, `no_activity_observed`, `inconclusive`, or `terminal`. Probe output also includes `authority_state`, `cleanup_disposition`, and `authority_warnings`. A flat CPU sample, no TCP socket, unchanged log size, or expired lease does not override Agentbus state, prove backend absence, delete artifacts, or authorize cancellation.
 
 ## Development and release
 
@@ -177,7 +199,7 @@ Launch with `--background`, then poll `delegate status --job <id>` every 2–5 m
 GOCACHE=/private/tmp/delegate-gocache go test -race ./...
 GOCACHE=/private/tmp/delegate-gocache go vet ./...
 bash -n install-skill.sh scripts/*.sh
-scripts/release-check.sh v0.4.2
+scripts/release-check.sh v0.6.0
 ```
 
 The release check requires a clean worktree, including no modified tracked files and no untracked files outside ignored paths. Manually inspect the same gate with `git status --short --untracked-files=all`. It also requires the requested tag to point exactly at `HEAD`, requires `VERSION` to match `v<version>`, JSON-decodes installer and CLI output, verifies every staged binary/skill hash, and confirms the staged binary reports the release version. `--allow-dirty` is an unsafe escape hatch and always prints a loud warning when used.

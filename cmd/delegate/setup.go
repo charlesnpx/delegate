@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -22,16 +23,23 @@ import (
 const stopReviewGateLine = "stop-review-gate: not available (planned v0.2)"
 
 type setupJSON struct {
-	Schema                    int           `json:"schema"`
-	Delegate                  string        `json:"delegate"`
-	Agentbus                  setupAgentbus `json:"agentbus"`
-	Config                    setupConfig   `json:"config"`
-	Skills                    []setupSkill  `json:"skills"`
-	StateRootWritable         bool          `json:"stateRootWritable"`
-	AgentbusStateRootWritable bool          `json:"agentbusStateRootWritable"`
-	DaemonReachable           bool          `json:"daemonReachable"`
-	StopReviewGate            string        `json:"stop_review_gate"`
-	Warnings                  []string      `json:"warnings,omitempty"`
+	Schema                            int           `json:"schema"`
+	Delegate                          string        `json:"delegate"`
+	Agentbus                          setupAgentbus `json:"agentbus"`
+	Config                            setupConfig   `json:"config"`
+	Skills                            []setupSkill  `json:"skills"`
+	StateRootWritable                 bool          `json:"stateRootWritable"`
+	AgentbusStateRoot                 string        `json:"agentbusStateRoot"`
+	AgentbusStateRootWritable         bool          `json:"agentbusStateRootWritable"`
+	AgentbusAutostartLockRoot         string        `json:"agentbusAutostartLockRoot"`
+	AgentbusAutostartLockRootWritable bool          `json:"agentbusAutostartLockRootWritable"`
+	AdmissionStrictContainment        bool          `json:"admissionStrictContainment"`
+	PendingSubmissionIntentCount      int           `json:"pendingSubmissionIntentCount"`
+	UnresolvedCleanupArtifactCount    int           `json:"unresolvedCleanupArtifactCount"`
+	DaemonReachable                   bool          `json:"daemonReachable"`
+	Ready                             bool          `json:"ready"`
+	StopReviewGate                    string        `json:"stop_review_gate"`
+	Warnings                          []string      `json:"warnings,omitempty"`
 }
 
 type setupConfig struct {
@@ -49,6 +57,7 @@ type setupAgentbus struct {
 	BackendMetadata []client.BackendInfo `json:"backendMetadata,omitempty"`
 	Capabilities    map[string]bool      `json:"capabilities"`
 	Required        []string             `json:"requiredCapabilities"`
+	Missing         []string             `json:"missingCapabilities,omitempty"`
 	CapabilitiesOK  bool                 `json:"capabilitiesOK"`
 }
 
@@ -80,12 +89,24 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	version := agentbusVersion(path)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	c, hello, err := connectCheckedAgentbus(ctx, client.Options{CommandPath: path}, setupRequiredCapabilities(), version)
+	agentbusRoot, err := resolveAgentbusStateRoot()
 	if err != nil {
 		return 0, err
 	}
+	c, err := connectAgentbus(ctx, client.Options{CommandPath: path, StateRoot: agentbusRoot})
+	if err != nil {
+		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
+	}
 	defer c.Close()
-	preflight := setupStatePreflight()
+	hello := c.HelloResult()
+	requiredCapabilities := setupRequiredCapabilities()
+	missingCapabilities := missingCapabilities(hello, requiredCapabilities)
+	capabilitiesOK := len(missingCapabilities) == 0
+	preflight := setupStatePreflightWithAgentbusRoot(agentbusRoot, nil)
+	pendingSubmissionIntents, countWarnings := setupPendingSubmissionIntentCount(preflight.DelegateStateRoot)
+	preflight.Warnings = append(preflight.Warnings, countWarnings...)
+	unresolvedCleanupArtifacts, countWarnings := setupUnresolvedCleanupArtifactCount(preflight.DelegateStateRoot)
+	preflight.Warnings = append(preflight.Warnings, countWarnings...)
 	cfg, err := delegateconfig.Load()
 	if err != nil {
 		return 0, err
@@ -98,9 +119,11 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	ready := capabilitiesOK && preflight.StateRootWritable && preflight.AgentbusStateRootWritable && preflight.AgentbusAutostartLockRootWritable
+	readinessErr := setupReadinessError(hello, version, missingCapabilities, preflight)
 	if *jsonOut {
-		return 0, writeJSONLine(stdout, setupJSON{
-			Schema:   envelopeSchema,
+		err := writeJSONLine(stdout, setupJSON{
+			Schema:   commandJSONSchema,
 			Delegate: versionLine(),
 			Agentbus: setupAgentbus{
 				Found:           true,
@@ -110,21 +133,36 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 				Backends:        hello.Backends,
 				BackendMetadata: hello.BackendMetadata,
 				Capabilities:    hello.Capabilities,
-				Required:        setupRequiredCapabilities(),
-				CapabilitiesOK:  true,
+				Required:        requiredCapabilities,
+				Missing:         missingCapabilities,
+				CapabilitiesOK:  capabilitiesOK,
 			},
 			Config: setupConfig{
 				Path:        configPath,
 				Overridable: cfg.Overridable,
 				Defaults:    cfg.Backend,
 			},
-			Skills:                    skills,
-			StateRootWritable:         preflight.StateRootWritable,
-			AgentbusStateRootWritable: preflight.AgentbusStateRootWritable,
-			DaemonReachable:           true,
-			StopReviewGate:            "not available (planned v0.2)",
-			Warnings:                  preflight.Warnings,
+			Skills:                            skills,
+			StateRootWritable:                 preflight.StateRootWritable,
+			AgentbusStateRoot:                 preflight.AgentbusStateRoot,
+			AgentbusStateRootWritable:         preflight.AgentbusStateRootWritable,
+			AgentbusAutostartLockRoot:         preflight.AgentbusAutostartLockRoot,
+			AgentbusAutostartLockRootWritable: preflight.AgentbusAutostartLockRootWritable,
+			AdmissionStrictContainment:        hello.Capabilities["admission.strictContainment"],
+			PendingSubmissionIntentCount:      pendingSubmissionIntents,
+			UnresolvedCleanupArtifactCount:    unresolvedCleanupArtifacts,
+			DaemonReachable:                   true,
+			Ready:                             ready,
+			StopReviewGate:                    "not available (planned v0.2)",
+			Warnings:                          preflight.Warnings,
 		})
+		if err != nil {
+			return 0, err
+		}
+		if readinessErr != nil {
+			return 1, readinessErr
+		}
+		return 0, nil
 	}
 	if _, err := fmt.Fprintf(stdout, "%s\nagentbus: %s\n", versionLine(), path); err != nil {
 		return 0, err
@@ -134,10 +172,14 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 			return 0, err
 		}
 	}
-	if _, err := fmt.Fprintf(stdout, "agentbus discovery: found\nagentbus protocol: %d\ncapabilities: ok\n", hello.ProtocolVersion); err != nil {
+	capabilityStatus := "ok"
+	if !capabilitiesOK {
+		capabilityStatus = "missing " + strings.Join(missingCapabilities, ",")
+	}
+	if _, err := fmt.Fprintf(stdout, "agentbus discovery: found\nagentbus protocol: %d\ncapabilities: %s\nadmission.strictContainment: %t\n", hello.ProtocolVersion, capabilityStatus, hello.Capabilities["admission.strictContainment"]); err != nil {
 		return 0, err
 	}
-	if _, err := fmt.Fprintf(stdout, "stateRootWritable: %t\nagentbusStateRootWritable: %t\ndaemonReachable: true\n", preflight.StateRootWritable, preflight.AgentbusStateRootWritable); err != nil {
+	if _, err := fmt.Fprintf(stdout, "agentbusStateRoot: %s\nagentbusStateRootWritable: %t\nagentbusAutostartLockRoot: %s\nagentbusAutostartLockRootWritable: %t\nstateRootWritable: %t\npendingSubmissionIntentCount: %d\nunresolvedCleanupArtifactCount: %d\ndaemonReachable: true\nready: %t\n", preflight.AgentbusStateRoot, preflight.AgentbusStateRootWritable, preflight.AgentbusAutostartLockRoot, preflight.AgentbusAutostartLockRootWritable, preflight.StateRootWritable, pendingSubmissionIntents, unresolvedCleanupArtifacts, ready); err != nil {
 		return 0, err
 	}
 	for _, warning := range preflight.Warnings {
@@ -167,36 +209,163 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	if _, err := fmt.Fprintf(stdout, "%s\n", stopReviewGateLine); err != nil {
 		return 0, err
 	}
+	if readinessErr != nil {
+		return 1, readinessErr
+	}
 	return 0, nil
 }
 
+func setupReadinessError(hello client.HelloResult, version string, missingCapabilities []string, preflight setupStatePreflightResult) error {
+	var errs []error
+	if len(missingCapabilities) > 0 {
+		errs = append(errs, capabilityMissingError(hello, version, missingCapabilities[0]))
+	}
+	if !preflight.AgentbusStateRootWritable {
+		errs = append(errs, setupWritableReadinessError("agentbus state root", preflight.AgentbusStateRoot))
+	}
+	if !preflight.AgentbusAutostartLockRootWritable {
+		errs = append(errs, setupWritableReadinessError("agentbus autostart lock root", preflight.AgentbusAutostartLockRoot))
+	}
+	if !preflight.StateRootWritable {
+		errs = append(errs, setupWritableReadinessError("delegate state root", preflight.DelegateStateRoot))
+	}
+	return errors.Join(errs...)
+}
+
+func setupWritableReadinessError(name, path string) error {
+	if path == "" {
+		return fmt.Errorf("%s writable check failed", name)
+	}
+	return fmt.Errorf("%s is not writable: %s", name, path)
+}
+
 type setupStatePreflightResult struct {
-	StateRootWritable         bool
-	AgentbusStateRootWritable bool
-	Warnings                  []string
+	StateRootWritable                 bool
+	DelegateStateRoot                 string
+	AgentbusStateRoot                 string
+	AgentbusStateRootWritable         bool
+	AgentbusAutostartLockRoot         string
+	AgentbusAutostartLockRootWritable bool
+	Warnings                          []string
 }
 
 func setupStatePreflight() setupStatePreflightResult {
+	agentbusRoot, agentbusErr := resolveAgentbusStateRoot()
+	return setupStatePreflightWithAgentbusRoot(agentbusRoot, agentbusErr)
+}
+
+func setupStatePreflightWithAgentbusRoot(agentbusRoot string, agentbusErr error) setupStatePreflightResult {
 	result := setupStatePreflightResult{}
 	delegateRoot, err := handoff.ResolveStateDir(handoff.StateConfig{})
 	if err == nil {
+		result.DelegateStateRoot = delegateRoot
 		if err := handoff.EnsureStateDir(delegateRoot); err == nil {
 			result.StateRootWritable = directoryWritable(delegateRoot)
 		}
 	}
-	agentbusRoot, err := engine.ResolveStateRoot()
-	if err == nil {
-		if !filepath.IsAbs(agentbusRoot) {
-			if xdgStateHome := os.Getenv("XDG_STATE_HOME"); xdgStateHome != "" {
-				result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus state root was not probed because XDG_STATE_HOME %q must be absolute", xdgStateHome))
-			} else {
-				result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus state root %q must be absolute", agentbusRoot))
-			}
-			return result
-		}
-		result.AgentbusStateRootWritable = directoryWritable(agentbusRoot)
+	if agentbusErr != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus state root was not probed because %v", agentbusErr))
+		return result
 	}
+	result.AgentbusStateRoot = agentbusRoot
+	result.AgentbusStateRootWritable = directoryWritable(agentbusRoot)
+	lockRoot, err := resolveAgentbusAutostartLockRoot()
+	if err != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus autostart lock root was not probed because %v", err))
+		return result
+	}
+	result.AgentbusAutostartLockRoot = lockRoot
+	result.AgentbusAutostartLockRootWritable = directoryWritable(lockRoot)
 	return result
+}
+
+func setupPendingSubmissionIntentCount(stateDir string) (int, []string) {
+	if stateDir == "" {
+		return 0, []string{"pending submission intents were not counted because delegate state root was not resolved"}
+	}
+	intents, err := listSubmissionIntents(stateDir)
+	if err != nil {
+		return 0, []string{fmt.Sprintf("pending submission intents were not counted because %v", err)}
+	}
+	var count int
+	for _, intent := range intents {
+		if submissionIntentPending(intent) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func submissionIntentPending(intent submissionIntent) bool {
+	switch intent.Phase {
+	case submissionPhasePrepared, submissionPhaseInFlight, submissionPhaseBlocked:
+		return true
+	default:
+		return false
+	}
+}
+
+func setupUnresolvedCleanupArtifactCount(stateDir string) (int, []string) {
+	if stateDir == "" {
+		return 0, []string{"unresolved cleanup artifacts were not counted because delegate state root was not resolved"}
+	}
+	metas, err := listJobMetadata(stateDir)
+	if err != nil {
+		return 0, []string{fmt.Sprintf("unresolved cleanup artifacts were not counted because %v", err)}
+	}
+	var count int
+	for _, meta := range metas {
+		if !engine.IsTerminal(meta.State) || localCleanupSafe(meta.CleanupDisposition) {
+			continue
+		}
+		if retainedArtifactExists(meta.JobInputPath) {
+			count++
+		}
+		if retainedArtifactExists(meta.ReviewWorkspace) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func retainedArtifactExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil || !errors.Is(err, os.ErrNotExist)
+}
+
+func listJobMetadata(stateDir string) ([]jobMetadata, error) {
+	dir, err := jobMetadataDir(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var metas []jobMetadata
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		jobID, ok := decodeStateFilename(entry.Name())
+		if !ok {
+			continue
+		}
+		meta, found, err := loadJobMetadata(stateDir, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			metas = append(metas, meta)
+		}
+	}
+	return metas, nil
 }
 
 // directoryWritable proves both create and write access without leaving a

@@ -13,6 +13,7 @@ coverage.txt
 coverage.html
 
 # Go build/vendor artifacts
+/vendor/
 
 # OS cruft
 .DS_Store

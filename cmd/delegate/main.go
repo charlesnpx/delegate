@@ -96,6 +96,9 @@ run 'delegate <command> -h' for command flags.
 func finishCommand(code int, err error, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, err)
+		if code != 0 {
+			return code
+		}
 		return 2
 	}
 	return code

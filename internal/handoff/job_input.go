@@ -31,8 +31,14 @@ type JobInput struct {
 	Path  string
 }
 
-// JobStateLookup returns the current state for a job id. found=false keeps the file.
-type JobStateLookup func(jobID string) (state engine.JobState, found bool, err error)
+// JobCleanupLookup returns the current cleanup proof for a job id. found=false keeps the file.
+type JobCleanupLookup func(jobID string) (state engine.JobState, cleanupDisposition string, found bool, err error)
+
+type SweptJobInput struct {
+	JobInput
+	State              engine.JobState
+	CleanupDisposition string
+}
 
 // PersistJobInput writes the resolved prompt to a private, durable job-input file.
 func PersistJobInput(opts JobInputOptions) (JobInput, error) {
@@ -115,11 +121,19 @@ func ReassociateJobInput(input JobInput, jobID string, hooks Hooks) (JobInput, e
 	}
 	target := filepath.Join(filepath.Dir(input.Path), jobInputPrefix+encodeJobID(jobID)+trimmed[dot:]+jobInputSuffix)
 	if _, err := os.Lstat(target); err == nil {
+		if _, sourceErr := os.Lstat(input.Path); errors.Is(sourceErr, os.ErrNotExist) {
+			return JobInput{JobID: jobID, Path: target}, nil
+		}
 		return input, fmt.Errorf("job-input target already exists: %q", target)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return input, err
 	}
 	if err := os.Rename(input.Path, target); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if _, targetErr := os.Lstat(target); targetErr == nil {
+				return JobInput{JobID: jobID, Path: target}, nil
+			}
+		}
 		return input, err
 	}
 	reassociated := JobInput{JobID: jobID, Path: target}
@@ -129,31 +143,38 @@ func ReassociateJobInput(input JobInput, jobID string, hooks Hooks) (JobInput, e
 	return reassociated, nil
 }
 
-// DeleteJobInputOnSessionRecorded removes the job-input file once the backend session id is durable.
-func DeleteJobInputOnSessionRecorded(input JobInput, hooks Hooks) (bool, error) {
-	return removeFile(input.Path, hooks)
-}
-
-// DeleteJobInputOnPreLaunchTerminal removes the job-input file for terminal pre-launch failures.
-func DeleteJobInputOnPreLaunchTerminal(input JobInput, state engine.JobState, hooks Hooks) (bool, error) {
-	if !engine.IsTerminal(state) {
+// DeleteJobInputOnSessionRecorded removes the job-input file only when cleanup is proven safe.
+func DeleteJobInputOnSessionRecorded(input JobInput, state engine.JobState, cleanupDisposition string, hooks Hooks) (bool, error) {
+	if !engine.IsTerminal(state) || !localCleanupSafe(cleanupDisposition) {
 		return false, nil
 	}
 	return removeFile(input.Path, hooks)
 }
 
-// DeleteJobInputOnTerminalState removes the job-input file when state is terminal.
-func DeleteJobInputOnTerminalState(input JobInput, state engine.JobState, hooks Hooks) (bool, error) {
-	if !engine.IsTerminal(state) {
+// DeleteJobInputOnPreLaunchTerminal removes the job-input file for terminal pre-launch failures only when cleanup is proven safe.
+func DeleteJobInputOnPreLaunchTerminal(input JobInput, state engine.JobState, cleanupDisposition string, hooks Hooks) (bool, error) {
+	if !engine.IsTerminal(state) || !localCleanupSafe(cleanupDisposition) {
 		return false, nil
 	}
 	return removeFile(input.Path, hooks)
 }
 
-// SweepTerminalJobInputs removes job-input files whose injected job state is terminal.
-func SweepTerminalJobInputs(stateDir string, lookup JobStateLookup, hooks Hooks) ([]JobInput, error) {
+// DeleteJobInputOnTerminalState removes the job-input file when terminal cleanup is proven safe.
+func DeleteJobInputOnTerminalState(input JobInput, state engine.JobState, cleanupDisposition string, hooks Hooks) (bool, error) {
+	if !engine.IsTerminal(state) || !localCleanupSafe(cleanupDisposition) {
+		return false, nil
+	}
+	return removeFile(input.Path, hooks)
+}
+
+func localCleanupSafe(disposition string) bool {
+	return disposition == "no_execution_possible" || disposition == "verified_absent"
+}
+
+// SweepTerminalJobInputs removes job-input files whose injected cleanup proof is safe.
+func SweepTerminalJobInputs(stateDir string, lookup JobCleanupLookup, hooks Hooks) ([]SweptJobInput, error) {
 	if lookup == nil {
-		return nil, errors.New("job state lookup is required")
+		return nil, errors.New("job cleanup lookup is required")
 	}
 	var err error
 	stateDir, err = prepareStateDir(stateDir)
@@ -167,7 +188,7 @@ func SweepTerminalJobInputs(stateDir string, lookup JobStateLookup, hooks Hooks)
 	if err != nil {
 		return nil, err
 	}
-	var removed []JobInput
+	var removed []SweptJobInput
 	var joined error
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -177,12 +198,12 @@ func SweepTerminalJobInputs(stateDir string, lookup JobStateLookup, hooks Hooks)
 		if !ok {
 			continue
 		}
-		state, found, err := lookup(input.JobID)
+		state, cleanupDisposition, found, err := lookup(input.JobID)
 		if err != nil {
 			joined = errors.Join(joined, fmt.Errorf("%s: %w", input.JobID, err))
 			continue
 		}
-		if !found || !engine.IsTerminal(state) {
+		if !found || !engine.IsTerminal(state) || !localCleanupSafe(cleanupDisposition) {
 			continue
 		}
 		deleted, err := removeFile(input.Path, hooks)
@@ -191,7 +212,11 @@ func SweepTerminalJobInputs(stateDir string, lookup JobStateLookup, hooks Hooks)
 			continue
 		}
 		if deleted {
-			removed = append(removed, input)
+			removed = append(removed, SweptJobInput{
+				JobInput:           input,
+				State:              state,
+				CleanupDisposition: cleanupDisposition,
+			})
 		}
 	}
 	return removed, joined

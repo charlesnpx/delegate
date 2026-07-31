@@ -400,7 +400,7 @@ func TestPersistJobInputRejectsInvalidHandoffPromptPathBeforeUnlink(t *testing.T
 func TestDeleteJobInputHooks(t *testing.T) {
 	t.Run("session recorded", func(t *testing.T) {
 		input := persistTestJobInput(t, "session-job", engine.StateRunning)
-		deleted, err := DeleteJobInputOnSessionRecorded(input, Hooks{})
+		deleted, err := DeleteJobInputOnSessionRecorded(input, engine.StateCompleted, "verified_absent", Hooks{})
 		if err != nil {
 			t.Fatalf("DeleteJobInputOnSessionRecorded() error = %v", err)
 		}
@@ -411,7 +411,7 @@ func TestDeleteJobInputHooks(t *testing.T) {
 	})
 	t.Run("terminal pre-launch failure", func(t *testing.T) {
 		input := persistTestJobInput(t, "prelaunch-job", engine.StateFailed)
-		deleted, err := DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, Hooks{})
+		deleted, err := DeleteJobInputOnPreLaunchTerminal(input, engine.StateFailed, "no_execution_possible", Hooks{})
 		if err != nil {
 			t.Fatalf("DeleteJobInputOnPreLaunchTerminal() error = %v", err)
 		}
@@ -422,7 +422,7 @@ func TestDeleteJobInputHooks(t *testing.T) {
 	})
 	t.Run("non-terminal pre-launch keeps file", func(t *testing.T) {
 		input := persistTestJobInput(t, "prelaunch-running-job", engine.StateStarting)
-		deleted, err := DeleteJobInputOnPreLaunchTerminal(input, engine.StateStarting, Hooks{})
+		deleted, err := DeleteJobInputOnPreLaunchTerminal(input, engine.StateStarting, "verified_absent", Hooks{})
 		if err != nil {
 			t.Fatalf("DeleteJobInputOnPreLaunchTerminal() error = %v", err)
 		}
@@ -433,7 +433,7 @@ func TestDeleteJobInputHooks(t *testing.T) {
 	})
 	t.Run("non-terminal state keeps file", func(t *testing.T) {
 		input := persistTestJobInput(t, "running-job", engine.StateRunning)
-		deleted, err := DeleteJobInputOnTerminalState(input, engine.StateRunning, Hooks{})
+		deleted, err := DeleteJobInputOnTerminalState(input, engine.StateRunning, "verified_absent", Hooks{})
 		if err != nil {
 			t.Fatalf("DeleteJobInputOnTerminalState() error = %v", err)
 		}
@@ -454,7 +454,7 @@ func TestDeleteJobInputHooks(t *testing.T) {
 	} {
 		t.Run(string(state), func(t *testing.T) {
 			input := persistTestJobInput(t, "terminal-"+string(state), state)
-			deleted, err := DeleteJobInputOnTerminalState(input, state, Hooks{})
+			deleted, err := DeleteJobInputOnTerminalState(input, state, "verified_absent", Hooks{})
 			if err != nil {
 				t.Fatalf("DeleteJobInputOnTerminalState() error = %v", err)
 			}
@@ -466,18 +466,40 @@ func TestDeleteJobInputHooks(t *testing.T) {
 	}
 }
 
+func TestReassociateJobInputIsIdempotentAfterPriorRename(t *testing.T) {
+	stateDir := newTestStateDir(t)
+	original := persistTestJobInputInDir(t, stateDir, "request-job")
+	reassociated, err := ReassociateJobInput(original, "actual-job", Hooks{})
+	if err != nil {
+		t.Fatalf("first ReassociateJobInput() error = %v", err)
+	}
+	assertMissing(t, original.Path)
+	assertExists(t, reassociated.Path)
+
+	again, err := ReassociateJobInput(original, "actual-job", Hooks{})
+	if err != nil {
+		t.Fatalf("second ReassociateJobInput() error = %v", err)
+	}
+	if again != reassociated {
+		t.Fatalf("second ReassociateJobInput() = %#v, want %#v", again, reassociated)
+	}
+}
+
 func TestSweepTerminalJobInputs(t *testing.T) {
 	stateDir := newTestStateDir(t)
 	completed := persistTestJobInputInDir(t, stateDir, "job-completed")
 	running := persistTestJobInputInDir(t, stateDir, "job-running")
 	unknown := persistTestJobInputInDir(t, stateDir, "job-unknown")
-	states := map[string]engine.JobState{
-		"job-completed": engine.StateCompleted,
-		"job-running":   engine.StateRunning,
+	states := map[string]struct {
+		state              engine.JobState
+		cleanupDisposition string
+	}{
+		"job-completed": {state: engine.StateCompleted, cleanupDisposition: "verified_absent"},
+		"job-running":   {state: engine.StateRunning, cleanupDisposition: "verified_absent"},
 	}
-	removed, err := SweepTerminalJobInputs(stateDir, func(jobID string) (engine.JobState, bool, error) {
-		state, ok := states[jobID]
-		return state, ok, nil
+	removed, err := SweepTerminalJobInputs(stateDir, func(jobID string) (engine.JobState, string, bool, error) {
+		status, ok := states[jobID]
+		return status.state, status.cleanupDisposition, ok, nil
 	}, Hooks{})
 	if err != nil {
 		t.Fatalf("SweepTerminalJobInputs() error = %v", err)
@@ -491,8 +513,8 @@ func TestSweepTerminalJobInputs(t *testing.T) {
 }
 
 func TestSweepTerminalJobInputsRejectsUnsafeStateDirs(t *testing.T) {
-	terminalLookup := func(jobID string) (engine.JobState, bool, error) {
-		return engine.StateCompleted, true, nil
+	terminalLookup := func(jobID string) (engine.JobState, string, bool, error) {
+		return engine.StateCompleted, "verified_absent", true, nil
 	}
 
 	t.Run("relative path", func(t *testing.T) {
@@ -627,7 +649,7 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 	}
 }
 
-func assertSweepRejectedWithoutRemoval(t *testing.T, removed []JobInput, err error, path string) {
+func assertSweepRejectedWithoutRemoval(t *testing.T, removed []SweptJobInput, err error, path string) {
 	t.Helper()
 	if err == nil {
 		t.Fatal("SweepTerminalJobInputs() error = nil, want rejection")

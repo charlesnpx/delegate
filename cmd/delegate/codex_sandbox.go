@@ -84,6 +84,10 @@ func configureCodexSandbox() codexSandboxResult {
 }
 
 func resolveCodexSandboxPaths(env func(string) string, homeDir func() (string, error)) (codexSandboxPaths, error) {
+	return resolveCodexSandboxPathsFrom(env, homeDir, os.UserCacheDir)
+}
+
+func resolveCodexSandboxPathsFrom(env func(string) string, homeDir func() (string, error), userCacheDir func() (string, error)) (codexSandboxPaths, error) {
 	home, err := homeDir()
 	if err != nil {
 		return codexSandboxPaths{}, fmt.Errorf("resolve home for Codex sandbox: %w", err)
@@ -102,6 +106,14 @@ func resolveCodexSandboxPaths(env func(string) string, homeDir func() (string, e
 		return codexSandboxPaths{}, err
 	}
 
+	agentbusRoot, err := resolveAgentbusStateRootFrom(env, homeDir)
+	if err != nil {
+		return codexSandboxPaths{}, err
+	}
+	agentbusCacheRoot, err := resolveAgentbusUserCacheRootFrom(userCacheDir)
+	if err != nil {
+		return codexSandboxPaths{}, err
+	}
 	stateHome := env("XDG_STATE_HOME")
 	if stateHome == "" {
 		stateHome = filepath.Join(home, ".local", "state")
@@ -113,7 +125,8 @@ func resolveCodexSandboxPaths(env func(string) string, homeDir func() (string, e
 	return codexSandboxPaths{
 		ConfigPath: filepath.Join(codexHome, "config.toml"),
 		WritableRoots: []string{
-			filepath.Join(stateHome, "agentbus"),
+			agentbusRoot,
+			agentbusCacheRoot,
 			filepath.Join(stateHome, "delegate"),
 		},
 	}, nil

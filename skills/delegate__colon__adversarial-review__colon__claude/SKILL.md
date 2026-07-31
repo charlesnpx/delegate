@@ -1,7 +1,7 @@
 ---
 name: delegate:adversarial-review:claude
 description: Delegate a refute-first adversarial code review to claude through sanitized delegate review context and return the launch envelope verbatim.
-version: v0.4.2
+version: v0.6.0
 ---
 
 # delegate:adversarial-review:claude
@@ -23,7 +23,7 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
-When the parent uses the same harness as the selected backend, this launches a fresh supervised session—not a native subagent. It has its own job record, contract stamps, and read-only profile.
+When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id, job record, contract stamps, and read-only profile.
 
 ## Parent Audit Linkage
 
@@ -43,22 +43,24 @@ delegate adversarial-review --backend claude --origin delegate:adversarial-revie
 
 Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "result_sha256", or "sha256" fields.
 
+If submission is unresolved after Agentbus accepted or may have accepted the request, preserve the reported "request_id" and run only the exact recovery command "delegate task --recover-request <request_id> --json". Do not create a replacement request unless the user explicitly asks for a new logical review.
+
 Launch with "--background" and keep the host agent loop free to continue useful work. Long "--wait" calls can hold a host tool call for 100+ seconds and block that loop; use "--wait" only for a short, explicitly bounded terminal check. For an outstanding job, poll "delegate status --job <id>" instead.
 
-## Stall Monitoring
+## Monitoring
 
 While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call. Plain "delegate status --json --job <id>" is the cheap call; "--probe" blocks for roughly one to three sampling intervals (~10-30s at the default 10s interval, configurable with "--probe-interval").
 
-An expired heartbeat lease in "delegate status" is an immediate stall signal. Otherwise, distinguish a long agent turn from a genuine stall before cancelling: run "delegate status --job <id> --probe" before any cancel. The probe automates all three checks and reports per-probe results:
+Use "delegate status --job <id> --probe --json" only as an observational diagnostic. Its verdict is one of "activity_observed", "no_activity_observed", "inconclusive", or "terminal", and its output includes "authority_state", "cleanup_disposition", and "authority_warnings". These fields report what Delegate observed; they do not override Agentbus state or prove backend absence.
 
 - "ps -p <pid> -o %cpu,etime,stat" sampled twice for child process activity.
 - "lsof -p <pid> -iTCP -sTCP:ESTABLISHED" to confirm a live API socket.
 - captured log file size watched over the probe interval, because progress can land without a command event.
 
-Only if all three probes are flat is the job stalled. On confirmed stall, report the job id and last-known phase, then either "delegate cancel --job <id>" and relaunch fresh or with "--resume-session", or keep waiting. Never silently drop the job, never substitute your own answer for the delegated run, and escalate after a 30-minute patience cap without progress.
+A flat CPU sample, no TCP socket, unchanged log size, or expired lease is not cancellation authority. Report the job id, "authority_state", probe verdict, and any "authority_warnings"; then either keep waiting or ask the user before cancelling. Never silently drop the job or substitute your own answer for the delegated review.
 
 ## Review Result Discipline
 
-Present findings first and keep them ordered by severity. Preserve the delegated review's file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Distinguish observed evidence from inferred risk and assumptions. If there are no findings, say so explicitly and keep residual risk brief. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing or substituting a local review.
+Present findings first and keep them ordered by severity. Preserve the delegated review's file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Distinguish observed evidence from inferred risk and assumptions. Terminal envelopes may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If there are no findings, say so explicitly and keep residual risk brief. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing or substituting a local review.
 
 Never auto-fix after presenting review findings. Ask the user which issues, if any, they want addressed.
