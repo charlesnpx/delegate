@@ -221,7 +221,7 @@ Base SHA: `fb22354` (branch `delegate-v0.6-protocol-v2-cut`). Risk: low/medium. 
 - **Fix round 1** (gpt-5.5 xhigh): `agentbusStateRootForJob` gains `allowCorruptRootFallback` — `status`/`result` pass true (warn+fallback; warning now discloses the returned status/result may belong to a different same-ID job or be not-found), `cancel` passes false (corrupt/unreadable/uncanonicalizable recorded root is fatal, aborting before connect/JobCancel — restores safe pre-D12 cancel behavior). Absent-metadata/invalid-job-id fallback unchanged for all commands. Strict-path tests added. Commit `5bdf9df`.
 - **Review round 2** (gpt-5.6-sol high, SHA-bound `0fcee56..5bdf9df`, whole unit `fb22354..5bdf9df`): **SHIP** — no Critical/High. One Low: the resolver-level test pins `false`⇒fatal, but not `runCancel`'s actual call site (jobcontrol.go:289) — a future flip to `true` would stay green while wrong-root cancellation reopened. Disposition: call-site comment guard documenting the invariant added (commit `3934fc7`); the suggested seam-level `runCancel` command harness (asserting zero connect/JobCancel calls) rejected as disproportionate for a Low and recorded here as the **deferred guard**. Loop closed at iteration 2 of max 4.
 - **Gates (orchestrator, at head `3934fc7`):** `go vet ./...`=0, `go test ./cmd/delegate/... -count=1`=ok, `gofmt -l cmd/delegate` empty. Scope strictly `cmd/delegate/jobcontrol.go` + `agentbus_state_root_test.go`.
-- **Not pushed yet:** `0fcee56`, `5bdf9df`, `3934fc7` local on `delegate-v0.6-protocol-v2-cut` (ahead 3). Push/PR #17 update pending user approval.
+- **Pushed:** `0fcee56`, `5bdf9df`, `3934fc7` on `origin/delegate-v0.6-protocol-v2-cut` (user-approved push `fb22354..1fb5961`).
 
 ---
 
@@ -237,4 +237,4 @@ Base SHA: `3558120` (branch `delegate-v0.6-protocol-v2-cut`). Risk: low. Closes 
 - **Fix round 1** (gpt-5.5 xhigh): one hunk — `$(uname -s) == "Darwin"` → `[[ "${OSTYPE:-}" == darwin* ]]` (bash builtin, no subprocess; moots Low 2, so no test change). Commit `97fc933`. Loop closed at iteration 1 of max 4 per the stop rule.
 - **Gates (orchestrator):** `gofmt -l cmd/delegate` empty, `go vet ./...`=0, `go test ./cmd/delegate/... ./internal/handoff/... -count=1`=ok, `bash -n install-skill.sh`=0.
 - **Deferred debt now closed:** dead sweep wrapper (D10/D11) and installer `--plan` root accuracy (D10). Remaining recorded debt: the D12 deferred guard (runCancel command harness, Low) only.
-- **Not pushed yet:** `ba7d8d7`, `97fc933` local. Push/PR #17 update pending user approval.
+- **Pushed:** `ba7d8d7`, `97fc933` on `origin/delegate-v0.6-protocol-v2-cut` (user-approved push `fb22354..1fb5961`).
