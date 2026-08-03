@@ -6,7 +6,7 @@ agentbus owns execution, supervision, and generic policy enforcement. delegate o
 
 ## Install
 
-delegate is a private, experimental mise-en-place entry. Install **agentbus first**: mise-en-place does not infer this dependency, and delegate cannot launch work until agentbus is installed and set up.
+delegate is an experimental mise-en-place entry. Install **agentbus first**: mise-en-place does not infer this dependency, and delegate cannot launch work until agentbus is installed and set up.
 
 ```sh
 mise-en-place install agentbus
