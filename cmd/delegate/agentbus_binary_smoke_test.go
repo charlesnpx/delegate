@@ -123,7 +123,15 @@ func agentbusV06SmokeBinary(t *testing.T) (string, string) {
 		}
 	}
 
-	repo := "/Users/Charles.Anderson/c/agentbus"
+	repo := os.Getenv("DELEGATE_AGENTBUS_REPO")
+	if repo == "" {
+		if home, homeErr := os.UserHomeDir(); homeErr == nil {
+			repo = filepath.Join(home, "WebstormProjects", "agentbus")
+		}
+	}
+	if repo == "" {
+		t.Skip("agentbus v0.6.0 source unavailable: set DELEGATE_AGENTBUS_REPO to an agentbus checkout")
+	}
 	if _, err := os.Stat(filepath.Join(repo, "go.mod")); err != nil {
 		t.Skipf("agentbus v0.6.0 source unavailable at %s: %v", repo, err)
 	}
