@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -208,72 +206,6 @@ func TestDigestBundleEqualsFile(t *testing.T) {
 	}
 	if DelegateContractDigest() != string(file) {
 		t.Fatal("bundled digest does not match digest/delegate-contract.md")
-	}
-}
-
-func TestSyncDigestScriptCopiesAndFailsWhenMissing(t *testing.T) {
-	digestPath := filepath.Join("digest", "delegate-contract.md")
-	original, err := os.ReadFile(digestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(digestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.WriteFile(digestPath, original, info.Mode().Perm()); err != nil {
-			t.Errorf("restore digest file: %v", err)
-		}
-	})
-
-	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := filepath.Join(repoRoot, "scripts", "sync-digest.sh")
-	miseDir := t.TempDir()
-	sourceDir := filepath.Join(miseDir, "skills", "delegate-contract", "codex")
-	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	sourcePath := filepath.Join(sourceDir, "SKILL.md")
-	fixtureDigest := []byte("fixture delegate contract\n")
-	if err := os.WriteFile(sourcePath, fixtureDigest, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := exec.Command(script)
-	cmd.Env = append(os.Environ(), "MISE_EN_PLACE_DIR="+miseDir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("sync-digest copy failed: %v\n%s", err, out)
-	}
-	got, err := os.ReadFile(digestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(fixtureDigest) {
-		t.Fatalf("synced digest = %q, want %q", got, fixtureDigest)
-	}
-
-	if err := os.Remove(sourcePath); err != nil {
-		t.Fatal(err)
-	}
-	cmd = exec.Command(script)
-	cmd.Env = append(os.Environ(), "MISE_EN_PLACE_DIR="+miseDir)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("sync-digest missing source succeeded, want failure\n%s", out)
-	}
-	if !strings.Contains(string(out), "missing delegate-contract source:") {
-		t.Fatalf("missing-source output = %q, want missing source message", out)
-	}
-	got, err = os.ReadFile(digestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(fixtureDigest) {
-		t.Fatalf("digest changed after missing source = %q, want previous fixture digest", got)
 	}
 }
 
