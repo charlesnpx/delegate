@@ -12,14 +12,6 @@ Run the delegate CLI directly for a delegated job. Do not replace the job with a
 
 Set "JOB_ID" to the delegated job id, then run:
 
-Before running the cancel command, inspect the current authority state and probe observations:
-
-~~~bash
-delegate status --job "$JOB_ID" --probe --json
-~~~
-
-The probe is observational. A "no_activity_observed" or "inconclusive" verdict does not prove backend absence and does not by itself authorize cancellation. Cancel only when the user has asked for cancellation or the operator decision is explicit in context.
-
 ~~~bash
 delegate cancel --job "$JOB_ID" --json
 ~~~
@@ -28,15 +20,7 @@ For result handling, preserve the helper's verdict, summary, findings, and next 
 
 ## Monitoring
 
-While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call. Plain "delegate status --json --job <id>" is the cheap call; "--probe" blocks for roughly one to three sampling intervals (~10-30s at the default 10s interval, configurable with "--probe-interval").
-
-Use "delegate status --job <id> --probe --json" only as an observational diagnostic. Its verdict is one of "activity_observed", "no_activity_observed", "inconclusive", or "terminal", and its output includes "authority_state", "cleanup_disposition", and "authority_warnings". These fields report what Delegate observed; they do not override Agentbus state or prove backend absence.
-
-- "ps -p <pid> -o %cpu,etime,stat" sampled twice for child process activity.
-- "lsof -p <pid> -iTCP -sTCP:ESTABLISHED" to confirm a live API socket.
-- captured log file size watched over the probe interval, because progress can land without a command event.
-
-A flat CPU sample, no TCP socket, unchanged log size, or expired lease is not cancellation authority. Report the job id, "authority_state", probe verdict, and any "authority_warnings"; then either keep waiting or ask the user before cancelling. Never silently drop the job or substitute your own answer for the delegated run.
+While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call. Never silently drop the job or substitute your own answer for the delegated run.
 
 ## Operating Discipline
 

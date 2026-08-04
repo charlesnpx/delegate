@@ -123,7 +123,7 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 		_, _ = fmt.Fprintln(fs.Output(), "  Delegate redacts secret-matched paths and secret-like diff hunks from the review context it assembles.")
 		_, _ = fmt.Fprintln(fs.Output(), "  This does not prevent a same-user backend from reading repository or other filesystem files itself.")
 		_, _ = fmt.Fprintln(fs.Output(), "  --allow-live-repo-read makes those reads easier by using the repository as cwd.")
-		_, _ = fmt.Fprintln(fs.Output(), "  OS-level isolation requires a container/sandbox profile and is a named v0.2 roadmap item.")
+		_, _ = fmt.Fprintln(fs.Output(), "  OS-level isolation requires a container/sandbox profile.")
 		fs.PrintDefaults()
 	}
 	var background bool

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -85,7 +84,6 @@ func runConfigSet(args []string, stdout, stderr io.Writer) (int, error) {
 	if err := cfg.Set(args[0], args[1]); err != nil {
 		return 0, err
 	}
-	warnUnknownConfigValue(context.Background(), args[0], args[1], stderr)
 	if err := delegateconfig.Save(cfg); err != nil {
 		return 0, err
 	}
@@ -107,44 +105,4 @@ func runConfigUnset(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, err
 	}
 	return 0, nil
-}
-
-func warnUnknownConfigValue(ctx context.Context, key, value string, stderr io.Writer) {
-	backend, dimension, ok := configBackendDimension(key)
-	if !ok || value == "" {
-		return
-	}
-	c, hello, _, err := connectAgentbusCommand(ctx, nil)
-	if err != nil {
-		return
-	}
-	defer c.Close()
-	for _, metadata := range hello.BackendMetadata {
-		if metadata.Name != backend {
-			continue
-		}
-		advertised := metadata.Models
-		if dimension == "effort" {
-			advertised = metadata.Efforts
-		}
-		if len(advertised) > 0 && !containsString(advertised, value) {
-			_, _ = fmt.Fprintf(stderr, "warning: %s\n", unadvertisedBackendValueWarning(dimension, value, backend, advertised))
-		}
-		return
-	}
-}
-
-func configBackendDimension(key string) (backend, dimension string, ok bool) {
-	switch key {
-	case delegateconfig.KeyClaudeModel:
-		return "claude", "model", true
-	case delegateconfig.KeyClaudeEffort:
-		return "claude", "effort", true
-	case delegateconfig.KeyCodexModel:
-		return "codex", "model", true
-	case delegateconfig.KeyCodexEffort:
-		return "codex", "effort", true
-	default:
-		return "", "", false
-	}
 }

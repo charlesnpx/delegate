@@ -11,7 +11,7 @@ import (
 	delegateconfig "github.com/charlesnpx/delegate/internal/config"
 )
 
-func TestConfigCommandRoundTripAndValidationWarning(t *testing.T) {
+func TestConfigCommandRoundTrip(t *testing.T) {
 	fake := &fakeAgentbusClient{hello: client.HelloResult{
 		ProtocolVersion: 1,
 		Backends:        []string{"claude", "codex"},
@@ -24,9 +24,6 @@ func TestConfigCommandRoundTripAndValidationWarning(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"config", "set", delegateconfig.KeyClaudeModel, "unadvertised-model"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("set code = %d stderr=%q", code, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), `warning: model "unadvertised-model" is not advertised by agentbus for backend "claude" (advertised: known-model); passing through — the backend is authoritative`) {
-		t.Fatalf("set warning = %q", stderr.String())
 	}
 	cfg, err := delegateconfig.Load()
 	if err != nil {

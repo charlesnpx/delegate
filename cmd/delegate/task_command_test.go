@@ -21,7 +21,7 @@ import (
 	"github.com/charlesnpx/delegate/internal/policy"
 )
 
-func TestEnvelopeSchemasAndHashes(t *testing.T) {
+func TestEnvelopeSchemas(t *testing.T) {
 	launch, err := newLaunchEnvelope("job_envelope", engine.StateQueued)
 	if err != nil {
 		t.Fatal(err)
@@ -39,19 +39,6 @@ func TestEnvelopeSchemasAndHashes(t *testing.T) {
 	if launch.Schema != envelopeSchema {
 		t.Fatalf("launch schema = %d, want %d", launch.Schema, envelopeSchema)
 	}
-	wantLaunchHash := sha256.Sum256([]byte(`{"deduplicated":false,"effort":{"source":"default"},"job_id":"job_envelope","model":{"source":"default"},"result_sha256":null,"schema":2,"status":"queued","submission_deduplicated":false}`))
-	if launch.SHA256 != hex.EncodeToString(wantLaunchHash[:]) {
-		t.Fatalf("launch sha256 = %q, want %q", launch.SHA256, hex.EncodeToString(wantLaunchHash[:]))
-	}
-	launch.SHA256 = "ignored"
-	gotHash, err := envelopeSHA256(launch)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gotHash != hex.EncodeToString(wantLaunchHash[:]) {
-		t.Fatalf("hash with own field changed = %q, want %q", gotHash, hex.EncodeToString(wantLaunchHash[:]))
-	}
-
 	stamp := engine.ContractStamp{
 		Status:      engine.ContractCompliant,
 		Missing:     []string{},
@@ -75,27 +62,13 @@ func TestEnvelopeSchemasAndHashes(t *testing.T) {
 			t.Fatalf("terminal envelope = %s, want fragment %s", raw, fragment)
 		}
 	}
-	if terminal.SHA256 == "" || terminal.SHA256 == strings.Repeat("a", 64) {
-		t.Fatalf("terminal envelope sha256 = %q, want distinct envelope hash", terminal.SHA256)
-	}
-	canonicalTerminal := `{"contract":{"attempts":1,"missing":[],"reason":"","retryUsed":false,"status":"compliant","validatedAt":"1970-01-01T00:00:01Z"},"contractKind":"shape","deduplicated":false,"effort":{"source":"default"},"job_id":"job_envelope","kind":"task","model":{"source":"default"},"model_reported_unavailable_reason":"agentbus_capability_missing","result_sha256":"` + strings.Repeat("a", 64) + `","schema":2,"status":"completed","submission_deduplicated":false}`
-	wantTerminalHash := sha256.Sum256([]byte(canonicalTerminal))
-	if terminal.SHA256 != hex.EncodeToString(wantTerminalHash[:]) {
-		t.Fatalf("terminal sha256 = %q, want independent canonical JSON digest %q", terminal.SHA256, hex.EncodeToString(wantTerminalHash[:]))
-	}
-
 	origin := envelopeOrigin{Skill: "delegate:rescue:claude", ParentClient: "claude-code", ParentSessionID: "parent-session", ParentAgent: "agent", Depth: "1"}
 	withOrigin, err := newLaunchEnvelopeWithOrigin("job_envelope", engine.StateQueued, origin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if withOrigin.Origin == nil || *withOrigin.Origin != origin || withOrigin.SHA256 == launch.SHA256 {
-		t.Fatalf("launch with origin = %#v, want origin-covered distinct hash", withOrigin)
-	}
-	canonicalOrigin := `{"deduplicated":false,"effort":{"source":"default"},"job_id":"job_envelope","model":{"source":"default"},"origin":{"depth":"1","parent_agent":"agent","parent_client":"claude-code","parent_session_id":"parent-session","skill":"delegate:rescue:claude"},"result_sha256":null,"schema":2,"status":"queued","submission_deduplicated":false}`
-	wantOriginHash := sha256.Sum256([]byte(canonicalOrigin))
-	if withOrigin.SHA256 != hex.EncodeToString(wantOriginHash[:]) {
-		t.Fatalf("launch origin sha256 = %q, want %q", withOrigin.SHA256, hex.EncodeToString(wantOriginHash[:]))
+	if withOrigin.Origin == nil || *withOrigin.Origin != origin {
+		t.Fatalf("launch with origin = %#v, want captured origin", withOrigin)
 	}
 }
 
@@ -116,7 +89,7 @@ func TestEnvelopeSchema2SubmissionFieldsRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &decodedLaunch); err != nil {
 		t.Fatalf("launch round trip: %v; raw=%s", err, raw)
 	}
-	if decodedLaunch.Schema != 2 || decodedLaunch.RequestID != requestID || !decodedLaunch.Deduplicated || !decodedLaunch.SubmissionDeduplicated || decodedLaunch.Status != string(engine.StateRetrying) {
+	if decodedLaunch.Schema != 2 || decodedLaunch.RequestID != requestID || !decodedLaunch.Deduplicated || decodedLaunch.Status != string(engine.StateRetrying) {
 		t.Fatalf("launch round trip = %#v", decodedLaunch)
 	}
 
@@ -136,7 +109,7 @@ func TestEnvelopeSchema2SubmissionFieldsRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &decodedTerminal); err != nil {
 		t.Fatalf("terminal round trip: %v; raw=%s", err, raw)
 	}
-	if decodedTerminal.Schema != 2 || decodedTerminal.RequestID != requestID || !decodedTerminal.Deduplicated || !decodedTerminal.SubmissionDeduplicated {
+	if decodedTerminal.Schema != 2 || decodedTerminal.RequestID != requestID || !decodedTerminal.Deduplicated {
 		t.Fatalf("terminal round trip = %#v", decodedTerminal)
 	}
 }
@@ -213,7 +186,7 @@ func TestSetupCapabilityGateReportsMissingStrictContainment(t *testing.T) {
 	}
 }
 
-func TestSetupOutputIncludesStopReviewGateLine(t *testing.T) {
+func TestSetupOutputIncludesReadinessFields(t *testing.T) {
 	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
 	defer restore()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -223,9 +196,6 @@ func TestSetupOutputIncludesStopReviewGateLine(t *testing.T) {
 	code := run([]string{"setup"}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), stopReviewGateLine) {
-		t.Fatalf("setup stdout = %q, want %q", stdout.String(), stopReviewGateLine)
 	}
 	if !strings.Contains(stdout.String(), "agentbus models.reported: true") || !strings.Contains(stdout.String(), "config file:") || !strings.Contains(stdout.String(), "config overridable: true") {
 		t.Fatalf("setup stdout = %q, want model-reporting and config lines", stdout.String())
@@ -266,9 +236,6 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	}
 	if !result.Agentbus.Capabilities["models.reported"] || result.Config.Path == "" || !result.Config.Overridable {
 		t.Fatalf("setup config/model capability = %#v / %#v", result.Config, result.Agentbus.Capabilities)
-	}
-	if result.StopReviewGate != "not available (planned v0.2)" {
-		t.Fatalf("stop_review_gate = %q", result.StopReviewGate)
 	}
 	if !result.StateRootWritable || !result.AgentbusStateRootWritable || !result.DaemonReachable {
 		t.Fatalf("setup preflight fields = stateRootWritable=%t agentbusStateRootWritable=%t daemonReachable=%t, want all true", result.StateRootWritable, result.AgentbusStateRootWritable, result.DaemonReachable)

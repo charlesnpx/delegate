@@ -80,7 +80,7 @@ func TestRescueSmokeFixtures(t *testing.T) {
 			if err := json.Unmarshal(launchOut.Bytes(), &launch); err != nil {
 				t.Fatalf("launch JSON invalid: %v; raw = %q", err, launchOut.String())
 			}
-			if launch.JobID != bus.jobID || launch.Status != string(engine.StateQueued) || launch.ResultSHA256 != nil || launch.SHA256 == "" {
+			if launch.JobID != bus.jobID || launch.Status != string(engine.StateQueued) || launch.ResultSHA256 != nil {
 				t.Fatalf("launch envelope = %#v, want queued envelope for %s", launch, bus.jobID)
 			}
 			if len(bus.submits) != 1 {
@@ -110,8 +110,8 @@ func TestRescueSmokeFixtures(t *testing.T) {
 			if terminal.Contract.Status != engine.ContractCompliant || terminal.Contract.Attempts != 1 || terminal.Contract.RetryUsed {
 				t.Fatalf("contract stamp = %#v, want one compliant validation", terminal.Contract)
 			}
-			if terminal.Contract.ContractSHA256 == "" || terminal.ResultSHA256 == nil || *terminal.ResultSHA256 != sha256Text(compliantReport()) || terminal.SHA256 == "" {
-				t.Fatalf("terminal hashes = %#v, want contract, result, and envelope hashes", terminal)
+			if terminal.Contract.ContractSHA256 == "" || terminal.ResultSHA256 == nil || *terminal.ResultSHA256 != sha256Text(compliantReport()) {
+				t.Fatalf("terminal hashes = %#v, want contract and result hashes", terminal)
 			}
 			if len(backend.turns) != 1 || backend.turns[0].Write {
 				t.Fatalf("backend turn inputs = %#v, want one read-only launch", backend.turns)

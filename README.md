@@ -48,7 +48,7 @@ delegate review|adversarial-review --backend claude|codex [--background|--wait] 
               [--model <model>] [--effort <effort>] [--timeout <duration>]
               [--strict-contract] [--origin <skill>] [--parent-client <client>] [--parent-session <id>]
 
-delegate status [--job <id>] [--wait|--probe] [--json]
+delegate status [--job <id>] [--wait] [--json]
 delegate result --job <id> [--wait] [--json]
 delegate cancel --job <id> [--json]
 ```
@@ -76,7 +76,7 @@ delegate task --backend codex --origin delegate:rescue:codex --cwd "$PWD" \
 
 ## Review workflow and security model
 
-The v0.1 review threat model is **accident prevention**. It reduces the chance that ordinary repository secrets are copied into delegated review context; it is not a security boundary against a repository or history crafted to evade the heuristics. Adversarial repository-history shuffles, including delete-and-recreate sequences intended to break path or content ancestry, are explicitly out of scope. v0.2 OS isolation is the boundary fix for that class.
+The review context pipeline is **accident prevention**. It reduces the chance that ordinary repository secrets are copied into delegated review context; it is not a security boundary against a repository or history crafted to evade the heuristics. Adversarial repository-history shuffles, including delete-and-recreate sequences intended to break path or content ancestry, are explicitly out of scope.
 
 `review` and `adversarial-review` are always read-only. Delegate canonicalizes `--cwd`, discovers the repository from that directory, and assembles the change context before starting the backend. `--scope auto` combines the current branch diff with the working-tree overlay, including untracked files. `--scope working-tree` compares tracked changes to `HEAD` and includes untracked files. `--scope branch` compares the merge base of `HEAD` and the resolved base. Base selection follows `--base`, the locally recorded default remote branch (such as `origin/HEAD`), then an upstream behind `HEAD` for an unpushed-commits comparison. An upstream equal to `HEAD` is never used as the branch base. If no usable base exists, delegate stops with setup guidance and never contacts a remote.
 
@@ -119,7 +119,7 @@ Delegate resolves Agentbus state with the same rule for setup, launch, recovery,
 
 ## Envelope Reference
 
-Every envelope has `schema: 2` and `sha256`, where `sha256` is the SHA-256 of canonical JSON for that envelope with its own hash field excluded. `request_id` is Delegate's durable logical request identity; `submission_deduplicated` is true when Agentbus accepted the same request earlier and returned the existing job. `result_sha256` is Agentbus's SHA-256 over the raw final assistant message bytes when a result exists. When captured, the additive `origin` block carries `skill`, `parent_client`, `parent_session_id`, `parent_agent`, and `depth`.
+Every envelope has `schema: 2`. `request_id` is Delegate's durable logical request identity; `deduplicated` is true when Agentbus accepted the same request earlier and returned the existing job. `result_sha256` is Agentbus's SHA-256 over the raw final assistant message bytes when a result exists. When captured, the additive `origin` block carries `skill`, `parent_client`, `parent_session_id`, `parent_agent`, and `depth`.
 
 Launch envelopes are returned by a non-waiting task:
 
@@ -130,9 +130,7 @@ Launch envelopes are returned by a non-waiting task:
   "request_id": "delegate-0123456789abcdef0123456789abcdef",
   "status": "queued",
   "deduplicated": false,
-  "submission_deduplicated": false,
-  "result_sha256": null,
-  "sha256": "..."
+  "result_sha256": null
 }
 ```
 
@@ -150,7 +148,6 @@ Terminal envelopes are returned by `delegate result --job <id>`, terminal `statu
   "late_finalization": false,
   "agentbus_warnings": [],
   "local_artifacts_retained": false,
-  "submission_deduplicated": false,
   "contract": {
     "status": "compliant",
     "missing": [],
@@ -160,8 +157,7 @@ Terminal envelopes are returned by `delegate result --job <id>`, terminal `statu
     "contractSha256": "sha256:...",
     "validatedAt": "2026-01-01T00:00:00Z"
   },
-  "result_sha256": "...",
-  "sha256": "..."
+  "result_sha256": "..."
 }
 ```
 
@@ -181,17 +177,11 @@ Agentbus reports terminal outcome and cleanup proof separately. Delegate removes
 - resolved `agentbusAutostartLockRoot` (`<UserCacheDir>/agentbus/start-locks`) plus `agentbusAutostartLockRootWritable`;
 - `pendingSubmissionIntentCount` for prepared, in-flight, and blocked local submission intents;
 - `unresolvedCleanupArtifactCount` for retained terminal local artifacts whose cleanup is not proven safe;
-- `stateRootWritable`, `daemonReachable`, `ready`, managed skill statuses, and `stop_review_gate`.
+- `stateRootWritable`, `daemonReachable`, `ready`, and managed skill statuses.
 
-Missing `admission.strictContainment` makes setup not ready and returns nonzero. The non-JSON setup output always includes this exact line:
-
-```text
-stop-review-gate: not available (planned v0.2)
-```
+Missing `admission.strictContainment` makes setup not ready and returns nonzero.
 
 Launch with `--background`, then poll `delegate status --job <id>` every 2-5 minutes while a job is outstanding. Long `--wait` calls can block a host agent loop for 100+ seconds; reserve them for short, explicitly bounded terminal checks.
-
-`delegate status --job <id> --probe --json` is observational. It samples child-process CPU/elapsed state, established TCP sockets, and captured-log size, then returns one of `activity_observed`, `no_activity_observed`, `inconclusive`, or `terminal`. Probe output also includes `authority_state`, `cleanup_disposition`, and `authority_warnings`. A flat CPU sample, no TCP socket, unchanged log size, or expired lease does not override Agentbus state, prove backend absence, delete artifacts, or authorize cancellation.
 
 ## Development and release
 
@@ -203,10 +193,3 @@ scripts/release-check.sh v0.6.0
 ```
 
 The release check requires a clean worktree, including no modified tracked files and no untracked files outside ignored paths. Manually inspect the same gate with `git status --short --untracked-files=all`. It also requires the requested tag to point exactly at `HEAD`, requires `VERSION` to match `v<version>`, JSON-decodes installer and CLI output, verifies every staged binary/skill hash, and confirms the staged binary reports the release version. `--allow-dirty` is an unsafe escape hatch and always prints a loud warning when used.
-
-## Roadmap
-
-### v0.2
-
-- `stop-review-gate`: a small Claude Code Stop-hook client of agentbus that gates a turn through an `ALLOW`/`BLOCK` shape contract and `policy.validate`, replacing the vendor plugin's gate without making it a delegate runtime no-op.
-- OS-level review isolation: a documented container/sandbox profile that prevents the backend process from reading repository and other host files outside the assembled review workspace.

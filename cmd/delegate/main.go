@@ -83,7 +83,7 @@ commands:
   task            run one backend turn (foreground or --background)
   review          delegate a sanitized code review
   adversarial-review  delegate a refute-first review
-  status          check a delegated job (--probe for liveness)
+  status          check a delegated job
   result          fetch a delegated job result (--wait to block)
   cancel          cancel a delegated job
   handoff create  create a private prompt handoff file from stdin

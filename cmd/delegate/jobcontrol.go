@@ -27,14 +27,23 @@ const (
 
 var jobPollSleep = sleepContext
 
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	fs := flag.NewFlagSet("delegate status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	jobID := fs.String("job", "", "job id")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	wait := fs.Bool("wait", false, "wait for terminal status")
-	probe := fs.Bool("probe", false, "run process/socket/log liveness probes for the job (takes ~10-30s by default)")
-	probeInterval := fs.Duration("probe-interval", defaultProbeInterval, "duration between liveness samples (minimum 1s)")
 	if err := fs.Parse(args); err != nil {
 		return 0, err
 	}
@@ -43,15 +52,6 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	if *wait && *jobID == "" {
 		return 0, fmt.Errorf("delegate status --wait requires --job")
-	}
-	if *probe && *jobID == "" {
-		return 0, fmt.Errorf("delegate status --probe requires --job")
-	}
-	if *probe && *wait {
-		return 0, fmt.Errorf("use only one of --probe or --wait")
-	}
-	if *probeInterval < minimumProbeInterval {
-		return 0, fmt.Errorf("--probe-interval must be at least %s", minimumProbeInterval)
 	}
 	ctx := context.Background()
 	stateRoot, err := agentbusStateRootForJob("", *jobID, stderr, true)
@@ -72,23 +72,6 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	if err != nil {
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
-	}
-	if *probe {
-		job, ok := findJobStatus(status, *jobID)
-		if !ok {
-			return 0, fmt.Errorf("job %q not found", *jobID)
-		}
-		if _, err := fmt.Fprintln(stderr, probeRuntimeNotice(*probeInterval)); err != nil {
-			return 0, err
-		}
-		probeResult, err := probeJobStatusWithInterval(ctx, job, *probeInterval)
-		if err != nil {
-			return 0, err
-		}
-		if *jsonOut {
-			return 0, writeJSONLine(stdout, probeResult)
-		}
-		return 0, writeProbeSummary(stdout, probeResult)
 	}
 	// delegate status always emits the {"jobs":[...]} JobStatusResult shape for
 	// both running and terminal jobs, so a single-schema poller never breaks at
@@ -174,39 +157,6 @@ func recordedAgentbusStateRootForJob(stateDir, jobID string) (string, bool, erro
 		return "", false, err
 	}
 	return root, true, nil
-}
-
-func writeProbeSummary(stdout io.Writer, result statusProbeResult) error {
-	if _, err := fmt.Fprintf(stdout, "%s %s authority_state=%s verdict=%s", result.JobID, result.State, result.AuthorityState, result.Verdict); err != nil {
-		return err
-	}
-	if result.CleanupDisposition != "" {
-		if _, err := fmt.Fprintf(stdout, " cleanup_disposition=%s", result.CleanupDisposition); err != nil {
-			return err
-		}
-	}
-	if _, err := fmt.Fprintln(stdout); err != nil {
-		return err
-	}
-	for _, warning := range result.AuthorityWarnings {
-		if _, err := fmt.Fprintf(stdout, "authority_warning: %s\n", warning); err != nil {
-			return err
-		}
-	}
-	for _, probe := range result.Probes {
-		if _, err := fmt.Fprintf(stdout, "%s: %s", probe.Name, probe.Status); err != nil {
-			return err
-		}
-		if probe.Detail != "" {
-			if _, err := fmt.Fprintf(stdout, " (%s)", probe.Detail); err != nil {
-				return err
-			}
-		}
-		if _, err := fmt.Fprintln(stdout); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func runResult(args []string, stdout, stderr io.Writer) (int, error) {

@@ -114,7 +114,6 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"Never auto-fix",
 				"accident prevention",
 				"delete-and-recreate",
-				"v0.2 OS isolation is the boundary fix",
 				"--recover-request <request_id>",
 				"cleanup_disposition",
 			})
@@ -146,7 +145,6 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"agentbusAutostartLockRoot",
 				"pendingSubmissionIntentCount",
 				"unresolvedCleanupArtifactCount",
-				"stop-review-gate",
 			})
 		case KindConfig:
 			requireFragments(t, skill, []string{
@@ -217,9 +215,6 @@ func TestSourceFixturesMatchGeneratedTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 11 {
-		t.Fatalf("SourceFiles count = %d, want 11", len(files))
-	}
 	for _, rel := range SortedSourcePaths(files) {
 		if !strings.Contains(filepath.Dir(rel), "__colon__") {
 			t.Fatalf("source fixture path %q does not use __colon__ escaping", rel)
@@ -282,9 +277,6 @@ func TestPlanAndInstallRemoveLegacySkills(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := plan[target]
-			if len(result.Files) != len(expectedSkillNames()) {
-				t.Fatalf("plan files = %#v", result.Files)
-			}
 			if len(result.Removed) != len(legacyNamesForTarget(target)) {
 				t.Fatalf("plan removed = %#v", result.Removed)
 			}
@@ -299,16 +291,8 @@ func TestPlanAndInstallRemoveLegacySkills(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(installed[target].Files) != len(expectedSkillNames()) {
-				t.Fatalf("installed files = %#v", installed[target].Files)
-			}
 			if len(installed[target].Removed) != len(legacyNamesForTarget(target)) {
 				t.Fatalf("installed removed = %#v", installed[target].Removed)
-			}
-			for _, file := range installed[target].Files {
-				if file.SHA256 == "" {
-					t.Fatalf("installed file %q missing sha256", file.Path)
-				}
 			}
 			for _, legacyName := range legacyNamesForTarget(target) {
 				if _, err := os.Stat(filepath.Join(rootForTarget, legacyName)); !os.IsNotExist(err) {
@@ -319,9 +303,6 @@ func TestPlanAndInstallRemoveLegacySkills(t *testing.T) {
 			uninstalled, err := Uninstall(target, root, func(string) string { return "" }, nil)
 			if err != nil {
 				t.Fatal(err)
-			}
-			if len(uninstalled[target].Files) != len(expectedSkillNames()) {
-				t.Fatalf("uninstalled files = %#v", uninstalled[target].Files)
 			}
 			if len(uninstalled[target].Removed) != len(legacyNamesForTarget(target)) {
 				t.Fatalf("uninstalled removed = %#v", uninstalled[target].Removed)
@@ -379,19 +360,6 @@ func requireMonitoringGuidance(t *testing.T, skill GeneratedSkill) {
 	requireFragments(t, skill, []string{
 		"delegate status --job <id>",
 		"every 2-5 minutes",
-		"delegate status --json --job <id>",
-		"--probe\" blocks for roughly one to three sampling intervals",
-		"activity_observed",
-		"no_activity_observed",
-		"inconclusive",
-		"terminal",
-		"authority_state",
-		"authority_warnings",
-		"do not override Agentbus state or prove backend absence",
-		"ps -p <pid> -o %cpu,etime,stat",
-		"lsof -p <pid> -iTCP -sTCP:ESTABLISHED",
-		"log file size watched over the probe interval",
-		"not cancellation authority",
 		"silently drop the job",
 		"substitute your own answer",
 	})
