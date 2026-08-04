@@ -71,6 +71,13 @@ func reportCorrectionResultUsable(result client.JobResult) bool {
 	if !reportResultCanBeCorrected(result.State) || result.Result == nil {
 		return false
 	}
+	// Match the terminal envelope's authoritative-result criterion: a present
+	// result digest (see newTerminalEnvelope/resultUnavailableReason). Without it
+	// the envelope emits completed_without_result, so selecting such a correction
+	// would suppress the original body SHA and cleanup disposition.
+	if result.Result.SHA256 == "" {
+		return false
+	}
 	_, ok := resultBodyText(result.Result)
 	return ok
 }

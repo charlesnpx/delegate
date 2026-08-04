@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -10,6 +12,31 @@ import (
 	"github.com/charlesnpx/agentbus/engine"
 	"github.com/charlesnpx/delegate/internal/policy"
 )
+
+// TestReportCorrectionResultUsableRequiresDigest locks in the round-2 fix: a
+// correction result is "usable" (allowed to replace the original) only when it
+// carries a present result digest, matching the terminal envelope's
+// authoritative-result criterion. Otherwise the envelope would emit
+// completed_without_result and suppress the original body SHA + cleanup.
+func TestReportCorrectionResultUsableRequiresDigest(t *testing.T) {
+	body := compliantReport()
+	sum := sha256.Sum256([]byte(body))
+	digest := hex.EncodeToString(sum[:])
+
+	noDigest := client.JobResult{JobID: "corr", State: engine.StateCompleted, Result: &engine.ResultInfo{Text: body, Bytes: int64(len(body))}}
+	if reportCorrectionResultUsable(noDigest) {
+		t.Fatal("correction without a result digest must not be usable (would suppress the original)")
+	}
+
+	withDigest := client.JobResult{JobID: "corr", State: engine.StateCompleted, Result: &engine.ResultInfo{Text: body, Bytes: int64(len(body)), SHA256: digest}}
+	if !reportCorrectionResultUsable(withDigest) {
+		t.Fatal("correction with a present matching digest should be usable")
+	}
+
+	if reportCorrectionResultUsable(client.JobResult{JobID: "corr", State: engine.StateCompleted}) {
+		t.Fatal("correction without a result must not be usable")
+	}
+}
 
 // TestRunStatusTerminalJobEmitsJobsShapeWithExitCode locks in ⑧: `delegate
 // status --job` must emit the {"jobs":[...]} JobStatusResult shape even when the
