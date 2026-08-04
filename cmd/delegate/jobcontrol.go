@@ -98,16 +98,28 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	// the terminal state to its exit code, so scripts checking the exit status
 	// still learn the outcome without the JSON shape changing.
 	exitCode := 0
+	backendErr := ""
 	if *jobID != "" {
 		if job, ok := findJobStatus(status, *jobID); ok && engine.IsTerminal(job.State) {
 			cleanupStatus("", job, cleanupWarnings)
 			exitCode = engine.ExitCodeForState(job.State)
+			if meta, found, metaErr := loadJobMetadata("", job.JobID); metaErr == nil && found {
+				backendErr = meta.BackendError
+			}
 		}
 	}
 	if *jsonOut {
 		return exitCode, writeJSONLine(stdout, status)
 	}
+	// The JSON shape stays strictly JobStatusResult, but the human-readable line
+	// must not lose the captured backend diagnostic the old terminal path printed.
 	for _, job := range status.Jobs {
+		if job.JobID == *jobID && backendErr != "" {
+			if _, err := fmt.Fprintf(stdout, "%s %s backend_error=%s\n", job.JobID, job.State, backendErr); err != nil {
+				return 0, err
+			}
+			continue
+		}
 		if _, err := fmt.Fprintf(stdout, "%s %s\n", job.JobID, job.State); err != nil {
 			return 0, err
 		}
@@ -685,7 +697,7 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 		stamp = *result.Contract
 	} else if contractKind == contractKindNone {
 		stamp = policy.DisabledStamp()
-	} else if reconstructed, ok := localReconstructedContractStamp(result, contractKind); ok {
+	} else if reconstructed, ok := localReconstructedContractStamp(result, contractKind, found); ok {
 		// agentbus admission (protocol v2) jobs never persist a contract stamp,
 		// so JobResult.Contract is nil even for a fully-present, hash-matched
 		// result. Rather than mislabel that healthy result as result_unavailable,
@@ -723,19 +735,14 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 	option.Origin = origin
 	option.CleanupDisposition = cleanupDisposition
 	option.LateFinalization = option.LateFinalization || result.LateFinalization
-	// Timestamps and the result path let operators observe job duration and reach
-	// the result body through the official CLI. Prefer agentbus runtime updatedAt
-	// (set in envelopeOptions) and fall back to delegate's locally recorded
-	// metadata timestamps, which are always present once metadata is found.
-	if found {
-		if !meta.CreatedAt.IsZero() {
-			submitted := meta.CreatedAt
-			option.SubmittedAt = &submitted
-		}
-		if option.UpdatedAt == nil && !meta.UpdatedAt.IsZero() {
-			updated := meta.UpdatedAt
-			option.UpdatedAt = &updated
-		}
+	// submitted_at is delegate's stable local submission time; updated_at comes
+	// ONLY from agentbus's runtime status (set in envelopeOptions). We do not fall
+	// back to meta.UpdatedAt: that field is bumped on every local metadata write,
+	// so a result fetched hours after completion would inflate the apparent
+	// duration. result_path lets operators reach the body through the CLI.
+	if found && !meta.CreatedAt.IsZero() {
+		submitted := meta.CreatedAt
+		option.SubmittedAt = &submitted
 	}
 	if result.Result != nil {
 		option.ResultPath = result.Result.ResultPath
@@ -756,8 +763,15 @@ func localArtifactsRetainedFromMetadata(meta jobMetadata, state engine.JobState,
 // it can validate the final text itself. Only the shape contract can be
 // reconstructed locally: a JSON Schema contract's schema text is not retained in
 // job metadata, so that case is left to agentbus's own stamp.
-func localReconstructedContractStamp(result client.JobResult, contractKind string) (engine.ContractStamp, bool) {
-	if result.Result == nil || result.Result.Bytes <= 0 || contractKind != contractKindShape {
+func localReconstructedContractStamp(result client.JobResult, contractKind string, found bool) (engine.ContractStamp, bool) {
+	// Reconstruct only with positive shape provenance: local metadata present AND
+	// recording the delegate-report shape. Without metadata the contract kind is
+	// unknown (it defaults to shape), and validating a JSON Schema / no-contract
+	// body against the shape spec would fabricate a wrong verdict.
+	if !found || contractKind != contractKindShape {
+		return engine.ContractStamp{}, false
+	}
+	if result.Result == nil || result.Result.Bytes < 0 {
 		return engine.ContractStamp{}, false
 	}
 	text, ok := resultBodyText(result.Result)
@@ -791,7 +805,13 @@ func resultBodyText(info *engine.ResultInfo) (string, bool) {
 	if info.Text != "" {
 		return info.Text, true
 	}
-	if info.ResultPath == "" || info.Bytes <= 0 {
+	// A hash-certified zero-byte result is a present (empty) body, not an absent
+	// one; treat it as available so an empty result validates as noncompliant
+	// rather than falling through to result_unavailable.
+	if info.Bytes == 0 {
+		return "", true
+	}
+	if info.ResultPath == "" || info.Bytes < 0 {
 		return "", false
 	}
 	f, err := os.Open(info.ResultPath)
