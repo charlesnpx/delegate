@@ -21,8 +21,6 @@ import (
 	skillpkg "github.com/charlesnpx/delegate/internal/skills"
 )
 
-const stopReviewGateLine = "stop-review-gate: not available (planned v0.2)"
-
 type setupJSON struct {
 	Schema                            int           `json:"schema"`
 	Delegate                          string        `json:"delegate"`
@@ -39,7 +37,6 @@ type setupJSON struct {
 	UnresolvedCleanupArtifactCount    *int          `json:"unresolvedCleanupArtifactCount"`
 	DaemonReachable                   bool          `json:"daemonReachable"`
 	Ready                             bool          `json:"ready"`
-	StopReviewGate                    string        `json:"stop_review_gate"`
 	Warnings                          []string      `json:"warnings,omitempty"`
 }
 
@@ -154,7 +151,6 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 			UnresolvedCleanupArtifactCount:    unresolvedCleanupArtifacts,
 			DaemonReachable:                   true,
 			Ready:                             ready,
-			StopReviewGate:                    "not available (planned v0.2)",
 			Warnings:                          preflight.Warnings,
 		})
 		if err != nil {
@@ -206,9 +202,6 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 		if _, err := fmt.Fprintf(stdout, "skill %s (%s): %s\n", skill.Name, skill.Target, skill.Status); err != nil {
 			return 0, err
 		}
-	}
-	if _, err := fmt.Fprintf(stdout, "%s\n", stopReviewGateLine); err != nil {
-		return 0, err
 	}
 	if readinessErr != nil {
 		return 1, readinessErr
@@ -288,14 +281,14 @@ func setupStatePreflightWithAgentbusRoot(agentbusRoot string, agentbusErr error)
 		result.StateRootReason = err.Error()
 	}
 	if agentbusErr != nil {
-		result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus state root was not probed because %v", agentbusErr))
+		result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus state root was not checked because %v", agentbusErr))
 		return result
 	}
 	result.AgentbusStateRoot = agentbusRoot
 	result.AgentbusStateRootWritable = directoryWritable(agentbusRoot)
 	lockRoot, err := resolveAgentbusAutostartLockRoot()
 	if err != nil {
-		result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus autostart lock root was not probed because %v", err))
+		result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus autostart lock root was not checked because %v", err))
 		return result
 	}
 	result.AgentbusAutostartLockRoot = lockRoot
@@ -405,7 +398,7 @@ func listJobMetadata(stateDir string) ([]jobMetadata, error) {
 }
 
 // directoryWritable proves both create and write access without leaving a
-// probe file behind. The state directory itself is intentionally retained: a
+// temporary file behind. The state directory itself is intentionally retained: a
 // successful preflight is allowed to create the directory it reports usable.
 func directoryWritable(path string) bool {
 	if err := os.MkdirAll(path, 0o700); err != nil {

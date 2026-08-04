@@ -130,8 +130,8 @@ func TestDeduplicatedTerminalReplayEmitsTerminalEnvelopeWithoutWait(t *testing.T
 			if env.RequestID == "" || !strings.HasPrefix(env.RequestID, "delegate-") {
 				t.Fatalf("request_id=%q, want delegate request id", env.RequestID)
 			}
-			if !env.Deduplicated || !env.SubmissionDeduplicated {
-				t.Fatalf("dedup fields = %v/%v, want true/true", env.Deduplicated, env.SubmissionDeduplicated)
+			if !env.Deduplicated {
+				t.Fatalf("deduplicated = %v, want true", env.Deduplicated)
 			}
 			if env.ResultSHA256 == nil || *env.ResultSHA256 != tc.resultSHA {
 				t.Fatalf("result_sha256=%v, want %s", env.ResultSHA256, tc.resultSHA)
@@ -179,7 +179,7 @@ func TestSubmitPreservesNonTerminalReplayStates(t *testing.T) {
 			if env.Schema != envelopeSchema || env.JobID != jobID || env.Status != string(state) {
 				t.Fatalf("launch envelope=%#v, want schema %d job %s status %s", env, envelopeSchema, jobID, state)
 			}
-			if env.RequestID == "" || !env.Deduplicated || !env.SubmissionDeduplicated {
+			if env.RequestID == "" || !env.Deduplicated {
 				t.Fatalf("launch request/dedup fields=%#v, want request id and true dedup", env)
 			}
 			if len(fake.results) != 0 || len(fake.statuses) != 0 {

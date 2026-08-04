@@ -1,4 +1,8 @@
+//go:build integration
+
 package main
+
+// Run with: go test -tags=integration ./cmd/delegate
 
 import (
 	"bytes"
@@ -21,7 +25,7 @@ func TestAgentbusV06BinaryIntegrationSmoke(t *testing.T) {
 	agentbusPath, source := agentbusV06SmokeBinary(t)
 	base, err := os.MkdirTemp("/tmp", "delegate-agentbus-smoke-")
 	if err != nil {
-		t.Skipf("create short smoke temp dir: %v", err)
+		t.Fatalf("create short smoke temp dir: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(base) })
 
@@ -130,13 +134,13 @@ func agentbusV06SmokeBinary(t *testing.T) (string, string) {
 		}
 	}
 	if repo == "" {
-		t.Skip("agentbus v0.6.0 source unavailable: set DELEGATE_AGENTBUS_REPO to an agentbus checkout")
+		t.Fatal("agentbus v0.6.0 source unavailable: set DELEGATE_AGENTBUS_REPO to an agentbus checkout")
 	}
 	if _, err := os.Stat(filepath.Join(repo, "go.mod")); err != nil {
-		t.Skipf("agentbus v0.6.0 source unavailable at %s: %v", repo, err)
+		t.Fatalf("agentbus v0.6.0 source unavailable at %s: %v", repo, err)
 	}
 	if out, err := exec.Command("git", "-C", repo, "rev-parse", "--verify", "v0.6.0^{commit}").CombinedOutput(); err != nil {
-		t.Skipf("agentbus v0.6.0 tag unavailable at %s: %v: %s", repo, err, strings.TrimSpace(string(out)))
+		t.Fatalf("agentbus v0.6.0 tag unavailable at %s: %v: %s", repo, err, strings.TrimSpace(string(out)))
 	}
 	base := t.TempDir()
 	src := filepath.Join(base, "src")
@@ -145,18 +149,18 @@ func agentbusV06SmokeBinary(t *testing.T) (string, string) {
 	}
 	archive := filepath.Join(base, "agentbus-v0.6.0.tar")
 	if out, err := exec.Command("git", "-C", repo, "archive", "--format=tar", "-o", archive, "v0.6.0").CombinedOutput(); err != nil {
-		t.Skipf("archive agentbus v0.6.0: %v: %s", err, strings.TrimSpace(string(out)))
+		t.Fatalf("archive agentbus v0.6.0: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	if out, err := exec.Command("tar", "-xf", archive, "-C", src).CombinedOutput(); err != nil {
-		t.Skipf("extract agentbus v0.6.0 archive: %v: %s", err, strings.TrimSpace(string(out)))
+		t.Fatalf("extract agentbus v0.6.0 archive: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	rawVersion, err := os.ReadFile(filepath.Join(src, "VERSION"))
 	if err != nil {
-		t.Skipf("read agentbus v0.6.0 VERSION: %v", err)
+		t.Fatalf("read agentbus v0.6.0 VERSION: %v", err)
 	}
 	tagVersion := strings.TrimSpace(string(rawVersion))
 	if tagVersion != "0.6.0" {
-		t.Skipf("agentbus VERSION = %q, want 0.6.0", tagVersion)
+		t.Fatalf("agentbus VERSION = %q, want 0.6.0", tagVersion)
 	}
 	bin := filepath.Join(base, "agentbus")
 	build := exec.Command("go", "build", "-modcacherw", "-trimpath", "-ldflags", "-X main.version="+tagVersion, "-o", bin, "./cmd/agentbus")
@@ -170,11 +174,11 @@ func agentbusV06SmokeBinary(t *testing.T) (string, string) {
 		build.Env = append(build.Env, "GOMODCACHE="+filepath.Join(base, "gomodcache"))
 	}
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Skipf("build agentbus v0.6.0 binary: %v: %s", err, strings.TrimSpace(string(out)))
+		t.Fatalf("build agentbus v0.6.0 binary: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	version, err := smokeAgentbusVersion(bin)
 	if err != nil || version != "0.6.0" {
-		t.Skipf("built agentbus version = %q err=%v, want 0.6.0", version, err)
+		t.Fatalf("built agentbus version = %q err=%v, want 0.6.0", version, err)
 	}
 	return bin, "local v0.6.0 tag"
 }
@@ -243,7 +247,7 @@ func waitForSmokeAgentbusReady(t *testing.T, stateRoot string, done <-chan error
 		time.Sleep(50 * time.Millisecond)
 	}
 	if agentbusSmokeStartupBindDenied(stateRoot, stdout.String()+"\n"+stderr.String()) {
-		t.Skipf("agentbus smoke skipped because sandbox denied daemon startup unix-socket bind: last=%v stderr=%s", last, strings.TrimSpace(stderr.String()))
+		t.Fatalf("agentbus smoke failed because sandbox denied daemon startup unix-socket bind: last=%v stderr=%s", last, strings.TrimSpace(stderr.String()))
 	}
 	t.Fatalf("agentbus did not become ready: last=%v stdout=%s stderr=%s", last, stdout.String(), stderr.String())
 }
@@ -251,7 +255,7 @@ func waitForSmokeAgentbusReady(t *testing.T, stateRoot string, done <-chan error
 func agentbusSmokeServeFailOrSkip(t *testing.T, stateRoot string, err error, stdout, stderr string) {
 	t.Helper()
 	if agentbusSmokeStartupBindDenied(stateRoot, stdout+"\n"+stderr+"\n"+fmt.Sprint(err)) {
-		t.Skipf("agentbus smoke skipped because sandbox denied daemon startup unix-socket bind: %v stderr=%s", err, strings.TrimSpace(stderr))
+		t.Fatalf("agentbus smoke failed because sandbox denied daemon startup unix-socket bind: %v stderr=%s", err, strings.TrimSpace(stderr))
 	}
 	t.Fatalf("agentbus serve exited before readiness: %v stdout=%s stderr=%s", err, stdout, stderr)
 }

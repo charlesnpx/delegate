@@ -1,13 +1,8 @@
 package main
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
-	"sort"
 	"time"
 
 	"github.com/charlesnpx/agentbus/engine"
@@ -28,17 +23,15 @@ const (
 
 // LaunchEnvelope is the schema returned when delegate has launched a job.
 type LaunchEnvelope struct {
-	Schema                 int                        `json:"schema"`
-	RequestID              string                     `json:"request_id,omitempty"`
-	JobID                  string                     `json:"job_id"`
-	Status                 string                     `json:"status"`
-	Deduplicated           bool                       `json:"deduplicated"`
-	SubmissionDeduplicated bool                       `json:"submission_deduplicated"`
-	Model                  config.DimensionResolution `json:"model"`
-	Effort                 config.DimensionResolution `json:"effort"`
-	ResultSHA256           *string                    `json:"result_sha256"`
-	Origin                 *envelopeOrigin            `json:"origin,omitempty"`
-	SHA256                 string                     `json:"sha256"`
+	Schema       int                        `json:"schema"`
+	RequestID    string                     `json:"request_id,omitempty"`
+	JobID        string                     `json:"job_id"`
+	Status       string                     `json:"status"`
+	Deduplicated bool                       `json:"deduplicated"`
+	Model        config.DimensionResolution `json:"model"`
+	Effort       config.DimensionResolution `json:"effort"`
+	ResultSHA256 *string                    `json:"result_sha256"`
+	Origin       *envelopeOrigin            `json:"origin,omitempty"`
 }
 
 // TerminalEnvelope is the schema returned by delegate result and task --wait.
@@ -48,7 +41,6 @@ type TerminalEnvelope struct {
 	JobID                          string                     `json:"job_id"`
 	Status                         engine.JobState            `json:"status"`
 	Deduplicated                   bool                       `json:"deduplicated"`
-	SubmissionDeduplicated         bool                       `json:"submission_deduplicated"`
 	CleanupDisposition             string                     `json:"cleanup_disposition,omitempty"`
 	LateFinalization               bool                       `json:"late_finalization,omitempty"`
 	AgentbusWarnings               []string                   `json:"agentbus_warnings,omitempty"`
@@ -67,7 +59,6 @@ type TerminalEnvelope struct {
 	SubmittedAt                    *time.Time                 `json:"submitted_at,omitempty"`
 	UpdatedAt                      *time.Time                 `json:"updated_at,omitempty"`
 	Origin                         *envelopeOrigin            `json:"origin,omitempty"`
-	SHA256                         string                     `json:"sha256"`
 }
 
 type terminalEnvelopeOptions struct {
@@ -101,7 +92,6 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		JobID                          string                     `json:"job_id"`
 		Status                         engine.JobState            `json:"status"`
 		Deduplicated                   bool                       `json:"deduplicated"`
-		SubmissionDeduplicated         bool                       `json:"submission_deduplicated"`
 		CleanupDisposition             string                     `json:"cleanup_disposition,omitempty"`
 		LateFinalization               bool                       `json:"late_finalization,omitempty"`
 		AgentbusWarnings               []string                   `json:"agentbus_warnings,omitempty"`
@@ -120,7 +110,6 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		SubmittedAt                    *time.Time                 `json:"submitted_at,omitempty"`
 		UpdatedAt                      *time.Time                 `json:"updated_at,omitempty"`
 		Origin                         *envelopeOrigin            `json:"origin,omitempty"`
-		SHA256                         string                     `json:"sha256"`
 	}
 	return json.Marshal(terminalEnvelopeJSON{
 		Schema:                         e.Schema,
@@ -128,7 +117,6 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		JobID:                          e.JobID,
 		Status:                         e.Status,
 		Deduplicated:                   e.Deduplicated,
-		SubmissionDeduplicated:         e.SubmissionDeduplicated,
 		CleanupDisposition:             e.CleanupDisposition,
 		LateFinalization:               e.LateFinalization,
 		AgentbusWarnings:               e.AgentbusWarnings,
@@ -147,7 +135,6 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		SubmittedAt:                    e.SubmittedAt,
 		UpdatedAt:                      e.UpdatedAt,
 		Origin:                         e.Origin,
-		SHA256:                         e.SHA256,
 	})
 }
 
@@ -186,21 +173,15 @@ func newLaunchEnvelopeWithOrigin(jobID string, state engine.JobState, origin env
 func newLaunchEnvelopeWithOptions(jobID string, state engine.JobState, option launchEnvelopeOptions) (LaunchEnvelope, error) {
 	modelEffort := normalizedModelEffort(option.ModelEffort)
 	env := LaunchEnvelope{
-		Schema:                 envelopeSchema,
-		RequestID:              option.RequestID,
-		JobID:                  jobID,
-		Status:                 launchStatus(state),
-		Deduplicated:           option.Deduplicated,
-		SubmissionDeduplicated: option.Deduplicated,
-		Model:                  modelEffort.Model,
-		Effort:                 modelEffort.Effort,
-		Origin:                 envelopeOriginPointer(option.Origin),
+		Schema:       envelopeSchema,
+		RequestID:    option.RequestID,
+		JobID:        jobID,
+		Status:       launchStatus(state),
+		Deduplicated: option.Deduplicated,
+		Model:        modelEffort.Model,
+		Effort:       modelEffort.Effort,
+		Origin:       envelopeOriginPointer(option.Origin),
 	}
-	sum, err := envelopeSHA256(env)
-	if err != nil {
-		return LaunchEnvelope{}, err
-	}
-	env.SHA256 = sum
 	return env, nil
 }
 
@@ -217,7 +198,6 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 		JobID:                          jobID,
 		Status:                         state,
 		Deduplicated:                   option.Deduplicated,
-		SubmissionDeduplicated:         option.Deduplicated,
 		CleanupDisposition:             option.CleanupDisposition,
 		LateFinalization:               option.LateFinalization,
 		AgentbusWarnings:               append([]string(nil), option.AgentbusWarnings...),
@@ -240,11 +220,6 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 	} else {
 		env.ResultUnavailableReason = resultUnavailableReason(state)
 	}
-	sum, err := envelopeSHA256(env)
-	if err != nil {
-		return TerminalEnvelope{}, err
-	}
-	env.SHA256 = sum
 	return env, nil
 }
 
@@ -316,116 +291,6 @@ func normalizeContractStamp(stamp engine.ContractStamp) engine.ContractStamp {
 		stamp.Missing = []string{}
 	}
 	return stamp
-}
-
-func envelopeSHA256(v any) (string, error) {
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return "", err
-	}
-	var decoded any
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	if err := dec.Decode(&decoded); err != nil {
-		return "", err
-	}
-	obj, ok := decoded.(map[string]any)
-	if !ok {
-		return "", fmt.Errorf("envelope root must be an object")
-	}
-	delete(obj, "sha256")
-	canonical, err := canonicalJSON(obj)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(canonical)
-	return hex.EncodeToString(sum[:]), nil
-}
-
-func canonicalJSON(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := writeCanonicalJSON(&buf, v); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func writeCanonicalJSON(buf *bytes.Buffer, v any) error {
-	switch x := v.(type) {
-	case nil:
-		buf.WriteString("null")
-	case bool:
-		if x {
-			buf.WriteString("true")
-		} else {
-			buf.WriteString("false")
-		}
-	case string:
-		raw, err := json.Marshal(x)
-		if err != nil {
-			return err
-		}
-		buf.Write(raw)
-	case json.Number:
-		if _, err := x.Int64(); err != nil {
-			if _, floatErr := x.Float64(); floatErr != nil {
-				return fmt.Errorf("invalid JSON number %q", x)
-			}
-		}
-		buf.WriteString(x.String())
-	case float64:
-		raw, err := json.Marshal(x)
-		if err != nil {
-			return err
-		}
-		buf.Write(raw)
-	case []any:
-		buf.WriteByte('[')
-		for i, item := range x {
-			if i > 0 {
-				buf.WriteByte(',')
-			}
-			if err := writeCanonicalJSON(buf, item); err != nil {
-				return err
-			}
-		}
-		buf.WriteByte(']')
-	case map[string]any:
-		keys := make([]string, 0, len(x))
-		for key := range x {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		buf.WriteByte('{')
-		for i, key := range keys {
-			if i > 0 {
-				buf.WriteByte(',')
-			}
-			rawKey, err := json.Marshal(key)
-			if err != nil {
-				return err
-			}
-			buf.Write(rawKey)
-			buf.WriteByte(':')
-			if err := writeCanonicalJSON(buf, x[key]); err != nil {
-				return err
-			}
-		}
-		buf.WriteByte('}')
-	default:
-		raw, err := json.Marshal(x)
-		if err != nil {
-			return err
-		}
-		var decoded any
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.UseNumber()
-		if err := dec.Decode(&decoded); err != nil {
-			return err
-		}
-		return writeCanonicalJSON(buf, decoded)
-	}
-	return nil
 }
 
 func writeJSONLine(w io.Writer, v any) error {
