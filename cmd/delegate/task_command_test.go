@@ -231,8 +231,16 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	if !result.Agentbus.Found || result.Agentbus.Path != "/tmp/agentbus" {
 		t.Fatalf("agentbus discovery = %#v, want found /tmp/agentbus", result.Agentbus)
 	}
-	if !result.Agentbus.CapabilitiesOK || !result.Agentbus.Capabilities["policy.shape"] {
-		t.Fatalf("agentbus capabilities = %#v, want required capabilities passing", result.Agentbus)
+	// Setup must be ready against a post-relocation agentbus that advertises
+	// policy.shape=false: delegate owns shape validation, so that capability is not
+	// required and must not appear in the required/missing sets.
+	if !result.Agentbus.CapabilitiesOK || result.Agentbus.Capabilities["policy.shape"] {
+		t.Fatalf("agentbus capabilities = %#v, want passing with policy.shape not required", result.Agentbus)
+	}
+	for _, capName := range append(result.Agentbus.Required, result.Agentbus.Missing...) {
+		if capName == "policy.shape" {
+			t.Fatalf("policy.shape must not be required/missing; required=%#v missing=%#v", result.Agentbus.Required, result.Agentbus.Missing)
+		}
 	}
 	if !result.Agentbus.Capabilities["models.reported"] || result.Config.Path == "" || !result.Config.Overridable {
 		t.Fatalf("setup config/model capability = %#v / %#v", result.Config, result.Agentbus.Capabilities)
@@ -1042,11 +1050,14 @@ func helloWithCapabilities() client.HelloResult {
 		Backends:        []string{"codex", "claude"},
 		Capabilities: map[string]bool{
 			"admission.strictContainment": true,
-			"policy.shape":                true,
-			"policy.jsonSchema":           true,
-			"policy.named":                true,
-			"policy.retry":                true,
-			"models.reported":             true,
+			// Mirror the post-relocation agentbus, which advertises policy.shape as
+			// false (delegate owns shape validation). The default report path must
+			// still submit successfully against this.
+			"policy.shape":      false,
+			"policy.jsonSchema": true,
+			"policy.named":      true,
+			"policy.retry":      true,
+			"models.reported":   true,
 		},
 	}
 }
