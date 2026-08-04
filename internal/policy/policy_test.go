@@ -23,10 +23,10 @@ func TestResolveTurnPolicyFlagMatrix(t *testing.T) {
 		wantNil   bool
 		wantRetry bool
 	}{
-		{name: "read_only", flags: Flags{}, wantRetry: true},
-		{name: "write", flags: Flags{Write: true}, wantRetry: true},
-		{name: "strict", flags: Flags{StrictContract: true}, wantRetry: true},
-		{name: "write_strict", flags: Flags{Write: true, StrictContract: true}, wantRetry: true},
+		{name: "read_only", flags: Flags{}},
+		{name: "write", flags: Flags{Write: true}},
+		{name: "strict", flags: Flags{StrictContract: true}},
+		{name: "write_strict", flags: Flags{Write: true, StrictContract: true}},
 		{name: "no_contract", flags: Flags{NoContract: true}, wantNil: true},
 		{name: "write_no_contract", flags: Flags{Write: true, NoContract: true}, wantNil: true},
 		{name: "strict_no_contract", flags: Flags{StrictContract: true, NoContract: true}, wantNil: true},
@@ -324,6 +324,52 @@ func TestAppendReportFormatBlockPlacesGeneratedBlockLast(t *testing.T) {
 	}
 	if unchanged != "json task" {
 		t.Fatalf("JSON Schema prompt = %q, want unchanged", unchanged)
+	}
+}
+
+func TestValidateDelegateReportShapeMinimal(t *testing.T) {
+	spec, err := DelegateReportSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := canonicalReportFromSpec(t, spec)
+	firstSection := spec.Shape.RequiredSections[0]
+	for _, tc := range []struct {
+		name           string
+		text           string
+		wantCompliant  bool
+		wantViolations []string
+	}{
+		{
+			name:          "compliant",
+			text:          report,
+			wantCompliant: true,
+		},
+		{
+			name:           "wrong_first_line",
+			text:           strings.Replace(report, spec.Shape.FirstLineEnum[0], "done", 1),
+			wantViolations: []string{"firstLineEnum"},
+		},
+		{
+			name:           "missing_section",
+			text:           strings.Replace(report, "# "+firstSection, "# Different", 1),
+			wantViolations: []string{"section:" + firstSection},
+		},
+		{
+			name:           "bold_section_rejected",
+			text:           strings.Replace(report, "# "+firstSection, "**"+firstSection+"**", 1),
+			wantViolations: []string{"section:" + firstSection},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ValidateDelegateReportShape(tc.text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Compliant != tc.wantCompliant || !reflect.DeepEqual(got.Violations, tc.wantViolations) {
+				t.Fatalf("ValidateDelegateReportShape() = %#v, want compliant=%t violations=%#v", got, tc.wantCompliant, tc.wantViolations)
+			}
+		})
 	}
 }
 

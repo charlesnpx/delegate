@@ -33,45 +33,46 @@ func (f *optionalStringFlag) Set(value string) error {
 }
 
 type taskOptions struct {
-	Backend           string
-	Wait              bool
-	JSON              bool
-	CWD               string
-	Model             string
-	ModelSet          bool
-	Effort            string
-	EffortSet         bool
-	Timeout           time.Duration
-	TimeoutSet        bool
-	Write             bool
-	WriteSet          bool
-	StrictContract    bool
-	StrictContractSet bool
-	NoContract        bool
-	NoContractSet     bool
-	Origin            string
-	ParentClient      optionalStringFlag
-	ParentSession     optionalStringFlag
-	AuditOrigin       envelopeOrigin
-	Prompt            optionalStringFlag
-	PromptFile        string
-	PromptStdin       bool
-	HandoffPromptFile string
-	OutputSchema      optionalStringFlag
-	OutputSchemaFile  optionalStringFlag
-	OutputSchemaStdin bool
-	Positional        []string
-	RecoverRequest    string
-	StateDir          string
-	Kind              string
-	ReviewWorkspace   string
-	ModelEffort       config.ModelEffortResolution
-	AgentbusStateRoot string
-	RequestID         string
-	WorkspaceKey      string
-	LogicalWorkspace  string
-	SubmissionState   engine.JobState
-	Deduplicated      bool
+	Backend            string
+	Wait               bool
+	JSON               bool
+	CWD                string
+	Model              string
+	ModelSet           bool
+	Effort             string
+	EffortSet          bool
+	Timeout            time.Duration
+	TimeoutSet         bool
+	Write              bool
+	WriteSet           bool
+	StrictContract     bool
+	StrictContractSet  bool
+	NoContract         bool
+	NoContractSet      bool
+	ReportCorrectionOf string
+	Origin             string
+	ParentClient       optionalStringFlag
+	ParentSession      optionalStringFlag
+	AuditOrigin        envelopeOrigin
+	Prompt             optionalStringFlag
+	PromptFile         string
+	PromptStdin        bool
+	HandoffPromptFile  string
+	OutputSchema       optionalStringFlag
+	OutputSchemaFile   optionalStringFlag
+	OutputSchemaStdin  bool
+	Positional         []string
+	RecoverRequest     string
+	StateDir           string
+	Kind               string
+	ReviewWorkspace    string
+	ModelEffort        config.ModelEffortResolution
+	AgentbusStateRoot  string
+	RequestID          string
+	WorkspaceKey       string
+	LogicalWorkspace   string
+	SubmissionState    engine.JobState
+	Deduplicated       bool
 }
 
 type taskRunResult struct {
@@ -688,24 +689,25 @@ func persistDelegateJobInput(opts taskOptions, resolved handoff.ResolvedPrompt, 
 func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) jobMetadata {
 	modelEffort := normalizedModelEffort(taskModelEffort(opts))
 	return jobMetadata{
-		Schema:            jobMetadataSchema,
-		JobID:             jobID,
-		RequestID:         opts.RequestID,
-		WorkspaceKey:      opts.WorkspaceKey,
-		Kind:              effectiveTaskKind(opts),
-		Backend:           opts.Backend,
-		CWD:               opts.CWD,
-		ContractKind:      contractKind,
-		NoContract:        opts.NoContract,
-		JobInputPath:      input.Path,
-		ReviewWorkspace:   opts.ReviewWorkspace,
-		AgentbusStateRoot: opts.AgentbusStateRoot,
-		SubmissionState:   opts.SubmissionState,
-		State:             opts.SubmissionState,
-		Deduplicated:      opts.Deduplicated,
-		Model:             modelEffort.Model,
-		Effort:            modelEffort.Effort,
-		Origin:            envelopeOriginPointer(taskEnvelopeOrigin(opts)),
+		Schema:             jobMetadataSchema,
+		JobID:              jobID,
+		RequestID:          opts.RequestID,
+		WorkspaceKey:       opts.WorkspaceKey,
+		Kind:               effectiveTaskKind(opts),
+		Backend:            opts.Backend,
+		CWD:                opts.CWD,
+		ContractKind:       contractKind,
+		NoContract:         opts.NoContract,
+		ReportCorrectionOf: opts.ReportCorrectionOf,
+		JobInputPath:       input.Path,
+		ReviewWorkspace:    opts.ReviewWorkspace,
+		AgentbusStateRoot:  opts.AgentbusStateRoot,
+		SubmissionState:    opts.SubmissionState,
+		State:              opts.SubmissionState,
+		Deduplicated:       opts.Deduplicated,
+		Model:              modelEffort.Model,
+		Effort:             modelEffort.Effort,
+		Origin:             envelopeOriginPointer(taskEnvelopeOrigin(opts)),
 	}
 }
 
@@ -763,7 +765,16 @@ func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
-		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, jobResult.result, jobResult.envelopeOptions(terminalOptions))
+		corrected, nextClient, nextHello, correctionWarnings, err := maybeCorrectDelegateReport(ctx, c, hello, opts.StateDir, jobResult, cleanupWarnings)
+		c = nextClient
+		hello = nextHello
+		warnings = append(warnings, correctionWarnings...)
+		if err != nil {
+			return taskRunResult{Submitted: true, Warnings: warnings}, err
+		}
+		envelopeOptions := correctionEnvelopeOptions(submitted.JobID, corrected.result.JobID, terminalOptions)
+		envelopeOptions.ModelsReportedCapable = hello.Capabilities["models.reported"]
+		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, corrected.result, corrected.envelopeOptions(envelopeOptions))
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
@@ -774,7 +785,16 @@ func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
-		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, jobResult.result, jobResult.envelopeOptions(terminalOptions))
+		corrected, nextClient, nextHello, correctionWarnings, err := maybeCorrectDelegateReport(ctx, c, hello, opts.StateDir, jobResult, cleanupWarnings)
+		c = nextClient
+		hello = nextHello
+		warnings = append(warnings, correctionWarnings...)
+		if err != nil {
+			return taskRunResult{Submitted: true, Warnings: warnings}, err
+		}
+		envelopeOptions := correctionEnvelopeOptions(submitted.JobID, corrected.result.JobID, terminalOptions)
+		envelopeOptions.ModelsReportedCapable = hello.Capabilities["models.reported"]
+		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, corrected.result, corrected.envelopeOptions(envelopeOptions))
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
@@ -785,6 +805,25 @@ func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
 	return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
+}
+
+func correctionEnvelopeOptions(originalJobID, finalJobID string, options terminalEnvelopeOptions) terminalEnvelopeOptions {
+	if finalJobID == "" || finalJobID == originalJobID {
+		return options
+	}
+	options.RequestID = ""
+	options.Deduplicated = false
+	options.DeduplicatedSet = false
+	return options
+}
+
+func writeWarnings(stderr io.Writer, warnings []string) error {
+	for _, warning := range warnings {
+		if _, err := fmt.Fprintf(stderr, "warning: %s\n", warning); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func newLaunchEnvelopeForTask(jobID string, state engine.JobState, opts taskOptions) (LaunchEnvelope, error) {
@@ -854,6 +893,12 @@ func mergeAcknowledgedJobMetadata(existing, next jobMetadata) jobMetadata {
 	if next.NoContract {
 		merged.NoContract = true
 	}
+	if merged.ReportCorrectionOf == "" {
+		merged.ReportCorrectionOf = next.ReportCorrectionOf
+	}
+	if merged.ReportCorrectionJobID == "" {
+		merged.ReportCorrectionJobID = next.ReportCorrectionJobID
+	}
 	if merged.AgentbusStateRoot == "" {
 		merged.AgentbusStateRoot = next.AgentbusStateRoot
 	}
@@ -896,6 +941,10 @@ func taskTags(opts taskOptions) map[string]string {
 	}
 	if origin.Depth != "" {
 		tags[delegateDepthTag] = origin.Depth
+	}
+	if opts.ReportCorrectionOf != "" {
+		tags[reportCorrectionTag] = "true"
+		tags[reportCorrectionOfTag] = opts.ReportCorrectionOf
 	}
 	return tags
 }

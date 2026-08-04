@@ -54,7 +54,7 @@ func TestLocalReconstructedContractStampFromBody(t *testing.T) {
 		Result: &engine.ResultInfo{Text: reconstructCompliantReport, Bytes: int64(len(reconstructCompliantReport))},
 	}
 
-	stamp, ok := localReconstructedContractStamp(res, contractKindShape, true)
+	stamp, ok := localReconstructedContractStamp(res, contractKindShape, true, reportValidationAttempt{attempts: 1})
 	if !ok {
 		t.Fatal("expected reconstruction from a present shape body")
 	}
@@ -67,14 +67,14 @@ func TestLocalReconstructedContractStampFromBody(t *testing.T) {
 	noncompliant := strings.Replace(reconstructCompliantReport, lastSection+":", "Scope omitted:", 1)
 	res.Result.Text = noncompliant
 	res.Result.Bytes = int64(len(noncompliant))
-	stamp, ok = localReconstructedContractStamp(res, contractKindShape, true)
+	stamp, ok = localReconstructedContractStamp(res, contractKindShape, true, reportValidationAttempt{attempts: 1})
 	if !ok || stamp.Status != engine.ContractNoncompliant {
 		t.Fatalf("noncompliant reconstruction = (%v, %q), want noncompliant (never result_unavailable with a body)", ok, stamp.Status)
 	}
 
 	// Without metadata provenance the contract kind is unknown; reconstruction
 	// must be refused rather than validate against the wrong (default shape) spec.
-	if _, ok := localReconstructedContractStamp(res, contractKindShape, false); ok {
+	if _, ok := localReconstructedContractStamp(res, contractKindShape, false, reportValidationAttempt{attempts: 1}); ok {
 		t.Fatal("reconstruction without positive shape provenance must be refused")
 	}
 }

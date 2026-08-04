@@ -98,10 +98,6 @@ func ResolveTurnPolicy(flags Flags) (*engine.TurnPolicy, error) {
 	policy := &engine.TurnPolicy{
 		Prologue: DelegateContractDigest(),
 		Contract: &spec,
-		Retry: &engine.RetryPolicy{
-			Max:      1,
-			Template: CorrectiveRetryTemplate,
-		},
 	}
 	return policy, nil
 }

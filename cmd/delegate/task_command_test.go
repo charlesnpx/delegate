@@ -231,7 +231,7 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	if !result.Agentbus.Found || result.Agentbus.Path != "/tmp/agentbus" {
 		t.Fatalf("agentbus discovery = %#v, want found /tmp/agentbus", result.Agentbus)
 	}
-	if !result.Agentbus.CapabilitiesOK || !result.Agentbus.Capabilities["policy.shape"] || !result.Agentbus.Capabilities["policy.retry"] {
+	if !result.Agentbus.CapabilitiesOK || !result.Agentbus.Capabilities["policy.shape"] {
 		t.Fatalf("agentbus capabilities = %#v, want required capabilities passing", result.Agentbus)
 	}
 	if !result.Agentbus.Capabilities["models.reported"] || result.Config.Path == "" || !result.Config.Overridable {
@@ -268,9 +268,9 @@ func TestTaskPolicyTierWiring(t *testing.T) {
 		wantRetry      bool
 		wantJSONSchema bool
 	}{
-		{name: "default", wantRetry: true},
-		{name: "write", flags: []string{"--write"}, wantRetry: true},
-		{name: "strict", flags: []string{"--strict-contract"}, wantRetry: true},
+		{name: "default"},
+		{name: "write", flags: []string{"--write"}},
+		{name: "strict", flags: []string{"--strict-contract"}},
 		{name: "no_contract", flags: []string{"--no-contract"}, wantNil: true},
 		{name: "json_schema", flags: []string{"--output-schema", schema}, wantRetry: true, wantJSONSchema: true},
 		{name: "json_schema_strict", flags: []string{"--output-schema", schema, "--strict-contract"}, wantRetry: true, wantJSONSchema: true},
@@ -483,6 +483,103 @@ func TestTaskOutputSchemaFileAndStdinReachPolicyAndMetadata(t *testing.T) {
 			}
 			if meta.ContractKind != contractKindJSONSchema {
 				t.Fatalf("metadata contractKind = %q, want %q", meta.ContractKind, contractKindJSONSchema)
+			}
+		})
+	}
+}
+
+func TestTaskWaitDelegateReportValidationAndCorrection(t *testing.T) {
+	goodReport := compliantReport()
+	badReport := malformedDelegateReport()
+	for _, tc := range []struct {
+		name         string
+		jobIDs       []string
+		results      map[string]client.JobResult
+		wantJobID    string
+		wantSubmits  int
+		wantStatus   engine.ContractStatus
+		wantRetry    bool
+		wantAttempts int
+	}{
+		{
+			name:   "compliant_no_resubmit",
+			jobIDs: []string{"job_report_1"},
+			results: map[string]client.JobResult{
+				"job_report_1": reportJobResult("job_report_1", goodReport),
+			},
+			wantJobID:    "job_report_1",
+			wantSubmits:  1,
+			wantStatus:   engine.ContractCompliant,
+			wantAttempts: 1,
+		},
+		{
+			name:   "noncompliant_one_report_only_resubmit",
+			jobIDs: []string{"job_report_1", "job_report_2"},
+			results: map[string]client.JobResult{
+				"job_report_1": reportJobResult("job_report_1", badReport),
+				"job_report_2": reportJobResult("job_report_2", goodReport),
+			},
+			wantJobID:    "job_report_2",
+			wantSubmits:  2,
+			wantStatus:   engine.ContractRetried,
+			wantRetry:    true,
+			wantAttempts: 2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &reportCorrectionRoundTripClient{hello: helloWithCapabilities(), jobIDs: tc.jobIDs, resultsByJobID: tc.results}
+			restore := stubAgentbusClientGlobals(t, fake)
+			defer restore()
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--wait", "--json"}, nil, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+			}
+			if len(fake.submits) != tc.wantSubmits {
+				t.Fatalf("JobSubmit calls = %d, want %d", len(fake.submits), tc.wantSubmits)
+			}
+			for i, submit := range fake.submits {
+				if submit.TaskSpec.Policy == nil || submit.TaskSpec.Policy.Contract == nil || submit.TaskSpec.Policy.Contract.Shape == nil {
+					t.Fatalf("submit %d policy = %#v, want delegate-report shape policy", i, submit.TaskSpec.Policy)
+				}
+				if submit.TaskSpec.Policy.Retry != nil {
+					t.Fatalf("submit %d retry = %#v, want nil delegate-report retry", i, submit.TaskSpec.Policy.Retry)
+				}
+			}
+
+			var env TerminalEnvelope
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+				t.Fatalf("terminal JSON invalid: %v; raw=%q", err, stdout.String())
+			}
+			if env.JobID != tc.wantJobID || env.Status != engine.StateCompleted {
+				t.Fatalf("terminal envelope job/status = %s/%s, want %s/%s", env.JobID, env.Status, tc.wantJobID, engine.StateCompleted)
+			}
+			if env.Contract.Status != tc.wantStatus || env.Contract.RetryUsed != tc.wantRetry || env.Contract.Attempts != tc.wantAttempts {
+				t.Fatalf("contract = %#v, want status=%s retry=%t attempts=%d", env.Contract, tc.wantStatus, tc.wantRetry, tc.wantAttempts)
+			}
+
+			if tc.wantSubmits == 2 {
+				correction := fake.submits[1]
+				if correction.TaskSpec.Write {
+					t.Fatal("correction submit Write=true, want read-only")
+				}
+				prompt := correction.TaskSpec.Prompt
+				for _, want := range []string{
+					"This is a report-format correction",
+					badReport,
+					"line 1 must be exactly one of: complete, partial, blocked",
+					"add a section header `# Criteria scored` or `Criteria scored:`",
+					"Emit ONLY the corrected report. Make NO other changes. Stay read-only.",
+				} {
+					if !strings.Contains(prompt, want) {
+						t.Fatalf("correction prompt missing %q:\n%s", want, prompt)
+					}
+				}
+				if correction.TaskSpec.Tags[reportCorrectionTag] != "true" || correction.TaskSpec.Tags[reportCorrectionOfTag] != "job_report_1" {
+					t.Fatalf("correction tags = %#v, want report correction provenance", correction.TaskSpec.Tags)
+				}
 			}
 		})
 	}
@@ -879,6 +976,55 @@ type fakeAgentbusClient struct {
 	cancelErr    error
 }
 
+type reportCorrectionRoundTripClient struct {
+	hello          client.HelloResult
+	jobIDs         []string
+	resultsByJobID map[string]client.JobResult
+	submits        []client.JobSubmitParams
+	statuses       []client.JobStatusParams
+	results        []client.JobResultParams
+}
+
+func (f *reportCorrectionRoundTripClient) Close() error { return nil }
+
+func (f *reportCorrectionRoundTripClient) HelloResult() client.HelloResult { return f.hello }
+
+func (f *reportCorrectionRoundTripClient) JobSubmit(_ context.Context, params client.JobSubmitParams) (client.JobSubmitResult, error) {
+	f.submits = append(f.submits, params)
+	if len(f.submits) > len(f.jobIDs) {
+		return client.JobSubmitResult{}, fmt.Errorf("unexpected JobSubmit call %d", len(f.submits))
+	}
+	return client.JobSubmitResult{JobID: f.jobIDs[len(f.submits)-1], State: engine.StateQueued}, nil
+}
+
+func (f *reportCorrectionRoundTripClient) JobStatus(_ context.Context, params client.JobStatusParams) (client.JobStatusResult, error) {
+	f.statuses = append(f.statuses, params)
+	result, ok := f.resultsByJobID[params.JobID]
+	if !ok {
+		return client.JobStatusResult{}, fmt.Errorf("unexpected JobStatus for %s", params.JobID)
+	}
+	return client.JobStatusResult{Jobs: []client.JobStatus{{
+		JobID:              result.JobID,
+		SessionID:          result.SessionID,
+		State:              result.State,
+		CleanupDisposition: result.CleanupDisposition,
+		ModelReported:      result.ModelReported,
+	}}}, nil
+}
+
+func (f *reportCorrectionRoundTripClient) JobResult(_ context.Context, params client.JobResultParams) (client.JobResult, error) {
+	f.results = append(f.results, params)
+	result, ok := f.resultsByJobID[params.JobID]
+	if !ok {
+		return client.JobResult{}, fmt.Errorf("unexpected JobResult for %s", params.JobID)
+	}
+	return result, nil
+}
+
+func (f *reportCorrectionRoundTripClient) JobCancel(context.Context, client.JobCancelParams) (client.JobCancelResult, error) {
+	return client.JobCancelResult{}, errors.New("unexpected JobCancel")
+}
+
 func (f *fakeAgentbusClient) Close() error { return nil }
 
 func (f *fakeAgentbusClient) HelloResult() client.HelloResult { return f.hello }
@@ -957,6 +1103,25 @@ func compliantReport() string {
 		lines = append(lines, section+":", "- observed: "+strings.ToLower(section)+" fixture.", "")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func malformedDelegateReport() string {
+	report := compliantReport()
+	report = strings.Replace(report, "complete", "done", 1)
+	return strings.Replace(report, "Criteria scored:", "**Criteria scored**:", 1)
+}
+
+func reportJobResult(jobID, report string) client.JobResult {
+	return client.JobResult{
+		JobID:     jobID,
+		SessionID: "session_" + jobID,
+		State:     engine.StateCompleted,
+		Result: &engine.ResultInfo{
+			SHA256: rawSHA256(report),
+			Bytes:  int64(len(report)),
+			Text:   report,
+		},
+	}
 }
 
 func compliantContractStamp(t *testing.T, text string) engine.ContractStamp {
