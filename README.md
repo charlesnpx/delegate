@@ -134,7 +134,9 @@ Launch envelopes are returned by a non-waiting task:
 }
 ```
 
-Terminal envelopes are returned by `delegate result --job <id>`, terminal `status`, `cancel`, and `delegate task --wait`:
+Terminal envelopes are returned by `delegate result --job <id>`, `cancel`, and `delegate task --wait`. `delegate status --json` is the exception: it always returns a `JobStatusResult` (`{"jobs": [...]}`), for both running and terminal jobs, so a poller sees one stable shape across a job's lifetime. Running admission jobs also carry `startedAt`, `heartbeatAt`, and `updatedAt` liveness fields (`heartbeatAt` is the last provider-event time, an activity signal, not a process lease); these are absent once the job is terminal.
+
+The terminal envelope shape:
 
 ```json
 {

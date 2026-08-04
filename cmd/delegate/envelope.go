@@ -279,7 +279,13 @@ func modelReportedUnavailableReason(capable bool, modelReported string) string {
 	if !capable {
 		return "agentbus_capability_missing"
 	}
-	return "backend_did_not_report"
+	// Non-causal on purpose. A capable backend with an empty model can mean the
+	// backend genuinely never emitted its model (e.g. codex app-server) OR that
+	// agentbus captured it but lost the runtime-only record before this result
+	// was read (idle shutdown, restart, or FIFO eviction of reportedModels).
+	// Delegate cannot distinguish those from the result alone, so it must not
+	// assert the causal claim "backend_did_not_report" here.
+	return "model_report_unavailable"
 }
 
 func launchStatus(state engine.JobState) string {
