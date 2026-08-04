@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,12 +26,17 @@ type reportShape struct {
 }
 
 func parseReportShape(spec engine.ContractSpec) (reportShape, error) {
-	if len(spec.Shape) == 0 {
+	if len(spec.Shape) == 0 || bytes.Equal(bytes.TrimSpace(spec.Shape), []byte("null")) {
 		return reportShape{}, errors.New("shape validation requires a shape contract")
 	}
 	var shape reportShape
 	if err := json.Unmarshal(spec.Shape, &shape); err != nil {
 		return reportShape{}, fmt.Errorf("parse delegate report shape: %w", err)
+	}
+	// Fail closed: delegate is now the sole authoritative report validator, so a
+	// constraint-less shape (e.g. `{}`) must not silently pass every report.
+	if len(shape.FirstLineEnum) == 0 && len(shape.RequiredSections) == 0 {
+		return reportShape{}, errors.New("delegate report shape has no first-line or section constraints")
 	}
 	return shape, nil
 }

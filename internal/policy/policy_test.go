@@ -160,6 +160,18 @@ func equalContractSpec(got, want engine.ContractSpec) bool {
 		equalJSONRaw(got.Shape, want.Shape)
 }
 
+// TestValidateShapeFailsClosedOnEmptyShape locks in that delegate — now the sole
+// authoritative report validator — never treats a constraint-less/null/empty shape
+// as "everything compliant".
+func TestValidateShapeFailsClosedOnEmptyShape(t *testing.T) {
+	for _, raw := range []string{"null", "{}", `{"firstLineEnum":[],"requiredSections":[]}`} {
+		spec := engine.ContractSpec{Shape: json.RawMessage(raw)}
+		if got, err := ValidateShape("arbitrary malformed output", spec); err == nil {
+			t.Fatalf("ValidateShape(shape=%q) = %#v, nil error; want fail-closed error", raw, got)
+		}
+	}
+}
+
 // mustParseShape parses the opaque contract shape into delegate's local view.
 func mustParseShape(t *testing.T, spec engine.ContractSpec) reportShape {
 	t.Helper()
