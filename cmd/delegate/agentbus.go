@@ -236,7 +236,7 @@ func requiredCapabilitiesForPolicy(policy *engine.TurnPolicy) []string {
 }
 
 func setupRequiredCapabilities() []string {
-	return []string{"admission.strictContainment", "policy.shape", "policy.retry"}
+	return []string{"admission.strictContainment", "policy.shape"}
 }
 
 func missingCapabilities(hello client.HelloResult, required []string) []string {

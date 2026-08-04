@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -10,6 +12,31 @@ import (
 	"github.com/charlesnpx/agentbus/engine"
 	"github.com/charlesnpx/delegate/internal/policy"
 )
+
+// TestReportCorrectionResultUsableRequiresDigest locks in the round-2 fix: a
+// correction result is "usable" (allowed to replace the original) only when it
+// carries a present result digest, matching the terminal envelope's
+// authoritative-result criterion. Otherwise the envelope would emit
+// completed_without_result and suppress the original body SHA + cleanup.
+func TestReportCorrectionResultUsableRequiresDigest(t *testing.T) {
+	body := compliantReport()
+	sum := sha256.Sum256([]byte(body))
+	digest := hex.EncodeToString(sum[:])
+
+	noDigest := client.JobResult{JobID: "corr", State: engine.StateCompleted, Result: &engine.ResultInfo{Text: body, Bytes: int64(len(body))}}
+	if reportCorrectionResultUsable(noDigest) {
+		t.Fatal("correction without a result digest must not be usable (would suppress the original)")
+	}
+
+	withDigest := client.JobResult{JobID: "corr", State: engine.StateCompleted, Result: &engine.ResultInfo{Text: body, Bytes: int64(len(body)), SHA256: digest}}
+	if !reportCorrectionResultUsable(withDigest) {
+		t.Fatal("correction with a present matching digest should be usable")
+	}
+
+	if reportCorrectionResultUsable(client.JobResult{JobID: "corr", State: engine.StateCompleted}) {
+		t.Fatal("correction without a result must not be usable")
+	}
+}
 
 // TestRunStatusTerminalJobEmitsJobsShapeWithExitCode locks in ⑧: `delegate
 // status --job` must emit the {"jobs":[...]} JobStatusResult shape even when the
@@ -54,7 +81,7 @@ func TestLocalReconstructedContractStampFromBody(t *testing.T) {
 		Result: &engine.ResultInfo{Text: reconstructCompliantReport, Bytes: int64(len(reconstructCompliantReport))},
 	}
 
-	stamp, ok := localReconstructedContractStamp(res, contractKindShape, true)
+	stamp, ok := localReconstructedContractStamp(res, contractKindShape, true, reportValidationAttempt{attempts: 1})
 	if !ok {
 		t.Fatal("expected reconstruction from a present shape body")
 	}
@@ -67,14 +94,14 @@ func TestLocalReconstructedContractStampFromBody(t *testing.T) {
 	noncompliant := strings.Replace(reconstructCompliantReport, lastSection+":", "Scope omitted:", 1)
 	res.Result.Text = noncompliant
 	res.Result.Bytes = int64(len(noncompliant))
-	stamp, ok = localReconstructedContractStamp(res, contractKindShape, true)
+	stamp, ok = localReconstructedContractStamp(res, contractKindShape, true, reportValidationAttempt{attempts: 1})
 	if !ok || stamp.Status != engine.ContractNoncompliant {
 		t.Fatalf("noncompliant reconstruction = (%v, %q), want noncompliant (never result_unavailable with a body)", ok, stamp.Status)
 	}
 
 	// Without metadata provenance the contract kind is unknown; reconstruction
 	// must be refused rather than validate against the wrong (default shape) spec.
-	if _, ok := localReconstructedContractStamp(res, contractKindShape, false); ok {
+	if _, ok := localReconstructedContractStamp(res, contractKindShape, false, reportValidationAttempt{attempts: 1}); ok {
 		t.Fatal("reconstruction without positive shape provenance must be refused")
 	}
 }
@@ -85,8 +112,11 @@ func reportSections(t *testing.T) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.Shape == nil || len(spec.Shape.RequiredSections) == 0 {
+	var shape struct {
+		RequiredSections []string `json:"requiredSections"`
+	}
+	if len(spec.Shape) == 0 || json.Unmarshal(spec.Shape, &shape) != nil || len(shape.RequiredSections) == 0 {
 		t.Fatalf("delegate report spec = %#v, want sections", spec)
 	}
-	return spec.Shape.RequiredSections
+	return shape.RequiredSections
 }

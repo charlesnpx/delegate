@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/charlesnpx/agentbus/engine"
 )
@@ -23,10 +22,10 @@ func TestResolveTurnPolicyFlagMatrix(t *testing.T) {
 		wantNil   bool
 		wantRetry bool
 	}{
-		{name: "read_only", flags: Flags{}, wantRetry: true},
-		{name: "write", flags: Flags{Write: true}, wantRetry: true},
-		{name: "strict", flags: Flags{StrictContract: true}, wantRetry: true},
-		{name: "write_strict", flags: Flags{Write: true, StrictContract: true}, wantRetry: true},
+		{name: "read_only", flags: Flags{}},
+		{name: "write", flags: Flags{Write: true}},
+		{name: "strict", flags: Flags{StrictContract: true}},
+		{name: "write_strict", flags: Flags{Write: true, StrictContract: true}},
 		{name: "no_contract", flags: Flags{NoContract: true}, wantNil: true},
 		{name: "write_no_contract", flags: Flags{Write: true, NoContract: true}, wantNil: true},
 		{name: "strict_no_contract", flags: Flags{StrictContract: true, NoContract: true}, wantNil: true},
@@ -147,7 +146,7 @@ func TestDelegateReportSpecAndRegistryImmutability(t *testing.T) {
 	}
 
 	mutated := spec
-	mutated.Shape = &engine.ShapeSpec{FirstLineEnum: []string{"complete"}}
+	mutated.Shape = json.RawMessage(`{"firstLineEnum":["complete"]}`)
 	_, err = registry.Register(DelegateReportContractName, mutated)
 	var conflict engine.NameConflictError
 	if !errors.As(err, &conflict) {
@@ -156,24 +155,44 @@ func TestDelegateReportSpecAndRegistryImmutability(t *testing.T) {
 }
 
 func equalContractSpec(got, want engine.ContractSpec) bool {
-	normalize := func(spec engine.ContractSpec) engine.ContractSpec {
-		if spec.Shape == nil {
-			return spec
+	return got.Named == want.Named &&
+		equalJSONRaw(got.JSONSchema, want.JSONSchema) &&
+		equalJSONRaw(got.Shape, want.Shape)
+}
+
+// TestValidateShapeFailsClosedOnEmptyShape locks in that delegate — now the sole
+// authoritative report validator — never treats a constraint-less/null/empty shape
+// as "everything compliant".
+func TestValidateShapeFailsClosedOnEmptyShape(t *testing.T) {
+	for _, raw := range []string{"null", "{}", `{"firstLineEnum":[],"requiredSections":[]}`} {
+		spec := engine.ContractSpec{Shape: json.RawMessage(raw)}
+		if got, err := ValidateShape("arbitrary malformed output", spec); err == nil {
+			t.Fatalf("ValidateShape(shape=%q) = %#v, nil error; want fail-closed error", raw, got)
 		}
-		shape := *spec.Shape
-		if len(shape.FirstLineEnum) == 0 {
-			shape.FirstLineEnum = nil
-		}
-		if len(shape.RequiredSections) == 0 {
-			shape.RequiredSections = nil
-		}
-		if len(shape.RequiredAttestations) == 0 {
-			shape.RequiredAttestations = nil
-		}
-		spec.Shape = &shape
-		return spec
 	}
-	return reflect.DeepEqual(normalize(got), normalize(want))
+}
+
+// mustParseShape parses the opaque contract shape into delegate's local view.
+func mustParseShape(t *testing.T, spec engine.ContractSpec) reportShape {
+	t.Helper()
+	shape, err := parseReportShape(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return shape
+}
+
+// equalJSONRaw compares two raw JSON variant fields semantically (ignoring
+// formatting). agentbus now stores the contract shape as opaque bytes.
+func equalJSONRaw(a, b json.RawMessage) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return len(a) == 0 && len(b) == 0
+	}
+	var av, bv interface{}
+	if json.Unmarshal(a, &av) != nil || json.Unmarshal(b, &bv) != nil {
+		return false
+	}
+	return reflect.DeepEqual(av, bv)
 }
 
 func TestDelegateReportSpecShape(t *testing.T) {
@@ -181,21 +200,24 @@ func TestDelegateReportSpecShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spec.JSONSchema) != 0 || spec.Named != "" || spec.Shape == nil {
+	if len(spec.JSONSchema) != 0 || spec.Named != "" || len(spec.Shape) == 0 {
 		t.Fatalf("spec variant = %#v, want shape only", spec)
 	}
+	shape, err := parseReportShape(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shape.FirstLineEnum) == 0 || len(shape.RequiredSections) == 0 {
+		t.Fatalf("bundled shape = %#v, want first line enum and sections", shape)
+	}
 	var bundled struct {
-		Shape engine.ShapeSpec `json:"shape"`
+		Shape json.RawMessage `json:"shape"`
 	}
 	if err := json.Unmarshal(DelegateReportSpecJSON(), &bundled); err != nil {
 		t.Fatal(err)
 	}
-	if len(bundled.Shape.FirstLineEnum) == 0 || len(bundled.Shape.RequiredSections) == 0 || !bundled.Shape.EvidenceHeuristic {
-		t.Fatalf("bundled shape = %#v, want first line enum, sections, and evidence heuristic", bundled.Shape)
-	}
-	if !reflect.DeepEqual(*spec.Shape, bundled.Shape) {
-		b, _ := json.MarshalIndent(spec.Shape, "", "  ")
-		t.Fatalf("shape spec = %s, want bundled shape %#v", b, bundled.Shape)
+	if !equalJSONRaw(spec.Shape, bundled.Shape) {
+		t.Fatalf("shape spec = %s, want bundled shape %s", spec.Shape, bundled.Shape)
 	}
 }
 
@@ -207,7 +229,11 @@ func TestDigestBundleEqualsFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fragments := append([]string{}, spec.Shape.RequiredSections...)
+	shape, err := parseReportShape(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragments := append([]string{}, shape.RequiredSections...)
 	fragments = append(fragments, "firstLineEnum", "section:")
 	for _, fragment := range fragments {
 		if strings.Contains(DelegateContractDigest(), fragment) {
@@ -244,12 +270,16 @@ func TestDelegateReportFormatBlockRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, value := range spec.Shape.FirstLineEnum {
+	shape, err := parseReportShape(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range shape.FirstLineEnum {
 		if !strings.Contains(block, "\n"+value+"\n") {
 			t.Fatalf("format block missing first-line enum %q:\n%s", value, block)
 		}
 	}
-	for _, section := range spec.Shape.RequiredSections {
+	for _, section := range shape.RequiredSections {
 		if !strings.Contains(block, "\n# "+section+"\n") {
 			t.Fatalf("format block missing heading %q:\n%s", section, block)
 		}
@@ -258,7 +288,7 @@ func TestDelegateReportFormatBlockRoundTrip(t *testing.T) {
 		}
 	}
 
-	firstSection := spec.Shape.RequiredSections[0]
+	firstSection := mustParseShape(t, spec).RequiredSections[0]
 	for _, tc := range []struct {
 		name        string
 		text        string
@@ -271,27 +301,29 @@ func TestDelegateReportFormatBlockRoundTrip(t *testing.T) {
 		},
 		{
 			name:        "capitalized_first_line",
-			text:        strings.Replace(report, spec.Shape.FirstLineEnum[0], capitalizeASCII(spec.Shape.FirstLineEnum[0]), 1),
+			text:        strings.Replace(report, mustParseShape(t, spec).FirstLineEnum[0], capitalizeASCII(mustParseShape(t, spec).FirstLineEnum[0]), 1),
 			wantMissing: "firstLineEnum",
 		},
 		{
 			name:        "decorated_first_line",
-			text:        strings.Replace(report, spec.Shape.FirstLineEnum[0], spec.Shape.FirstLineEnum[0]+" - done", 1),
+			text:        strings.Replace(report, mustParseShape(t, spec).FirstLineEnum[0], mustParseShape(t, spec).FirstLineEnum[0]+" - done", 1),
 			wantMissing: "firstLineEnum",
 		},
 		{
 			name:        "headings_inside_code_fence",
 			text:        fencedReportFromSpec(t, spec),
-			wantMissing: "section:" + spec.Shape.RequiredSections[0],
+			wantMissing: "section:" + mustParseShape(t, spec).RequiredSections[0],
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := engine.ValidateContract(tc.text, spec)
+			// Shape is validated client-side by delegate now (agentbus treats the
+			// contract shape as opaque identity).
+			got, err := ValidateShape(tc.text, spec)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Valid || !containsString(got.Missing, tc.wantMissing) {
-				t.Fatalf("validation missing = %#v, want %q", got.Missing, tc.wantMissing)
+			if got.Compliant || !containsString(got.Violations, tc.wantMissing) {
+				t.Fatalf("validation violations = %#v, want %q", got.Violations, tc.wantMissing)
 			}
 		})
 	}
@@ -327,13 +359,68 @@ func TestAppendReportFormatBlockPlacesGeneratedBlockLast(t *testing.T) {
 	}
 }
 
+func TestValidateDelegateReportShapeMinimal(t *testing.T) {
+	spec, err := DelegateReportSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := canonicalReportFromSpec(t, spec)
+	firstSection := mustParseShape(t, spec).RequiredSections[0]
+	var fencedViolations []string
+	for _, section := range mustParseShape(t, spec).RequiredSections {
+		fencedViolations = append(fencedViolations, "section:"+section)
+	}
+	for _, tc := range []struct {
+		name           string
+		text           string
+		wantCompliant  bool
+		wantViolations []string
+	}{
+		{
+			name:          "compliant",
+			text:          report,
+			wantCompliant: true,
+		},
+		{
+			name:           "wrong_first_line",
+			text:           strings.Replace(report, mustParseShape(t, spec).FirstLineEnum[0], "done", 1),
+			wantViolations: []string{"firstLineEnum"},
+		},
+		{
+			name:           "missing_section",
+			text:           strings.Replace(report, "# "+firstSection, "# Different", 1),
+			wantViolations: []string{"section:" + firstSection},
+		},
+		{
+			name:           "bold_section_rejected",
+			text:           strings.Replace(report, "# "+firstSection, "**"+firstSection+"**", 1),
+			wantViolations: []string{"section:" + firstSection},
+		},
+		{
+			name:           "headings_inside_code_fence",
+			text:           fencedReportFromSpec(t, spec),
+			wantViolations: fencedViolations,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ValidateDelegateReportShape(tc.text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Compliant != tc.wantCompliant || !reflect.DeepEqual(got.Violations, tc.wantViolations) {
+				t.Fatalf("ValidateDelegateReportShape() = %#v, want compliant=%t violations=%#v", got, tc.wantCompliant, tc.wantViolations)
+			}
+		})
+	}
+}
+
 func canonicalReportFromSpec(t *testing.T, spec engine.ContractSpec) string {
 	t.Helper()
-	if spec.Shape == nil || len(spec.Shape.FirstLineEnum) == 0 {
+	if spec.Shape == nil || len(mustParseShape(t, spec).FirstLineEnum) == 0 {
 		t.Fatalf("spec = %#v, want first-line shape", spec)
 	}
-	lines := []string{spec.Shape.FirstLineEnum[0], ""}
-	for _, section := range spec.Shape.RequiredSections {
+	lines := []string{mustParseShape(t, spec).FirstLineEnum[0], ""}
+	for _, section := range mustParseShape(t, spec).RequiredSections {
 		lines = append(lines, "# "+section, "- observed: "+strings.ToLower(section)+" fixture.", "")
 	}
 	return strings.Join(lines, "\n")
@@ -341,11 +428,11 @@ func canonicalReportFromSpec(t *testing.T, spec engine.ContractSpec) string {
 
 func fencedReportFromSpec(t *testing.T, spec engine.ContractSpec) string {
 	t.Helper()
-	if spec.Shape == nil || len(spec.Shape.FirstLineEnum) == 0 {
+	if spec.Shape == nil || len(mustParseShape(t, spec).FirstLineEnum) == 0 {
 		t.Fatalf("spec = %#v, want first-line shape", spec)
 	}
-	lines := []string{spec.Shape.FirstLineEnum[0], "", "```md"}
-	for _, section := range spec.Shape.RequiredSections {
+	lines := []string{mustParseShape(t, spec).FirstLineEnum[0], "", "```md"}
+	for _, section := range mustParseShape(t, spec).RequiredSections {
 		lines = append(lines, "# "+section, "- observed: fenced fixture.", "")
 	}
 	lines = append(lines, "```", "")
@@ -368,7 +455,7 @@ func capitalizeASCII(value string) string {
 	return strings.ToUpper(value[:1]) + value[1:]
 }
 
-func TestRetryTemplateAndPolicyValidateWithEngine(t *testing.T) {
+func TestDelegateReportShapeValidatesCompliantAndMissingSection(t *testing.T) {
 	policy, err := ResolveTurnPolicy(Flags{})
 	if err != nil {
 		t.Fatal(err)
@@ -377,31 +464,27 @@ func TestRetryTemplateAndPolicyValidateWithEngine(t *testing.T) {
 	if strings.Contains(compliant, "inferred:") || strings.Contains(compliant, "assumed:") {
 		t.Fatal("compliant fixture must exercise all-observed attestations")
 	}
-	validation, err := engine.ValidatePolicyText(compliant, policy, engine.NewPolicyRegistry(), time.Unix(0, 0))
+	// Report-shape validation is delegate-owned and client-side now.
+	validation, err := ValidateShape(compliant, *policy.Contract)
 	if err != nil {
-		t.Fatalf("ValidatePolicyText(compliant) error = %v", err)
+		t.Fatalf("ValidateShape(compliant) error = %v", err)
 	}
-	if validation.Stamp == nil {
-		t.Fatal("compliant validation stamp = nil")
-	}
-	if validation.Stamp.Status != engine.ContractCompliant {
-		t.Fatalf("compliant status = %q, want %q; missing=%v", validation.Stamp.Status, engine.ContractCompliant, validation.Stamp.Missing)
+	if !validation.Compliant {
+		t.Fatalf("compliant report violations = %#v, want compliant", validation.Violations)
 	}
 
-	lastSection := policy.Contract.Shape.RequiredSections[len(policy.Contract.Shape.RequiredSections)-1]
+	sections := mustParseShape(t, *policy.Contract).RequiredSections
+	lastSection := sections[len(sections)-1]
 	missingScope := strings.Replace(compliant, "# "+lastSection, "# Scope omitted", 1)
-	validation, err = engine.ValidatePolicyText(missingScope, policy, engine.NewPolicyRegistry(), time.Unix(0, 0))
+	validation, err = ValidateShape(missingScope, *policy.Contract)
 	if err != nil {
-		t.Fatalf("ValidatePolicyText(missing) error = %v", err)
+		t.Fatalf("ValidateShape(missing) error = %v", err)
 	}
-	if validation.Stamp == nil {
-		t.Fatal("missing-section validation stamp = nil")
+	if validation.Compliant {
+		t.Fatal("missing-section report reported compliant, want noncompliant")
 	}
-	if validation.Stamp.Status != engine.ContractNoncompliant {
-		t.Fatalf("missing-section status = %q, want %q", validation.Stamp.Status, engine.ContractNoncompliant)
-	}
-	wantMissing := []string{"section:" + lastSection}
-	if !reflect.DeepEqual(validation.Stamp.Missing, wantMissing) {
-		t.Fatalf("missing = %#v, want %v", validation.Stamp.Missing, wantMissing)
+	wantViolations := []string{"section:" + lastSection}
+	if !reflect.DeepEqual(validation.Violations, wantViolations) {
+		t.Fatalf("violations = %#v, want %v", validation.Violations, wantViolations)
 	}
 }

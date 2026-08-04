@@ -204,6 +204,14 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
 	}
+	var correctionWarnings []string
+	terminalJob, c, hello, correctionWarnings, err = maybeCorrectDelegateReport(ctx, c, hello, "", terminalJob, cleanupWarnings)
+	if err != nil {
+		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
+	}
+	if err := writeWarnings(stderr, correctionWarnings); err != nil {
+		return 0, err
+	}
 	env, err := terminalEnvelopeFromJobResultWithOptions("", terminalJob.result, terminalJob.envelopeOptions(terminalEnvelopeOptions{ModelsReportedCapable: hello.Capabilities["models.reported"]}))
 	if err != nil {
 		return 0, err
@@ -640,20 +648,23 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 		}
 	}
 	stamp := skippedDelegateContractStamp(engine.SkipResultUnavailable)
+	shapeStampAuthoritative := false
 	if found && meta.NoContract {
 		stamp = policy.DisabledStamp()
 		contractKind = contractKindNone
-	} else if result.Contract != nil {
-		stamp = *result.Contract
 	} else if contractKind == contractKindNone {
 		stamp = policy.DisabledStamp()
-	} else if reconstructed, ok := localReconstructedContractStamp(result, contractKind, found); ok {
-		// agentbus admission (protocol v2) jobs never persist a contract stamp,
-		// so JobResult.Contract is nil even for a fully-present, hash-matched
-		// result. Rather than mislabel that healthy result as result_unavailable,
-		// delegate (which owns the delegate-report shape) re-derives the true
-		// verdict from the result body itself.
-		stamp = reconstructed
+	} else if found && contractKind == contractKindShape {
+		if reconstructed, ok := localReconstructedContractStamp(result, contractKind, found, reportValidationAttempts(meta)); ok {
+			// delegate owns delegate-report shape semantics. agentbus may be old
+			// enough to validate shape itself or new enough to pass the contract
+			// identity through without a verdict; either way the local body verdict is
+			// authoritative for managed delegate-report shape jobs.
+			stamp = reconstructed
+			shapeStampAuthoritative = true
+		}
+	} else if result.Contract != nil {
+		stamp = *result.Contract
 	}
 	resultSHA256 := ""
 	if result.Result != nil {
@@ -697,23 +708,21 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 	if result.Result != nil {
 		option.ResultPath = result.Result.ResultPath
 	}
-	return newTerminalEnvelope(result.JobID, result.State, kind, contractKind, stamp, resultSHA256, backendError, option)
+	state := terminalStateForLocalShapeVerdict(result.State, stamp, shapeStampAuthoritative)
+	return newTerminalEnvelope(result.JobID, state, kind, contractKind, stamp, resultSHA256, backendError, option)
 }
 
 func localArtifactsRetainedFromMetadata(meta jobMetadata, state engine.JobState, _ string) bool {
 	return engine.IsTerminal(state) && (meta.JobInputPath != "" || meta.ReviewWorkspace != "")
 }
 
-// localReconstructedContractStamp re-derives the true contract verdict from a
-// present result body when agentbus returned no contract stamp. Admission
-// (protocol v2) jobs discard the validation stamp at finalization, so
-// JobResult.Contract is nil even when the result is complete and hash-matched;
-// without this, the terminal envelope would fall back to result_unavailable and
-// mislabel a healthy result. delegate owns the bundled delegate-report shape, so
-// it can validate the final text itself. Only the shape contract can be
-// reconstructed locally: a JSON Schema contract's schema text is not retained in
-// job metadata, so that case is left to agentbus's own stamp.
-func localReconstructedContractStamp(result client.JobResult, contractKind string, found bool) (engine.ContractStamp, bool) {
+// localReconstructedContractStamp derives the authoritative delegate-report
+// shape verdict from a present result body. Managed shape jobs no longer trust
+// an agentbus-side shape stamp: delegate owns the bundled markdown report
+// semantics and validates the final text itself. Only the shape contract can be
+// reconstructed locally; JSON Schema contract verdicts remain agentbus-stamped
+// because their schema text is not retained in job metadata.
+func localReconstructedContractStamp(result client.JobResult, contractKind string, found bool, attempt reportValidationAttempt) (engine.ContractStamp, bool) {
 	// Reconstruct only with positive shape provenance: local metadata present AND
 	// recording the delegate-report shape. Without metadata the contract kind is
 	// unknown (it defaults to shape), and validating a JSON Schema / no-contract
@@ -728,19 +737,74 @@ func localReconstructedContractStamp(result client.JobResult, contractKind strin
 	if !ok {
 		return engine.ContractStamp{}, false
 	}
-	spec, err := policy.DelegateReportSpec()
+	stamp, err := delegateReportContractStampFromText(text, attempt)
 	if err != nil {
 		return engine.ContractStamp{}, false
 	}
-	validation, err := engine.ValidateContract(text, spec)
+	return stamp, true
+}
+
+type reportValidationAttempt struct {
+	attempts  int
+	retryUsed bool
+}
+
+func reportValidationAttempts(meta jobMetadata) reportValidationAttempt {
+	if meta.ReportCorrectionOf != "" {
+		return reportValidationAttempt{attempts: 2, retryUsed: true}
+	}
+	return reportValidationAttempt{attempts: 1}
+}
+
+func delegateReportContractStampFromText(text string, attempt reportValidationAttempt) (engine.ContractStamp, error) {
+	spec, err := policy.DelegateReportSpec()
 	if err != nil {
-		return engine.ContractStamp{}, false
+		return engine.ContractStamp{}, err
+	}
+	validation, err := policy.ValidateShape(text, spec)
+	if err != nil {
+		return engine.ContractStamp{}, err
+	}
+	hash, err := engine.ContractSHA256(spec)
+	if err != nil {
+		return engine.ContractStamp{}, err
+	}
+	status := engine.ContractCompliant
+	reason := ""
+	if attempt.retryUsed && validation.Compliant {
+		status = engine.ContractRetried
+		reason = "initial response missed structural requirements; retry satisfied contract"
+	} else if !validation.Compliant {
+		status = engine.ContractNoncompliant
+		reason = "response missed structural requirements"
 	}
 	// A zero ValidatedAt keeps the reconstructed stamp deterministic (the
 	// envelope omits validatedAt when zero); the verdict, missing sections, and
 	// contract hash are the load-bearing fields. The empty contract name mirrors
 	// the inline shape spec delegate submits (ResolveTurnPolicy uses no name).
-	return engine.StampValidation(1, false, "", validation, time.Time{}), true
+	return engine.ContractStamp{
+		Status:         status,
+		Missing:        append([]string(nil), validation.Violations...),
+		Reason:         reason,
+		ContractSHA256: hash,
+		Attempts:       attempt.attempts,
+		RetryUsed:      attempt.retryUsed,
+		ValidatedAt:    time.Time{},
+	}, nil
+}
+
+func terminalStateForLocalShapeVerdict(state engine.JobState, stamp engine.ContractStamp, authoritative bool) engine.JobState {
+	if !authoritative || (state != engine.StateCompleted && state != engine.StateCompletedNoncompliant) {
+		return state
+	}
+	switch stamp.Status {
+	case engine.ContractNoncompliant:
+		return engine.StateCompletedNoncompliant
+	case engine.ContractCompliant, engine.ContractRetried:
+		return engine.StateCompleted
+	default:
+		return state
+	}
 }
 
 // resultBodyText returns the certified result text: the inline Text when
@@ -759,6 +823,12 @@ func resultBodyText(info *engine.ResultInfo) (string, bool) {
 	// one; treat it as available so an empty result validates as noncompliant
 	// rather than falling through to result_unavailable.
 	if info.Bytes == 0 {
+		if info.SHA256 != "" {
+			sum := sha256.Sum256(nil)
+			if hex.EncodeToString(sum[:]) != info.SHA256 {
+				return "", false
+			}
+		}
 		return "", true
 	}
 	if info.ResultPath == "" || info.Bytes < 0 {
