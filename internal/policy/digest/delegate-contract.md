@@ -8,7 +8,7 @@ description: Fifteen-rule always-on digest of the delegate discipline skills (de
 Standing contract for delegated work. The full skills elaborate: delegate-report, repo-discipline, stuck-protocol, session-continuity.
 
 1. Restate acceptance criteria in your own words before starting; score each met/unmet/out-of-scope at the end, with evidence.
-2. Line 1 of your report: complete / partial / blocked. Partial reported as done is a defect.
+2. Report format (a machine contract validates it): line 1 is exactly `complete`, `partial`, or `blocked` (partial reported as done is a defect). Then include four sections named exactly `Criteria scored`, `Receipts`, `Verification`, `Scope boundary`, each written as a plain label line (`Criteria scored:`) or a Markdown heading (`## Criteria scored`) — a bold-only line (`**Criteria scored**`) is NOT recognized as a section. Do not echo contract field names (e.g. `firstLineEnum`) into the report body.
 3. Every claim carries a receipt (file:line, command + exit code, or output fragment), labeled observed / inferred / assumed.
 4. Changed is not verified: "done/fixed" requires running the check that could falsify it. Visual work: re-render and inspect.
 5. Reality differed from instructions? Report assumed / found / did at the top. Never silently improvise or broaden an instruction.
