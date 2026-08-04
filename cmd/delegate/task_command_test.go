@@ -394,18 +394,27 @@ func TestTaskOutputSchemaInputErrorsDoNotSubmit(t *testing.T) {
 }
 
 func TestTaskOutputSchemaFastFailsBeforeSubmit(t *testing.T) {
-	for _, schema := range []string{`{"type":`, ""} {
-		t.Run(fmt.Sprintf("schema_%q", schema), func(t *testing.T) {
+	// Both a malformed schema and an empty schema must fast-fail before any
+	// submit. An empty schema is treated as no contract variant (engine
+	// normalizes an empty/JSON-null variant to absent).
+	for _, tc := range []struct {
+		schema  string
+		wantErr string
+	}{
+		{schema: `{"type":`, wantErr: "jsonSchema must be valid JSON"},
+		{schema: "", wantErr: "contract must include exactly one"},
+	} {
+		t.Run(fmt.Sprintf("schema_%q", tc.schema), func(t *testing.T) {
 			fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
 			restore := stubAgentbusGlobals(t, fake)
 			defer restore()
 			var stdout, stderr bytes.Buffer
-			code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--output-schema", schema}, nil, &stdout, &stderr)
+			code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--output-schema", tc.schema}, nil, &stdout, &stderr)
 			if code == 0 {
-				t.Fatalf("task code = 0, want invalid schema error; stdout=%q stderr=%q", stdout.String(), stderr.String())
+				t.Fatalf("task code = 0, want pre-submit schema error; stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}
-			if !strings.Contains(stderr.String(), "jsonSchema must be valid JSON") {
-				t.Fatalf("stderr = %q, want engine schema error", stderr.String())
+			if !strings.Contains(stderr.String(), tc.wantErr) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.wantErr)
 			}
 			if len(fake.submits) != 0 {
 				t.Fatalf("JobSubmit calls = %d, want 0", len(fake.submits))
@@ -1177,11 +1186,18 @@ func (f *fakeAgentbusClient) JobCancel(_ context.Context, params client.JobCance
 
 func compliantReport() string {
 	spec, err := policy.DelegateReportSpec()
-	if err != nil || spec.Shape == nil || len(spec.Shape.FirstLineEnum) == 0 {
+	if err != nil {
 		panic("invalid delegate report test spec")
 	}
-	lines := []string{spec.Shape.FirstLineEnum[0], ""}
-	for _, section := range spec.Shape.RequiredSections {
+	var shape struct {
+		FirstLineEnum    []string `json:"firstLineEnum"`
+		RequiredSections []string `json:"requiredSections"`
+	}
+	if len(spec.Shape) == 0 || json.Unmarshal(spec.Shape, &shape) != nil || len(shape.FirstLineEnum) == 0 {
+		panic("invalid delegate report test spec")
+	}
+	lines := []string{shape.FirstLineEnum[0], ""}
+	for _, section := range shape.RequiredSections {
 		lines = append(lines, section+":", "- observed: "+strings.ToLower(section)+" fixture.", "")
 	}
 	return strings.Join(lines, "\n")

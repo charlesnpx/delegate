@@ -1,7 +1,6 @@
 package policy
 
 import (
-	"errors"
 	"strings"
 
 	"github.com/charlesnpx/agentbus/engine"
@@ -20,10 +19,10 @@ func DelegateReportFormatBlock() (string, error) {
 // ReportFormatBlock renders the compact final-response format from a concrete
 // shape contract.
 func ReportFormatBlock(spec engine.ContractSpec) (string, error) {
-	if spec.Shape == nil {
-		return "", errors.New("delegate-report format requires a shape contract")
+	shape, err := parseReportShape(spec)
+	if err != nil {
+		return "", err
 	}
-	shape := spec.Shape
 	var b strings.Builder
 	b.WriteString("Your final response must follow this exact format.\n\n")
 	b.WriteString("Line 1 must be exactly one of these lowercase words, with nothing else on the line:\n")

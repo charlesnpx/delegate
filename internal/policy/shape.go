@@ -1,7 +1,9 @@
 package policy
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -12,6 +14,25 @@ import (
 type ShapeValidation struct {
 	Compliant  bool
 	Violations []string
+}
+
+// reportShape is delegate's local view of the report shape. agentbus now treats
+// the contract shape as opaque identity bytes, so delegate — which owns report
+// semantics — parses the shape it authored itself.
+type reportShape struct {
+	FirstLineEnum    []string `json:"firstLineEnum"`
+	RequiredSections []string `json:"requiredSections"`
+}
+
+func parseReportShape(spec engine.ContractSpec) (reportShape, error) {
+	if len(spec.Shape) == 0 {
+		return reportShape{}, errors.New("shape validation requires a shape contract")
+	}
+	var shape reportShape
+	if err := json.Unmarshal(spec.Shape, &shape); err != nil {
+		return reportShape{}, fmt.Errorf("parse delegate report shape: %w", err)
+	}
+	return shape, nil
 }
 
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
@@ -30,10 +51,10 @@ func ValidateDelegateReportShape(text string) (ShapeValidation, error) {
 
 // ValidateShape validates the minimal strict report shape delegate owns.
 func ValidateShape(text string, spec engine.ContractSpec) (ShapeValidation, error) {
-	if spec.Shape == nil {
-		return ShapeValidation{}, errors.New("shape validation requires a shape contract")
+	shape, err := parseReportShape(spec)
+	if err != nil {
+		return ShapeValidation{}, err
 	}
-	shape := spec.Shape
 	raw := ansiPattern.ReplaceAllString(text, "")
 	var violations []string
 	if len(shape.FirstLineEnum) > 0 && !allowedFirstLine(firstLine(raw), shape.FirstLineEnum) {
@@ -55,15 +76,16 @@ func DelegateReportCorrectionPrompt(priorBody string, violations []string) (stri
 	if err != nil {
 		return "", err
 	}
-	if spec.Shape == nil {
-		return "", errors.New("delegate-report correction requires a shape contract")
+	shape, err := parseReportShape(spec)
+	if err != nil {
+		return "", err
 	}
 	var b strings.Builder
 	b.WriteString("This is a report-format correction for a delegate report. The previous report body did not satisfy the required report shape.\n\n")
 	b.WriteString("Violations:\n")
 	for _, violation := range violations {
 		b.WriteString("- ")
-		b.WriteString(correctionInstruction(violation, *spec.Shape))
+		b.WriteString(correctionInstruction(violation, shape))
 		b.WriteByte('\n')
 	}
 	b.WriteString("\nPrior report body begins after this marker and ends before the closing marker.\n")
@@ -77,7 +99,7 @@ func DelegateReportCorrectionPrompt(priorBody string, violations []string) (stri
 	return b.String(), nil
 }
 
-func correctionInstruction(violation string, shape engine.ShapeSpec) string {
+func correctionInstruction(violation string, shape reportShape) string {
 	if violation == "firstLineEnum" {
 		return "line 1 must be exactly one of: " + strings.Join(shape.FirstLineEnum, ", ")
 	}

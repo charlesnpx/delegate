@@ -112,8 +112,11 @@ func reportSections(t *testing.T) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.Shape == nil || len(spec.Shape.RequiredSections) == 0 {
+	var shape struct {
+		RequiredSections []string `json:"requiredSections"`
+	}
+	if len(spec.Shape) == 0 || json.Unmarshal(spec.Shape, &shape) != nil || len(shape.RequiredSections) == 0 {
 		t.Fatalf("delegate report spec = %#v, want sections", spec)
 	}
-	return spec.Shape.RequiredSections
+	return shape.RequiredSections
 }
