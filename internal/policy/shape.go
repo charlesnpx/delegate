@@ -39,8 +39,9 @@ func ValidateShape(text string, spec engine.ContractSpec) (ShapeValidation, erro
 	if len(shape.FirstLineEnum) > 0 && !allowedFirstLine(firstLine(raw), shape.FirstLineEnum) {
 		violations = append(violations, "firstLineEnum")
 	}
+	outside := outsideFences(raw)
 	for _, section := range shape.RequiredSections {
-		if !hasSection(raw, section) {
+		if !hasSection(outside, section) {
 			violations = append(violations, "section:"+section)
 		}
 	}
@@ -121,6 +122,75 @@ func splitLines(s string) []string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
 	return strings.Split(s, "\n")
+}
+
+func outsideFences(raw string) string {
+	lines := splitLines(raw)
+	var b strings.Builder
+	var fence *fenceMarker
+	for _, line := range lines {
+		if fence != nil {
+			if isClosingFence(line, *fence) {
+				fence = nil
+			}
+			continue
+		}
+		if marker, ok := openingFence(line); ok {
+			fence = &marker
+			continue
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+type fenceMarker struct {
+	char byte
+	run  int
+}
+
+func openingFence(line string) (fenceMarker, bool) {
+	spaces := 0
+	for spaces < len(line) && line[spaces] == ' ' {
+		spaces++
+	}
+	if spaces > 3 {
+		return fenceMarker{}, false
+	}
+	line = line[spaces:]
+	if len(line) < 3 || (line[0] != '`' && line[0] != '~') {
+		return fenceMarker{}, false
+	}
+	run := fenceRun(line, line[0])
+	if run < 3 {
+		return fenceMarker{}, false
+	}
+	return fenceMarker{char: line[0], run: run}, true
+}
+
+func isClosingFence(line string, opener fenceMarker) bool {
+	spaces := 0
+	for spaces < len(line) && line[spaces] == ' ' {
+		spaces++
+	}
+	if spaces > 3 {
+		return false
+	}
+	line = line[spaces:]
+	run := fenceRun(line, opener.char)
+	if run < opener.run {
+		return false
+	}
+	return strings.TrimSpace(line[run:]) == ""
+}
+
+func fenceRun(line string, char byte) int {
+	run := 0
+	for run < len(line) && line[run] == char {
+		run++
+	}
+	return run
 }
 
 func headingName(line string) (string, bool) {

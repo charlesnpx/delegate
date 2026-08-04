@@ -334,6 +334,10 @@ func TestValidateDelegateReportShapeMinimal(t *testing.T) {
 	}
 	report := canonicalReportFromSpec(t, spec)
 	firstSection := spec.Shape.RequiredSections[0]
+	var fencedViolations []string
+	for _, section := range spec.Shape.RequiredSections {
+		fencedViolations = append(fencedViolations, "section:"+section)
+	}
 	for _, tc := range []struct {
 		name           string
 		text           string
@@ -359,6 +363,11 @@ func TestValidateDelegateReportShapeMinimal(t *testing.T) {
 			name:           "bold_section_rejected",
 			text:           strings.Replace(report, "# "+firstSection, "**"+firstSection+"**", 1),
 			wantViolations: []string{"section:" + firstSection},
+		},
+		{
+			name:           "headings_inside_code_fence",
+			text:           fencedReportFromSpec(t, spec),
+			wantViolations: fencedViolations,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

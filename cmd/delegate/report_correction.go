@@ -39,11 +39,22 @@ func maybeCorrectDelegateReport(ctx context.Context, c agentbusClient, hello cli
 	}
 	if meta.ReportCorrectionJobID != "" {
 		corrected, err := waitForTerminalJobResult(ctx, c, stateDir, meta.ReportCorrectionJobID, cleanupWarnings)
-		return corrected, c, hello, nil, err
+		if err != nil {
+			return terminalJob, c, hello, []string{reportCorrectionFallbackWarning(meta.JobID, meta.ReportCorrectionJobID, err)}, nil
+		}
+		if !reportCorrectionResultUsable(corrected.result) {
+			return terminalJob, c, hello, []string{reportCorrectionFallbackWarning(meta.JobID, corrected.result.JobID, nil)}, nil
+		}
+		return corrected, c, hello, nil, nil
 	}
 	corrected, nextClient, nextHello, warnings, err := submitDelegateReportCorrection(ctx, c, hello, stateDir, meta, body, validation.Violations, cleanupWarnings)
 	if err != nil {
-		return terminalJob, nextClient, nextHello, warnings, err
+		warnings = append(warnings, reportCorrectionFallbackWarning(meta.JobID, corrected.result.JobID, err))
+		return terminalJob, nextClient, nextHello, warnings, nil
+	}
+	if !reportCorrectionResultUsable(corrected.result) {
+		warnings = append(warnings, reportCorrectionFallbackWarning(meta.JobID, corrected.result.JobID, nil))
+		return terminalJob, nextClient, nextHello, warnings, nil
 	}
 	return corrected, nextClient, nextHello, warnings, nil
 }
@@ -54,6 +65,25 @@ func reportResultCanBeCorrected(state engine.JobState) bool {
 
 func managedDelegateReportMetadata(meta jobMetadata) bool {
 	return meta.JobID != "" && meta.Backend != "" && meta.ContractKind == contractKindShape && !meta.NoContract
+}
+
+func reportCorrectionResultUsable(result client.JobResult) bool {
+	if !reportResultCanBeCorrected(result.State) || result.Result == nil {
+		return false
+	}
+	_, ok := resultBodyText(result.Result)
+	return ok
+}
+
+func reportCorrectionFallbackWarning(originalJobID, correctionJobID string, err error) string {
+	correction := "delegate-report correction"
+	if correctionJobID != "" {
+		correction = fmt.Sprintf("delegate-report correction %s", correctionJobID)
+	}
+	if err != nil {
+		return fmt.Sprintf("%s for %s could not complete: %v; using original terminal result", correction, originalJobID, err)
+	}
+	return fmt.Sprintf("%s for %s did not produce an authoritative result body; using original terminal result", correction, originalJobID)
 }
 
 func submitDelegateReportCorrection(ctx context.Context, c agentbusClient, hello client.HelloResult, stateDir string, original jobMetadata, priorBody string, violations []string, cleanupWarnings *localCleanupWarnings) (terminalJobResult, agentbusClient, client.HelloResult, []string, error) {

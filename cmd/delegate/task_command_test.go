@@ -585,6 +585,53 @@ func TestTaskWaitDelegateReportValidationAndCorrection(t *testing.T) {
 	}
 }
 
+func TestTaskWaitCorrectionFailureFallsBackToOriginalResult(t *testing.T) {
+	badReport := malformedDelegateReport()
+	original := reportJobResult("job_report_1", badReport)
+	original.CleanupDisposition = cleanupDispositionVerifiedAbsent
+	fake := &reportCorrectionRoundTripClient{
+		hello:  helloWithCapabilities(),
+		jobIDs: []string{"job_report_1", "job_report_2"},
+		resultsByJobID: map[string]client.JobResult{
+			"job_report_1": original,
+			"job_report_2": {
+				JobID:              "job_report_2",
+				SessionID:          "session_job_report_2",
+				State:              engine.StateFailed,
+				CleanupDisposition: cleanupDispositionNoExecutionPossible,
+			},
+		},
+	}
+	restore := stubAgentbusClientGlobals(t, fake)
+	defer restore()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--wait", "--json"}, nil, &stdout, &stderr)
+	if want := engine.ExitCodeForState(engine.StateCompletedNoncompliant); code != want {
+		t.Fatalf("task code = %d, want %d; stderr = %q stdout = %q", code, want, stderr.String(), stdout.String())
+	}
+	if len(fake.submits) != 2 {
+		t.Fatalf("JobSubmit calls = %d, want original plus one correction attempt", len(fake.submits))
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if env.JobID != "job_report_1" || env.Status != engine.StateCompletedNoncompliant {
+		t.Fatalf("terminal envelope job/status = %s/%s, want original completed_noncompliant", env.JobID, env.Status)
+	}
+	if env.ResultSHA256 == nil || *env.ResultSHA256 != rawSHA256(badReport) || env.ResultUnavailableReason != "" {
+		t.Fatalf("result fields sha=%#v reason=%q, want original authoritative result", env.ResultSHA256, env.ResultUnavailableReason)
+	}
+	if env.CleanupDisposition != cleanupDispositionVerifiedAbsent {
+		t.Fatalf("cleanup disposition = %q, want original %q", env.CleanupDisposition, cleanupDispositionVerifiedAbsent)
+	}
+	if !strings.Contains(stderr.String(), "warning: delegate-report correction job_report_2 for job_report_1 did not produce an authoritative result body; using original terminal result") {
+		t.Fatalf("stderr = %q, want correction fallback warning", stderr.String())
+	}
+}
+
 func TestTaskSubmitFailurePreservesIntentAndHandoffForRecovery(t *testing.T) {
 	fake := &fakeAgentbusClient{hello: helloWithCapabilities(), submitErr: errors.New("submit failed")}
 	restore := stubAgentbusGlobals(t, fake)
@@ -752,6 +799,41 @@ func TestBackgroundJobInputIsSweptByNextResult(t *testing.T) {
 	}
 	if len(fake.statuses) == 0 {
 		t.Fatal("result did not perform terminal job-input status lookup")
+	}
+}
+
+func TestTaskBackgroundTerminalDedupReturnsLaunchWithoutCorrection(t *testing.T) {
+	badReport := malformedDelegateReport()
+	fake := &fakeAgentbusClient{
+		hello: helloWithCapabilities(),
+		submitResult: client.JobSubmitResult{
+			JobID:        "job_background_dedup",
+			State:        engine.StateCompleted,
+			Deduplicated: true,
+		},
+		result: reportJobResult("job_background_dedup", badReport),
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "background prompt", "--background", "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("JobSubmit calls = %d, want only launch submit", len(fake.submits))
+	}
+	if len(fake.results) != 0 || len(fake.statuses) != 0 {
+		t.Fatalf("result/status calls = %d/%d, want none for background launch", len(fake.results), len(fake.statuses))
+	}
+	var env LaunchEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("launch JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if env.JobID != "job_background_dedup" || env.Status != string(engine.StateCompleted) || !env.Deduplicated || env.ResultSHA256 != nil {
+		t.Fatalf("launch envelope = %#v, want completed dedup launch without result", env)
 	}
 }
 

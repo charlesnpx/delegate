@@ -34,6 +34,7 @@ func (f *optionalStringFlag) Set(value string) error {
 
 type taskOptions struct {
 	Backend            string
+	Background         bool
 	Wait               bool
 	JSON               bool
 	CWD                string
@@ -177,9 +178,8 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	var opts taskOptions
 	fs := flag.NewFlagSet("delegate task", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var background bool
 	fs.StringVar(&opts.Backend, "backend", "", "backend name")
-	fs.BoolVar(&background, "background", false, "return after launch")
+	fs.BoolVar(&opts.Background, "background", false, "return after launch")
 	fs.BoolVar(&opts.Wait, "wait", false, "wait for terminal result")
 	fs.BoolVar(&opts.JSON, "json", false, "emit JSON")
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute working directory")
@@ -223,7 +223,7 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 		}
 	})
 	if opts.RecoverRequest != "" {
-		if background && opts.Wait {
+		if opts.Background && opts.Wait {
 			return taskOptions{}, fmt.Errorf("use only one of --background or --wait")
 		}
 		if err := validateRecoverRequestFlags(visited, opts.Positional); err != nil {
@@ -243,7 +243,7 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	if opts.Backend == "" {
 		return taskOptions{}, fmt.Errorf("delegate task requires --backend")
 	}
-	if background && opts.Wait {
+	if opts.Background && opts.Wait {
 		return taskOptions{}, fmt.Errorf("use only one of --background or --wait")
 	}
 	if opts.StrictContract && opts.NoContract {
@@ -582,6 +582,7 @@ func recoverTaskSubmission(opts taskOptions, stderr io.Writer) (taskRunResult, e
 		return taskRunResult{}, err
 	}
 	taskOpts := taskOptionsFromIntent(opts.StateDir, intent, submitted)
+	taskOpts.Background = opts.Background
 	taskOpts.Wait = opts.Wait
 	var warnings []string
 	resolved := resolvedPromptFromIntent(intent)
@@ -615,23 +616,31 @@ func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted c
 	}
 	spec := intent.Params.TaskSpec
 	return taskOptions{
-		Backend:           spec.Backend,
-		CWD:               spec.CWD,
-		Model:             spec.Model,
-		Effort:            spec.Effort,
-		Write:             spec.Write,
-		NoContract:        intent.NoContract,
-		StateDir:          stateDir,
-		Kind:              intent.Kind,
-		ReviewWorkspace:   intent.ReviewWorkspace,
-		ModelEffort:       modelEffort,
-		AuditOrigin:       origin,
-		AgentbusStateRoot: intent.AgentbusStateRoot,
-		RequestID:         intent.RequestID,
-		WorkspaceKey:      intent.WorkspaceKey,
-		SubmissionState:   submitted.State,
-		Deduplicated:      submitted.Deduplicated,
+		Backend:            spec.Backend,
+		CWD:                spec.CWD,
+		Model:              spec.Model,
+		Effort:             spec.Effort,
+		Write:              spec.Write,
+		NoContract:         intent.NoContract,
+		ReportCorrectionOf: recoveredReportCorrectionOf(intent),
+		StateDir:           stateDir,
+		Kind:               intent.Kind,
+		ReviewWorkspace:    intent.ReviewWorkspace,
+		ModelEffort:        modelEffort,
+		AuditOrigin:        origin,
+		AgentbusStateRoot:  intent.AgentbusStateRoot,
+		RequestID:          intent.RequestID,
+		WorkspaceKey:       intent.WorkspaceKey,
+		SubmissionState:    submitted.State,
+		Deduplicated:       submitted.Deduplicated,
 	}
+}
+
+func recoveredReportCorrectionOf(intent submissionIntent) string {
+	if intent.Params.TaskSpec.Tags == nil {
+		return ""
+	}
+	return intent.Params.TaskSpec.Tags[reportCorrectionOfTag]
 }
 
 func resolvedPromptFromIntent(intent submissionIntent) handoff.ResolvedPrompt {
@@ -760,6 +769,13 @@ func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.
 		DeduplicatedSet:       true,
 	}
 	cleanupWarnings := newLocalCleanupWarnings(stderr)
+	if opts.Background {
+		env, err := newLaunchEnvelopeForTask(submitted.JobID, submitted.State, opts)
+		if err != nil {
+			return taskRunResult{Submitted: true, Warnings: warnings}, err
+		}
+		return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
+	}
 	if engine.IsTerminal(submitted.State) {
 		jobResult, err := submittedTerminalJob(ctx, c, opts.StateDir, submitted.JobID, cleanupWarnings)
 		if err != nil {

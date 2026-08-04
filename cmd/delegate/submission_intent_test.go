@@ -77,16 +77,14 @@ func TestSubmissionIntentPhaseSequenceModeAndPayloadRemoval(t *testing.T) {
 	}
 }
 
-func TestDeduplicatedTerminalReplayEmitsTerminalEnvelopeWithoutWait(t *testing.T) {
+func TestBackgroundDeduplicatedTerminalReplayEmitsLaunchEnvelopeWithoutResultFetch(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		state     engine.JobState
-		exitCode  int
-		resultSHA string
+		name  string
+		state engine.JobState
 	}{
-		{name: "completed", state: engine.StateCompleted, exitCode: 0, resultSHA: strings.Repeat("a", 64)},
-		{name: "failed", state: engine.StateFailed, exitCode: engine.ExitCodeForState(engine.StateFailed), resultSHA: strings.Repeat("b", 64)},
-		{name: "canceled", state: engine.StateCanceled, exitCode: engine.ExitCodeForState(engine.StateCanceled), resultSHA: strings.Repeat("c", 64)},
+		{name: "completed", state: engine.StateCompleted},
+		{name: "failed", state: engine.StateFailed},
+		{name: "canceled", state: engine.StateCanceled},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			jobID := "job_dedup_" + tc.name
@@ -107,7 +105,7 @@ func TestDeduplicatedTerminalReplayEmitsTerminalEnvelopeWithoutWait(t *testing.T
 					JobID:     jobID,
 					SessionID: "session_" + tc.name,
 					State:     tc.state,
-					Result:    &engine.ResultInfo{Text: report, SHA256: tc.resultSHA, Bytes: int64(len(report))},
+					Result:    &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
 					Contract:  ptr(compliantContractStamp(t, report)),
 				},
 			}
@@ -117,15 +115,15 @@ func TestDeduplicatedTerminalReplayEmitsTerminalEnvelopeWithoutWait(t *testing.T
 
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "terminal replay", "--background", "--json"}, nil, &stdout, &stderr)
-			if code != tc.exitCode {
-				t.Fatalf("task code=%d stderr=%q stdout=%q, want %d", code, stderr.String(), stdout.String(), tc.exitCode)
+			if code != 0 {
+				t.Fatalf("task code=%d stderr=%q stdout=%q, want 0", code, stderr.String(), stdout.String())
 			}
-			var env TerminalEnvelope
+			var env LaunchEnvelope
 			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
-				t.Fatalf("terminal JSON: %v; raw=%q", err, stdout.String())
+				t.Fatalf("launch JSON: %v; raw=%q", err, stdout.String())
 			}
-			if env.Schema != envelopeSchema || env.JobID != jobID || env.Status != tc.state || env.Status == engine.StateRunning {
-				t.Fatalf("terminal envelope=%#v, want schema %d job %s status %s", env, envelopeSchema, jobID, tc.state)
+			if env.Schema != envelopeSchema || env.JobID != jobID || env.Status != string(tc.state) {
+				t.Fatalf("launch envelope=%#v, want schema %d job %s status %s", env, envelopeSchema, jobID, tc.state)
 			}
 			if env.RequestID == "" || !strings.HasPrefix(env.RequestID, "delegate-") {
 				t.Fatalf("request_id=%q, want delegate request id", env.RequestID)
@@ -133,14 +131,14 @@ func TestDeduplicatedTerminalReplayEmitsTerminalEnvelopeWithoutWait(t *testing.T
 			if !env.Deduplicated {
 				t.Fatalf("deduplicated = %v, want true", env.Deduplicated)
 			}
-			if env.ResultSHA256 == nil || *env.ResultSHA256 != tc.resultSHA {
-				t.Fatalf("result_sha256=%v, want %s", env.ResultSHA256, tc.resultSHA)
+			if env.ResultSHA256 != nil {
+				t.Fatalf("result_sha256=%v, want nil for background launch", env.ResultSHA256)
 			}
-			if len(fake.results) != 1 || fake.results[0].JobID != jobID {
-				t.Fatalf("JobResult calls=%#v, want one call for %s", fake.results, jobID)
+			if len(fake.results) != 0 {
+				t.Fatalf("JobResult calls=%#v, want none for background launch", fake.results)
 			}
-			if len(fake.statuses) != 1 || fake.statuses[0].JobID != jobID || fake.statuses[0].All {
-				t.Fatalf("JobStatus calls=%#v, want one requested status for %s", fake.statuses, jobID)
+			if len(fake.statuses) != 0 {
+				t.Fatalf("JobStatus calls=%#v, want none for background launch", fake.statuses)
 			}
 		})
 	}
@@ -1110,6 +1108,73 @@ func TestRecoverRequestUsesRecordedRootAndPersistedParams(t *testing.T) {
 	}
 	if len(fake.submits) != 1 || !reflect.DeepEqual(fake.submits[0], params) {
 		t.Fatalf("submitted params=%#v, want persisted %#v", fake.submits, params)
+	}
+}
+
+func TestRecoverRequestPreservesReportCorrectionProvenance(t *testing.T) {
+	tmp := t.TempDir()
+	recordedRoot := filepath.Join(tmp, "recorded-agentbus")
+	if err := os.MkdirAll(recordedRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTBUS_STATE_ROOT", filepath.Join(tmp, "current-agentbus"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(tmp, "xdg-state"))
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := testSubmitParams(t, "delegate-88888888888888888888888888888888", "correct the report", nil)
+	params.TaskSpec.Policy, err = policy.ResolveTurnPolicy(policy.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params.TaskSpec.Tags[reportCorrectionTag] = "true"
+	params.TaskSpec.Tags[reportCorrectionOfTag] = "job_original_report"
+	intent := testSubmissionIntent(params, recordedRoot)
+	intent.Phase = submissionPhaseInFlight
+	if err := saveSubmissionIntent(stateDir, intent); err != nil {
+		t.Fatal(err)
+	}
+	badReport := malformedDelegateReport()
+	fake := &fakeAgentbusClient{
+		hello: helloWithCapabilities(),
+		submitResult: client.JobSubmitResult{
+			JobID: "job_recovered_correction",
+			State: engine.StateCompleted,
+		},
+		result: reportJobResult("job_recovered_correction", badReport),
+	}
+	oldConnect := connectAgentbus
+	oldLookPath := lookPath
+	oldCommandOutput := commandOutput
+	connectAgentbus = func(context.Context, client.Options) (agentbusClient, error) {
+		return fake, nil
+	}
+	lookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	commandOutput = func(string, ...string) ([]byte, error) { return nil, errors.New("unexpected agentbus version call") }
+	defer func() {
+		connectAgentbus = oldConnect
+		lookPath = oldLookPath
+		commandOutput = oldCommandOutput
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"task", "--recover-request", params.RequestID, "--json"}, nil, &stdout, &stderr)
+	if want := engine.ExitCodeForState(engine.StateCompletedNoncompliant); code != want {
+		t.Fatalf("recover code=%d want %d stderr=%q stdout=%q", code, want, stderr.String(), stdout.String())
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("JobSubmit calls = %d, want recovered correction only", len(fake.submits))
+	}
+	meta, found, err := loadJobMetadata(stateDir, "job_recovered_correction")
+	if err != nil || !found {
+		t.Fatalf("metadata found=%v err=%v", found, err)
+	}
+	if meta.ReportCorrectionOf != "job_original_report" {
+		t.Fatalf("ReportCorrectionOf = %q, want original provenance", meta.ReportCorrectionOf)
+	}
+	if meta.ReportCorrectionJobID != "" {
+		t.Fatalf("ReportCorrectionJobID = %q, want no recursive correction", meta.ReportCorrectionJobID)
 	}
 }
 
