@@ -319,7 +319,7 @@ func ComposePrompt(kind string, assembled Context) (string, error) {
 	if assembled.AllowLiveRepoRead {
 		prompt.WriteString("LIVE-REPOSITORY MODE was explicitly enabled. Delegate still applies its path/history redaction and final content scan to the context it assembles; this flag makes backend file reads easier by using the live repository as its working directory. You may inspect the current repository to validate and self-collect context, but remain read-only and do not expose secret-looking file contents in the response.\n")
 	} else {
-		prompt.WriteString("Delegate has provided only its assembled context in this workspace, with secret-looking paths represented as path/status only and secret-like diff hunks replaced by a redaction marker. This does not prevent a same-user backend from reading repository or other filesystem files itself; review only this context and do not try to inspect or reconstruct redacted content. OS-level isolation requires a container or sandbox profile and is planned for v0.2.\n")
+		prompt.WriteString("Delegate has provided only its assembled context in this workspace, with secret-looking paths represented as path/status only and secret-like diff hunks replaced by a redaction marker. This does not prevent a same-user backend from reading repository or other filesystem files itself; review only this context and do not try to inspect or reconstruct redacted content. OS-level isolation requires a container or sandbox profile.\n")
 	}
 	if assembled.ArtifactPath != "" {
 		path := artifactFilename

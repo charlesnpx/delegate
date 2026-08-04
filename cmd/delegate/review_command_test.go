@@ -426,7 +426,7 @@ func TestReviewHelpStatesContextBoundaryAndFilesystemLimits(t *testing.T) {
 		"redacts secret-matched paths and secret-like diff hunks",
 		"does not prevent a same-user backend from reading",
 		"--allow-live-repo-read makes those reads easier",
-		"v0.2 roadmap item",
+		"OS-level isolation requires a container/sandbox profile",
 	} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("review help missing %q: %q", want, stderr.String())
