@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 
 	"github.com/charlesnpx/agentbus/engine"
 	"github.com/charlesnpx/delegate/internal/config"
@@ -56,12 +57,15 @@ type TerminalEnvelope struct {
 	ContractKind                   string                     `json:"contractKind"`
 	Contract                       engine.ContractStamp       `json:"contract"`
 	ResultSHA256                   *string                    `json:"result_sha256"`
+	ResultPath                     string                     `json:"result_path,omitempty"`
 	ResultUnavailableReason        string                     `json:"result_unavailable_reason,omitempty"`
 	BackendError                   string                     `json:"backend_error,omitempty"`
 	Model                          config.DimensionResolution `json:"model"`
 	Effort                         config.DimensionResolution `json:"effort"`
 	ModelReported                  string                     `json:"model_reported,omitempty"`
 	ModelReportedUnavailableReason string                     `json:"model_reported_unavailable_reason,omitempty"`
+	SubmittedAt                    *time.Time                 `json:"submitted_at,omitempty"`
+	UpdatedAt                      *time.Time                 `json:"updated_at,omitempty"`
 	Origin                         *envelopeOrigin            `json:"origin,omitempty"`
 	SHA256                         string                     `json:"sha256"`
 }
@@ -78,6 +82,9 @@ type terminalEnvelopeOptions struct {
 	LateFinalization       bool
 	AgentbusWarnings       []string
 	LocalArtifactsRetained bool
+	ResultPath             string
+	SubmittedAt            *time.Time
+	UpdatedAt              *time.Time
 }
 
 type launchEnvelopeOptions struct {
@@ -103,12 +110,15 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		ContractKind                   string                     `json:"contractKind"`
 		Contract                       map[string]any             `json:"contract"`
 		ResultSHA256                   *string                    `json:"result_sha256"`
+		ResultPath                     string                     `json:"result_path,omitempty"`
 		ResultUnavailableReason        string                     `json:"result_unavailable_reason,omitempty"`
 		BackendError                   string                     `json:"backend_error,omitempty"`
 		Model                          config.DimensionResolution `json:"model"`
 		Effort                         config.DimensionResolution `json:"effort"`
 		ModelReported                  string                     `json:"model_reported,omitempty"`
 		ModelReportedUnavailableReason string                     `json:"model_reported_unavailable_reason,omitempty"`
+		SubmittedAt                    *time.Time                 `json:"submitted_at,omitempty"`
+		UpdatedAt                      *time.Time                 `json:"updated_at,omitempty"`
 		Origin                         *envelopeOrigin            `json:"origin,omitempty"`
 		SHA256                         string                     `json:"sha256"`
 	}
@@ -127,12 +137,15 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		ContractKind:                   e.ContractKind,
 		Contract:                       contractStampEnvelopeValue(e.Contract),
 		ResultSHA256:                   e.ResultSHA256,
+		ResultPath:                     e.ResultPath,
 		ResultUnavailableReason:        e.ResultUnavailableReason,
 		BackendError:                   e.BackendError,
 		Model:                          e.Model,
 		Effort:                         e.Effort,
 		ModelReported:                  e.ModelReported,
 		ModelReportedUnavailableReason: e.ModelReportedUnavailableReason,
+		SubmittedAt:                    e.SubmittedAt,
+		UpdatedAt:                      e.UpdatedAt,
 		Origin:                         e.Origin,
 		SHA256:                         e.SHA256,
 	})
@@ -217,6 +230,9 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 		Effort:                         modelEffort.Effort,
 		ModelReported:                  option.ModelReported,
 		ModelReportedUnavailableReason: modelReportedUnavailableReason(option.ModelsReportedCapable, option.ModelReported),
+		SubmittedAt:                    option.SubmittedAt,
+		UpdatedAt:                      option.UpdatedAt,
+		ResultPath:                     option.ResultPath,
 		Origin:                         envelopeOriginPointer(option.Origin),
 	}
 	if resultSHA256 != "" {
