@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/charlesnpx/agentbus/client"
@@ -55,7 +58,7 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	c, hello, err := connectAgentbusCommandAtRoot(ctx, nil, stateRoot)
+	c, _, err := connectAgentbusCommandAtRoot(ctx, nil, stateRoot)
 	if err != nil {
 		return agentbusCommandErrorResult(*jsonOut, stdout, err)
 	}
@@ -69,41 +72,6 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	if err != nil {
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
-	}
-	if *jobID != "" {
-		if job, ok := findJobStatus(status, *jobID); ok {
-			if engine.IsTerminal(job.State) && !*probe {
-				result, resultErr := c.JobResult(ctx, client.JobResultParams{JobID: *jobID})
-				terminalJob := terminalJobResultFromResultAndStatus(result, job, true)
-				if resultErr != nil {
-					cleanupStatus("", job, cleanupWarnings)
-					if !terminalStatusDoesNotExpectJobResult(job) {
-						return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(resultErr))
-					}
-					terminalJob = terminalJobResultFromStatus(job)
-				} else {
-					result = terminalJob.result
-					_ = captureBackendError("", job)
-					if err := cleanupJobInput("", result.JobID, result.SessionID, result.State, result.CleanupDisposition, cleanupWarnings); err != nil {
-						return 0, err
-					}
-					terminalJob.result = result
-				}
-				env, envelopeErr := terminalEnvelopeFromJobResultWithOptions("", terminalJob.result, terminalJob.envelopeOptions(terminalEnvelopeOptions{ModelsReportedCapable: hello.Capabilities["models.reported"]}))
-				if envelopeErr != nil {
-					return 0, envelopeErr
-				}
-				if *jsonOut {
-					return engine.ExitCodeForState(env.Status), writeJSONLine(stdout, env)
-				}
-				if env.BackendError != "" {
-					_, envelopeErr = fmt.Fprintf(stdout, "%s %s backend_error=%s\n", env.JobID, env.Status, env.BackendError)
-				} else {
-					_, envelopeErr = fmt.Fprintf(stdout, "%s %s\n", env.JobID, env.Status)
-				}
-				return engine.ExitCodeForState(env.Status), envelopeErr
-			}
-		}
 	}
 	if *probe {
 		job, ok := findJobStatus(status, *jobID)
@@ -122,15 +90,41 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		return 0, writeProbeSummary(stdout, probeResult)
 	}
-	if *jsonOut {
-		return 0, writeJSONLine(stdout, status)
+	// delegate status always emits the {"jobs":[...]} JobStatusResult shape for
+	// both running and terminal jobs, so a single-schema poller never breaks at
+	// the running->terminal transition. The flat contract-stamp TerminalEnvelope
+	// is emitted only by `delegate result`. For a requested terminal job we still
+	// run the same local-artifact cleanup the old terminal path performed and map
+	// the terminal state to its exit code, so scripts checking the exit status
+	// still learn the outcome without the JSON shape changing.
+	exitCode := 0
+	backendErr := ""
+	if *jobID != "" {
+		if job, ok := findJobStatus(status, *jobID); ok && engine.IsTerminal(job.State) {
+			cleanupStatus("", job, cleanupWarnings)
+			exitCode = engine.ExitCodeForState(job.State)
+			if meta, found, metaErr := loadJobMetadata("", job.JobID); metaErr == nil && found {
+				backendErr = meta.BackendError
+			}
+		}
 	}
+	if *jsonOut {
+		return exitCode, writeJSONLine(stdout, status)
+	}
+	// The JSON shape stays strictly JobStatusResult, but the human-readable line
+	// must not lose the captured backend diagnostic the old terminal path printed.
 	for _, job := range status.Jobs {
+		if job.JobID == *jobID && backendErr != "" {
+			if _, err := fmt.Fprintf(stdout, "%s %s backend_error=%s\n", job.JobID, job.State, backendErr); err != nil {
+				return 0, err
+			}
+			continue
+		}
 		if _, err := fmt.Fprintf(stdout, "%s %s\n", job.JobID, job.State); err != nil {
 			return 0, err
 		}
 	}
-	return 0, nil
+	return exitCode, nil
 }
 
 func findJobStatus(status client.JobStatusResult, jobID string) (client.JobStatus, bool) {
@@ -381,6 +375,9 @@ func (result terminalJobResult) envelopeOptions(option terminalEnvelopeOptions) 
 		}
 		option.LateFinalization = option.LateFinalization || result.statusJob.LateFinalization
 		option.AgentbusWarnings = append([]string(nil), result.statusJob.Warnings...)
+		if result.statusJob.UpdatedAt != nil {
+			option.UpdatedAt = result.statusJob.UpdatedAt
+		}
 	}
 	return option
 }
@@ -700,6 +697,13 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 		stamp = *result.Contract
 	} else if contractKind == contractKindNone {
 		stamp = policy.DisabledStamp()
+	} else if reconstructed, ok := localReconstructedContractStamp(result, contractKind, found); ok {
+		// agentbus admission (protocol v2) jobs never persist a contract stamp,
+		// so JobResult.Contract is nil even for a fully-present, hash-matched
+		// result. Rather than mislabel that healthy result as result_unavailable,
+		// delegate (which owns the delegate-report shape) re-derives the true
+		// verdict from the result body itself.
+		stamp = reconstructed
 	}
 	resultSHA256 := ""
 	if result.Result != nil {
@@ -731,11 +735,101 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 	option.Origin = origin
 	option.CleanupDisposition = cleanupDisposition
 	option.LateFinalization = option.LateFinalization || result.LateFinalization
+	// submitted_at is delegate's stable local submission time; updated_at comes
+	// ONLY from agentbus's runtime status (set in envelopeOptions). We do not fall
+	// back to meta.UpdatedAt: that field is bumped on every local metadata write,
+	// so a result fetched hours after completion would inflate the apparent
+	// duration. result_path lets operators reach the body through the CLI.
+	if found && !meta.CreatedAt.IsZero() {
+		submitted := meta.CreatedAt
+		option.SubmittedAt = &submitted
+	}
+	if result.Result != nil {
+		option.ResultPath = result.Result.ResultPath
+	}
 	return newTerminalEnvelope(result.JobID, result.State, kind, contractKind, stamp, resultSHA256, backendError, option)
 }
 
 func localArtifactsRetainedFromMetadata(meta jobMetadata, state engine.JobState, _ string) bool {
 	return engine.IsTerminal(state) && (meta.JobInputPath != "" || meta.ReviewWorkspace != "")
+}
+
+// localReconstructedContractStamp re-derives the true contract verdict from a
+// present result body when agentbus returned no contract stamp. Admission
+// (protocol v2) jobs discard the validation stamp at finalization, so
+// JobResult.Contract is nil even when the result is complete and hash-matched;
+// without this, the terminal envelope would fall back to result_unavailable and
+// mislabel a healthy result. delegate owns the bundled delegate-report shape, so
+// it can validate the final text itself. Only the shape contract can be
+// reconstructed locally: a JSON Schema contract's schema text is not retained in
+// job metadata, so that case is left to agentbus's own stamp.
+func localReconstructedContractStamp(result client.JobResult, contractKind string, found bool) (engine.ContractStamp, bool) {
+	// Reconstruct only with positive shape provenance: local metadata present AND
+	// recording the delegate-report shape. Without metadata the contract kind is
+	// unknown (it defaults to shape), and validating a JSON Schema / no-contract
+	// body against the shape spec would fabricate a wrong verdict.
+	if !found || contractKind != contractKindShape {
+		return engine.ContractStamp{}, false
+	}
+	if result.Result == nil || result.Result.Bytes < 0 {
+		return engine.ContractStamp{}, false
+	}
+	text, ok := resultBodyText(result.Result)
+	if !ok {
+		return engine.ContractStamp{}, false
+	}
+	spec, err := policy.DelegateReportSpec()
+	if err != nil {
+		return engine.ContractStamp{}, false
+	}
+	validation, err := engine.ValidateContract(text, spec)
+	if err != nil {
+		return engine.ContractStamp{}, false
+	}
+	// A zero ValidatedAt keeps the reconstructed stamp deterministic (the
+	// envelope omits validatedAt when zero); the verdict, missing sections, and
+	// contract hash are the load-bearing fields. The empty contract name mirrors
+	// the inline shape spec delegate submits (ResolveTurnPolicy uses no name).
+	return engine.StampValidation(1, false, "", validation, time.Time{}), true
+}
+
+// resultBodyText returns the certified result text: the inline Text when
+// agentbus provided it, otherwise a bounded read of ResultPath verified against
+// the certified byte count and sha256. agentbus elides inline Text for results
+// at/above its inline cap, but the on-disk body remains authoritative, so a
+// consumer must never treat an empty inline Text as an absent result.
+func resultBodyText(info *engine.ResultInfo) (string, bool) {
+	if info == nil {
+		return "", false
+	}
+	if info.Text != "" {
+		return info.Text, true
+	}
+	// A hash-certified zero-byte result is a present (empty) body, not an absent
+	// one; treat it as available so an empty result validates as noncompliant
+	// rather than falling through to result_unavailable.
+	if info.Bytes == 0 {
+		return "", true
+	}
+	if info.ResultPath == "" || info.Bytes < 0 {
+		return "", false
+	}
+	f, err := os.Open(info.ResultPath)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, info.Bytes+1))
+	if err != nil || int64(len(raw)) != info.Bytes {
+		return "", false
+	}
+	if info.SHA256 != "" {
+		sum := sha256.Sum256(raw)
+		if hex.EncodeToString(sum[:]) != info.SHA256 {
+			return "", false
+		}
+	}
+	return string(raw), true
 }
 
 func skippedDelegateContractStamp(reason engine.SkippedReason) engine.ContractStamp {

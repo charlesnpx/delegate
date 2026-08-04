@@ -186,7 +186,7 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
 	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout")
 	fs.BoolVar(&opts.Write, "write", false, "allow backend writes")
-	fs.BoolVar(&opts.StrictContract, "strict-contract", false, "enable corrective retry (JSON Schema contracts retry by default)")
+	fs.BoolVar(&opts.StrictContract, "strict-contract", false, "compatibility flag; delegate-report corrective retry is enabled by default")
 	fs.BoolVar(&opts.NoContract, "no-contract", false, "disable contract enforcement (cannot be used with --output-schema*)")
 	fs.StringVar(&opts.Origin, "origin", "", "originating skill")
 	fs.Var(&opts.ParentClient, "parent-client", "explicit parent client for audit linkage")
@@ -430,6 +430,10 @@ func prepareNewSubmissionIntent(opts taskOptions, resolved handoff.ResolvedPromp
 	if err != nil {
 		return submissionIntent{}, err
 	}
+	prompt, err := policy.AppendReportFormatBlock(resolved.Prompt, turnPolicy)
+	if err != nil {
+		return submissionIntent{}, err
+	}
 	logicalWorkspace := opts.LogicalWorkspace
 	if logicalWorkspace == "" {
 		logicalWorkspace = opts.CWD
@@ -449,7 +453,7 @@ func prepareNewSubmissionIntent(opts taskOptions, resolved handoff.ResolvedPromp
 			Write:     opts.Write,
 			Model:     opts.Model,
 			Effort:    opts.Effort,
-			Prompt:    resolved.Prompt,
+			Prompt:    prompt,
 			Policy:    turnPolicy,
 			Tags:      tags,
 			TimeoutMs: timeoutMillis(opts.Timeout, opts.TimeoutSet),

@@ -107,8 +107,8 @@ v0.6.0 retains the breaking namespace rename. On install or upgrade, the managed
 
 | Invocation | Contract result | Retry behavior |
 | --- | --- | --- |
-| Default read-only task | Inject digest, validate, stamp | No corrective retry; a malformed result is `completed_noncompliant`. |
-| `--write` or `--strict-contract` | Inject digest, validate, stamp | At most one corrective retry. The retry is always read-only and instructs the backend to emit only the corrected report and make no further changes. |
+| Default delegate-report task | Inject digest, append the generated output format, validate, stamp | At most one corrective retry. The retry is always read-only and instructs the backend to emit only the corrected report and make no further changes. |
+| `--write` or `--strict-contract` | Same delegate-report contract behavior | `--write` controls backend write permission; `--strict-contract` is retained for compatibility. |
 | `--no-contract` | Enforcement disabled | No retry; terminal envelope has `contract.status: "disabled"` and `reason: "no_contract_flag"`. This is for direct CLI use only, never managed skills. |
 
 ## State Roots And Recovery

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,8 +35,8 @@ type setupJSON struct {
 	AgentbusAutostartLockRoot         string        `json:"agentbusAutostartLockRoot"`
 	AgentbusAutostartLockRootWritable bool          `json:"agentbusAutostartLockRootWritable"`
 	AdmissionStrictContainment        bool          `json:"admissionStrictContainment"`
-	PendingSubmissionIntentCount      int           `json:"pendingSubmissionIntentCount"`
-	UnresolvedCleanupArtifactCount    int           `json:"unresolvedCleanupArtifactCount"`
+	PendingSubmissionIntentCount      *int          `json:"pendingSubmissionIntentCount"`
+	UnresolvedCleanupArtifactCount    *int          `json:"unresolvedCleanupArtifactCount"`
 	DaemonReachable                   bool          `json:"daemonReachable"`
 	Ready                             bool          `json:"ready"`
 	StopReviewGate                    string        `json:"stop_review_gate"`
@@ -179,7 +180,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	if _, err := fmt.Fprintf(stdout, "agentbus discovery: found\nagentbus protocol: %d\ncapabilities: %s\nadmission.strictContainment: %t\n", hello.ProtocolVersion, capabilityStatus, hello.Capabilities["admission.strictContainment"]); err != nil {
 		return 0, err
 	}
-	if _, err := fmt.Fprintf(stdout, "agentbusStateRoot: %s\nagentbusStateRootWritable: %t\nagentbusAutostartLockRoot: %s\nagentbusAutostartLockRootWritable: %t\nstateRootWritable: %t\npendingSubmissionIntentCount: %d\nunresolvedCleanupArtifactCount: %d\ndaemonReachable: true\nready: %t\n", preflight.AgentbusStateRoot, preflight.AgentbusStateRootWritable, preflight.AgentbusAutostartLockRoot, preflight.AgentbusAutostartLockRootWritable, preflight.StateRootWritable, pendingSubmissionIntents, unresolvedCleanupArtifacts, ready); err != nil {
+	if _, err := fmt.Fprintf(stdout, "agentbusStateRoot: %s\nagentbusStateRootWritable: %t\nagentbusAutostartLockRoot: %s\nagentbusAutostartLockRootWritable: %t\nstateRootWritable: %t\npendingSubmissionIntentCount: %s\nunresolvedCleanupArtifactCount: %s\ndaemonReachable: true\nready: %t\n", preflight.AgentbusStateRoot, preflight.AgentbusStateRootWritable, preflight.AgentbusAutostartLockRoot, preflight.AgentbusAutostartLockRootWritable, preflight.StateRootWritable, setupCountText(pendingSubmissionIntents), setupCountText(unresolvedCleanupArtifacts), ready); err != nil {
 		return 0, err
 	}
 	for _, warning := range preflight.Warnings {
@@ -227,7 +228,7 @@ func setupReadinessError(hello client.HelloResult, version string, missingCapabi
 		errs = append(errs, setupWritableReadinessError("agentbus autostart lock root", preflight.AgentbusAutostartLockRoot))
 	}
 	if !preflight.StateRootWritable {
-		errs = append(errs, setupWritableReadinessError("delegate state root", preflight.DelegateStateRoot))
+		errs = append(errs, setupStateRootReadinessError(preflight.DelegateStateRoot, preflight.StateRootReason))
 	}
 	return errors.Join(errs...)
 }
@@ -239,8 +240,23 @@ func setupWritableReadinessError(name, path string) error {
 	return fmt.Errorf("%s is not writable: %s", name, path)
 }
 
+// setupStateRootReadinessError reports the precise reason the delegate state
+// root is unusable rather than the generic "not writable" — a mode mismatch is
+// the common case and needs a different fix (chmod), not a permissions grant.
+func setupStateRootReadinessError(path, reason string) error {
+	if reason == "" {
+		return setupWritableReadinessError("delegate state root", path)
+	}
+	msg := fmt.Sprintf("delegate state root is not usable: %s", reason)
+	if path != "" && strings.Contains(reason, "want 700") {
+		msg += fmt.Sprintf("; run: chmod 700 %s", path)
+	}
+	return errors.New(msg)
+}
+
 type setupStatePreflightResult struct {
 	StateRootWritable                 bool
+	StateRootReason                   string
 	DelegateStateRoot                 string
 	AgentbusStateRoot                 string
 	AgentbusStateRootWritable         bool
@@ -259,9 +275,17 @@ func setupStatePreflightWithAgentbusRoot(agentbusRoot string, agentbusErr error)
 	delegateRoot, err := handoff.ResolveStateDir(handoff.StateConfig{})
 	if err == nil {
 		result.DelegateStateRoot = delegateRoot
-		if err := handoff.EnsureStateDir(delegateRoot); err == nil {
+		// EnsureStateDir carries the precise cause when the directory exists but
+		// is not usable (e.g. "mode = 755, want 700"). Surface it instead of
+		// discarding it and collapsing every cause into a generic "not writable".
+		if ensureErr := handoff.EnsureStateDir(delegateRoot); ensureErr != nil {
+			result.StateRootReason = ensureErr.Error()
+			result.Warnings = append(result.Warnings, fmt.Sprintf("delegate state root is not usable: %v", ensureErr))
+		} else {
 			result.StateRootWritable = directoryWritable(delegateRoot)
 		}
+	} else {
+		result.StateRootReason = err.Error()
 	}
 	if agentbusErr != nil {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus state root was not probed because %v", agentbusErr))
@@ -279,21 +303,33 @@ func setupStatePreflightWithAgentbusRoot(agentbusRoot string, agentbusErr error)
 	return result
 }
 
-func setupPendingSubmissionIntentCount(stateDir string) (int, []string) {
+// setupPendingSubmissionIntentCount returns a nil count (rendered as JSON null /
+// "uncounted") when the value could not be computed, so an orchestrator gating
+// on it cannot misread a "not counted" warning as a clean zero.
+func setupPendingSubmissionIntentCount(stateDir string) (*int, []string) {
 	if stateDir == "" {
-		return 0, []string{"pending submission intents were not counted because delegate state root was not resolved"}
+		return nil, []string{"pending submission intents were not counted because delegate state root was not resolved"}
 	}
 	intents, err := listSubmissionIntents(stateDir)
 	if err != nil {
-		return 0, []string{fmt.Sprintf("pending submission intents were not counted because %v", err)}
+		return nil, []string{fmt.Sprintf("pending submission intents were not counted because %v", err)}
 	}
-	var count int
+	count := 0
 	for _, intent := range intents {
 		if submissionIntentPending(intent) {
 			count++
 		}
 	}
-	return count, nil
+	return &count, nil
+}
+
+// setupCountText renders a nil (uncounted) count distinctly from a real zero in
+// the human-readable setup output, mirroring the JSON null.
+func setupCountText(count *int) string {
+	if count == nil {
+		return "uncounted"
+	}
+	return strconv.Itoa(*count)
 }
 
 func submissionIntentPending(intent submissionIntent) bool {
@@ -305,15 +341,15 @@ func submissionIntentPending(intent submissionIntent) bool {
 	}
 }
 
-func setupUnresolvedCleanupArtifactCount(stateDir string) (int, []string) {
+func setupUnresolvedCleanupArtifactCount(stateDir string) (*int, []string) {
 	if stateDir == "" {
-		return 0, []string{"unresolved cleanup artifacts were not counted because delegate state root was not resolved"}
+		return nil, []string{"unresolved cleanup artifacts were not counted because delegate state root was not resolved"}
 	}
 	metas, err := listJobMetadata(stateDir)
 	if err != nil {
-		return 0, []string{fmt.Sprintf("unresolved cleanup artifacts were not counted because %v", err)}
+		return nil, []string{fmt.Sprintf("unresolved cleanup artifacts were not counted because %v", err)}
 	}
-	var count int
+	count := 0
 	for _, meta := range metas {
 		if !engine.IsTerminal(meta.State) || localCleanupSafe(meta.CleanupDisposition) {
 			continue
@@ -325,7 +361,7 @@ func setupUnresolvedCleanupArtifactCount(stateDir string) (int, []string) {
 			count++
 		}
 	}
-	return count, nil
+	return &count, nil
 }
 
 func retainedArtifactExists(path string) bool {

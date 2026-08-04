@@ -112,11 +112,11 @@ func TestSetupReportsPendingSubmissionAndUnresolvedCleanupCounts(t *testing.T) {
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
 		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
 	}
-	if result.PendingSubmissionIntentCount != 3 {
-		t.Fatalf("pendingSubmissionIntentCount=%d, want 3", result.PendingSubmissionIntentCount)
+	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 3 {
+		t.Fatalf("pendingSubmissionIntentCount=%v, want 3", result.PendingSubmissionIntentCount)
 	}
-	if result.UnresolvedCleanupArtifactCount != 2 {
-		t.Fatalf("unresolvedCleanupArtifactCount=%d, want 2", result.UnresolvedCleanupArtifactCount)
+	if result.UnresolvedCleanupArtifactCount == nil || *result.UnresolvedCleanupArtifactCount != 2 {
+		t.Fatalf("unresolvedCleanupArtifactCount=%v, want 2", result.UnresolvedCleanupArtifactCount)
 	}
 }
 
@@ -193,7 +193,12 @@ func TestSetupReadyRequiresWritableDelegateStateRoot(t *testing.T) {
 	if !result.AgentbusStateRootWritable || !result.AgentbusAutostartLockRootWritable {
 		t.Fatalf("agentbus writable fields = state:%t lock:%t, want only delegate state check to fail", result.AgentbusStateRootWritable, result.AgentbusAutostartLockRootWritable)
 	}
-	if !strings.Contains(stderr.String(), "delegate state root is not writable") || !strings.Contains(stderr.String(), delegateRoot) {
+	if !strings.Contains(stderr.String(), "delegate state root is not usable") || !strings.Contains(stderr.String(), delegateRoot) {
 		t.Fatalf("stderr=%q, want failed Delegate state root check and path %q", stderr.String(), delegateRoot)
+	}
+	// The precise cause (mode mismatch) and its remedy must surface instead of a
+	// generic "not writable" — a mode fix is chmod, not a permissions grant.
+	if !strings.Contains(stderr.String(), "want 700") || !strings.Contains(stderr.String(), "chmod 700 ") {
+		t.Fatalf("stderr=%q, want precise mode reason and chmod remedy", stderr.String())
 	}
 }

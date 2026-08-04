@@ -14,6 +14,7 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/delegate/internal/policy"
 )
 
 // TestRescueSmokeFixtures exercises the actual handoff and task/result CLI flow
@@ -88,8 +89,8 @@ func TestRescueSmokeFixtures(t *testing.T) {
 			if got := bus.submits[0].TaskSpec.Tags["delegate.origin"]; got != tc.origin {
 				t.Fatalf("delegate.origin = %q, want %q", got, tc.origin)
 			}
-			if got := bus.submits[0].TaskSpec.Prompt; got != prompt {
-				t.Fatalf("handoff prompt = %q, want %q", got, prompt)
+			if got, want := bus.submits[0].TaskSpec.Prompt, promptWithReportFormat(t, prompt); got != want {
+				t.Fatalf("handoff prompt = %q, want %q", got, want)
 			}
 			if _, err := os.Stat(handoffResult.HandoffPath); !os.IsNotExist(err) {
 				t.Fatalf("handoff file remains after launch: %v", err)
@@ -114,6 +115,9 @@ func TestRescueSmokeFixtures(t *testing.T) {
 			}
 			if len(backend.turns) != 1 || backend.turns[0].Write {
 				t.Fatalf("backend turn inputs = %#v, want one read-only launch", backend.turns)
+			}
+			if effective := backend.turns[0].Prompt; !strings.Contains(effective, policy.DelegateContractDigest()) || !strings.HasSuffix(effective, reportFormatBlock(t)) {
+				t.Fatalf("effective prompt = %q, want digest prologue and trailing report format block", effective)
 			}
 		})
 	}
