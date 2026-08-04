@@ -8,6 +8,7 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/delegate/internal/policy"
 )
 
 // TestRunStatusTerminalJobEmitsJobsShapeWithExitCode locks in ⑧: `delegate
@@ -41,26 +42,12 @@ func TestRunStatusTerminalJobEmitsJobsShapeWithExitCode(t *testing.T) {
 	}
 }
 
-const reconstructCompliantReport = `complete
-
-Criteria scored:
-- observed: fixture criteria satisfied at example/thing.go:12.
-
-Receipts:
-- observed: fixture command exit 0.
-
-Verification:
-- observed: fixture command exit 0.
-
-Scope boundary:
-- observed: limited to the delegate report shape at example/scope.md:3.
-`
-
 // TestLocalReconstructedContractStampFromBody locks in ⑦: when agentbus returns
 // no contract stamp (admission/v2 jobs) but a result body is present, delegate
 // re-derives the true verdict from the body instead of defaulting to
 // result_unavailable — and only with positive shape provenance.
 func TestLocalReconstructedContractStampFromBody(t *testing.T) {
+	reconstructCompliantReport := compliantReport()
 	res := client.JobResult{
 		JobID:  "j",
 		State:  engine.StateCompleted,
@@ -75,7 +62,9 @@ func TestLocalReconstructedContractStampFromBody(t *testing.T) {
 		t.Fatalf("stamp status = %q, want compliant; missing=%v", stamp.Status, stamp.Missing)
 	}
 
-	noncompliant := strings.Replace(reconstructCompliantReport, "Scope boundary:", "Scope omitted:", 1)
+	sections := reportSections(t)
+	lastSection := sections[len(sections)-1]
+	noncompliant := strings.Replace(reconstructCompliantReport, lastSection+":", "Scope omitted:", 1)
 	res.Result.Text = noncompliant
 	res.Result.Bytes = int64(len(noncompliant))
 	stamp, ok = localReconstructedContractStamp(res, contractKindShape, true)
@@ -88,4 +77,16 @@ func TestLocalReconstructedContractStampFromBody(t *testing.T) {
 	if _, ok := localReconstructedContractStamp(res, contractKindShape, false); ok {
 		t.Fatal("reconstruction without positive shape provenance must be refused")
 	}
+}
+
+func reportSections(t *testing.T) []string {
+	t.Helper()
+	spec, err := policy.DelegateReportSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Shape == nil || len(spec.Shape.RequiredSections) == 0 {
+		t.Fatalf("delegate report spec = %#v, want sections", spec)
+	}
+	return spec.Shape.RequiredSections
 }

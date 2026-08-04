@@ -23,7 +23,7 @@ func TestResolveTurnPolicyFlagMatrix(t *testing.T) {
 		wantNil   bool
 		wantRetry bool
 	}{
-		{name: "read_only", flags: Flags{}},
+		{name: "read_only", flags: Flags{}, wantRetry: true},
 		{name: "write", flags: Flags{Write: true}, wantRetry: true},
 		{name: "strict", flags: Flags{StrictContract: true}, wantRetry: true},
 		{name: "write_strict", flags: Flags{Write: true, StrictContract: true}, wantRetry: true},
@@ -184,21 +184,35 @@ func TestDelegateReportSpecShape(t *testing.T) {
 	if len(spec.JSONSchema) != 0 || spec.Named != "" || spec.Shape == nil {
 		t.Fatalf("spec variant = %#v, want shape only", spec)
 	}
-	want := engine.ShapeSpec{
-		FirstLineEnum:        []string{"complete", "partial", "blocked"},
-		RequiredSections:     []string{"Criteria scored", "Receipts", "Verification", "Scope boundary"},
-		RequiredAttestations: []string{},
-		EvidenceHeuristic:    true,
+	var bundled struct {
+		Shape engine.ShapeSpec `json:"shape"`
 	}
-	if !reflect.DeepEqual(*spec.Shape, want) {
+	if err := json.Unmarshal(DelegateReportSpecJSON(), &bundled); err != nil {
+		t.Fatal(err)
+	}
+	if len(bundled.Shape.FirstLineEnum) == 0 || len(bundled.Shape.RequiredSections) == 0 || !bundled.Shape.EvidenceHeuristic {
+		t.Fatalf("bundled shape = %#v, want first line enum, sections, and evidence heuristic", bundled.Shape)
+	}
+	if !reflect.DeepEqual(*spec.Shape, bundled.Shape) {
 		b, _ := json.MarshalIndent(spec.Shape, "", "  ")
-		t.Fatalf("shape spec = %s, want %#v", b, want)
+		t.Fatalf("shape spec = %s, want bundled shape %#v", b, bundled.Shape)
 	}
 }
 
 func TestDigestBundleEqualsFile(t *testing.T) {
 	if strings.TrimSpace(DelegateContractDigest()) == "" {
 		t.Fatal("bundled digest is empty")
+	}
+	spec, err := DelegateReportSpec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragments := append([]string{}, spec.Shape.RequiredSections...)
+	fragments = append(fragments, "firstLineEnum", "section:")
+	for _, fragment := range fragments {
+		if strings.Contains(DelegateContractDigest(), fragment) {
+			t.Fatalf("bundled digest contains hand-written contract fragment %q", fragment)
+		}
 	}
 	file, err := os.ReadFile("digest/delegate-contract.md")
 	if err != nil {
@@ -209,25 +223,157 @@ func TestDigestBundleEqualsFile(t *testing.T) {
 	}
 }
 
-func TestRetryTemplateAndPolicyValidateWithEngine(t *testing.T) {
-	policy, err := ResolveTurnPolicy(Flags{Write: true})
+func TestDelegateReportFormatBlockRoundTrip(t *testing.T) {
+	spec, err := DelegateReportSpec()
 	if err != nil {
 		t.Fatal(err)
 	}
-	compliant := `complete
+	if spec.Shape == nil {
+		t.Fatal("delegate report spec has no shape")
+	}
+	report := canonicalReportFromSpec(t, spec)
+	valid, err := engine.ValidateContract(report, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !valid.Valid {
+		t.Fatalf("canonical report missing = %#v", valid.Missing)
+	}
 
-Criteria scored:
-- observed: fixture criteria are satisfied at example/thing.go:12.
+	block, err := DelegateReportFormatBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range spec.Shape.FirstLineEnum {
+		if !strings.Contains(block, "\n"+value+"\n") {
+			t.Fatalf("format block missing first-line enum %q:\n%s", value, block)
+		}
+	}
+	for _, section := range spec.Shape.RequiredSections {
+		if !strings.Contains(block, "\n# "+section+"\n") {
+			t.Fatalf("format block missing heading %q:\n%s", section, block)
+		}
+		if strings.Contains(block, section+":") {
+			t.Fatalf("format block advertises colon label for %q:\n%s", section, block)
+		}
+	}
 
-Receipts:
-- observed: fixture command "example-check --fixture" exit 0.
+	firstSection := spec.Shape.RequiredSections[0]
+	for _, tc := range []struct {
+		name        string
+		text        string
+		wantMissing string
+	}{
+		{
+			name:        "bold_only_section",
+			text:        strings.Replace(report, "# "+firstSection, "**"+firstSection+"**", 1),
+			wantMissing: "section:" + firstSection,
+		},
+		{
+			name:        "capitalized_first_line",
+			text:        strings.Replace(report, spec.Shape.FirstLineEnum[0], capitalizeASCII(spec.Shape.FirstLineEnum[0]), 1),
+			wantMissing: "firstLineEnum",
+		},
+		{
+			name:        "decorated_first_line",
+			text:        strings.Replace(report, spec.Shape.FirstLineEnum[0], spec.Shape.FirstLineEnum[0]+" - done", 1),
+			wantMissing: "firstLineEnum",
+		},
+		{
+			name:        "headings_inside_code_fence",
+			text:        fencedReportFromSpec(t, spec),
+			wantMissing: "section:" + spec.Shape.RequiredSections[0],
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := engine.ValidateContract(tc.text, spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Valid || !containsString(got.Missing, tc.wantMissing) {
+				t.Fatalf("validation missing = %#v, want %q", got.Missing, tc.wantMissing)
+			}
+		})
+	}
+}
 
-Verification:
-- observed: fixture command "example-verify --fixture" exit 0.
+func TestAppendReportFormatBlockPlacesGeneratedBlockLast(t *testing.T) {
+	policy, err := ResolveTurnPolicy(Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := AppendReportFormatBlock("do the task\n", policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := DelegateReportFormatBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSuffix := strings.TrimRight(block, "\n")
+	if !strings.HasPrefix(got, "do the task\n\n") || !strings.HasSuffix(got, wantSuffix) {
+		t.Fatalf("prompt = %q, want task body followed by format block %q", got, wantSuffix)
+	}
+	if strings.Contains(got, DelegateContractDigest()) {
+		t.Fatal("format append should not inline the prologue digest")
+	}
 
-Scope boundary:
-- observed: fixture validation is limited to the delegate report shape at example/scope.md:3.
-`
+	unchanged, err := AppendReportFormatBlock("json task", &engine.TurnPolicy{Contract: &engine.ContractSpec{JSONSchema: json.RawMessage(`{"type":"object"}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged != "json task" {
+		t.Fatalf("JSON Schema prompt = %q, want unchanged", unchanged)
+	}
+}
+
+func canonicalReportFromSpec(t *testing.T, spec engine.ContractSpec) string {
+	t.Helper()
+	if spec.Shape == nil || len(spec.Shape.FirstLineEnum) == 0 {
+		t.Fatalf("spec = %#v, want first-line shape", spec)
+	}
+	lines := []string{spec.Shape.FirstLineEnum[0], ""}
+	for _, section := range spec.Shape.RequiredSections {
+		lines = append(lines, "# "+section, "- observed: "+strings.ToLower(section)+" fixture.", "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func fencedReportFromSpec(t *testing.T, spec engine.ContractSpec) string {
+	t.Helper()
+	if spec.Shape == nil || len(spec.Shape.FirstLineEnum) == 0 {
+		t.Fatalf("spec = %#v, want first-line shape", spec)
+	}
+	lines := []string{spec.Shape.FirstLineEnum[0], "", "```md"}
+	for _, section := range spec.Shape.RequiredSections {
+		lines = append(lines, "# "+section, "- observed: fenced fixture.", "")
+	}
+	lines = append(lines, "```", "")
+	return strings.Join(lines, "\n")
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func capitalizeASCII(value string) string {
+	if value == "" {
+		return ""
+	}
+	return strings.ToUpper(value[:1]) + value[1:]
+}
+
+func TestRetryTemplateAndPolicyValidateWithEngine(t *testing.T) {
+	policy, err := ResolveTurnPolicy(Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compliant := canonicalReportFromSpec(t, *policy.Contract)
 	if strings.Contains(compliant, "inferred:") || strings.Contains(compliant, "assumed:") {
 		t.Fatal("compliant fixture must exercise all-observed attestations")
 	}
@@ -242,7 +388,8 @@ Scope boundary:
 		t.Fatalf("compliant status = %q, want %q; missing=%v", validation.Stamp.Status, engine.ContractCompliant, validation.Stamp.Missing)
 	}
 
-	missingScope := strings.Replace(compliant, "Scope boundary:", "Scope omitted:", 1)
+	lastSection := policy.Contract.Shape.RequiredSections[len(policy.Contract.Shape.RequiredSections)-1]
+	missingScope := strings.Replace(compliant, "# "+lastSection, "# Scope omitted", 1)
 	validation, err = engine.ValidatePolicyText(missingScope, policy, engine.NewPolicyRegistry(), time.Unix(0, 0))
 	if err != nil {
 		t.Fatalf("ValidatePolicyText(missing) error = %v", err)
@@ -253,7 +400,8 @@ Scope boundary:
 	if validation.Stamp.Status != engine.ContractNoncompliant {
 		t.Fatalf("missing-section status = %q, want %q", validation.Stamp.Status, engine.ContractNoncompliant)
 	}
-	if !reflect.DeepEqual(validation.Stamp.Missing, []string{"section:Scope boundary"}) {
-		t.Fatalf("missing = %#v, want section:Scope boundary", validation.Stamp.Missing)
+	wantMissing := []string{"section:" + lastSection}
+	if !reflect.DeepEqual(validation.Stamp.Missing, wantMissing) {
+		t.Fatalf("missing = %#v, want %v", validation.Stamp.Missing, wantMissing)
 	}
 }

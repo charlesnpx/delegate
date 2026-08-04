@@ -602,7 +602,7 @@ func TestRecoverRequestRestoresHandoffPayloadAndSafeCleanup(t *testing.T) {
 		t.Fatalf("metadata=%#v, want cleaned job input and verified_absent disposition", meta)
 	}
 	lastSubmit := fake.submits[len(fake.submits)-1]
-	if len(fake.submits) != maxSubmissionAttempts+1 || lastSubmit.RequestID != requestID || lastSubmit.TaskSpec.Prompt != "recover handoff prompt" {
+	if len(fake.submits) != maxSubmissionAttempts+1 || lastSubmit.RequestID != requestID || lastSubmit.TaskSpec.Prompt != promptWithReportFormat(t, "recover handoff prompt") {
 		t.Fatalf("recovery submit=%#v, want same request and prompt", fake.submits)
 	}
 }

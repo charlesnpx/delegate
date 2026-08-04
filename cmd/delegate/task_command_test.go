@@ -301,7 +301,7 @@ func TestTaskPolicyTierWiring(t *testing.T) {
 		wantRetry      bool
 		wantJSONSchema bool
 	}{
-		{name: "default"},
+		{name: "default", wantRetry: true},
 		{name: "write", flags: []string{"--write"}, wantRetry: true},
 		{name: "strict", flags: []string{"--strict-contract"}, wantRetry: true},
 		{name: "no_contract", flags: []string{"--no-contract"}, wantNil: true},
@@ -328,6 +328,9 @@ func TestTaskPolicyTierWiring(t *testing.T) {
 				if got != nil {
 					t.Fatalf("policy = %#v, want nil", got)
 				}
+				if fake.submits[0].TaskSpec.Prompt != "do it" {
+					t.Fatalf("prompt = %q, want original prompt for no-contract", fake.submits[0].TaskSpec.Prompt)
+				}
 				return
 			}
 			if got == nil {
@@ -343,8 +346,13 @@ func TestTaskPolicyTierWiring(t *testing.T) {
 				if !strings.Contains(got.Prologue, schema) {
 					t.Fatalf("policy prologue = %q, want included JSON Schema", got.Prologue)
 				}
+				if fake.submits[0].TaskSpec.Prompt != "do it" {
+					t.Fatalf("JSON Schema prompt = %q, want original prompt", fake.submits[0].TaskSpec.Prompt)
+				}
 			} else if got.Prologue == "" || got.Contract.Shape == nil {
 				t.Fatalf("policy = %#v, want delegate-report shape contract", got)
+			} else if want := promptWithReportFormat(t, "do it"); fake.submits[0].TaskSpec.Prompt != want {
+				t.Fatalf("delegate-report prompt = %q, want %q", fake.submits[0].TaskSpec.Prompt, want)
 			}
 			if tc.wantRetry {
 				if got.Retry == nil || got.Retry.Max != 1 {
@@ -557,7 +565,7 @@ func TestTaskSubmitFailurePreservesIntentAndHandoffForRecovery(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("submission intent found=%v err=%v", found, err)
 	}
-	if intent.Phase != submissionPhaseBlocked || intent.Params.TaskSpec.Prompt != "durable prompt" || intent.LastError == nil {
+	if intent.Phase != submissionPhaseBlocked || intent.Params.TaskSpec.Prompt != promptWithReportFormat(t, "durable prompt") || intent.LastError == nil {
 		t.Fatalf("intent = %#v, want blocked durable prompt with last error", intent)
 	}
 }
@@ -973,21 +981,15 @@ func (f *fakeAgentbusClient) JobCancel(_ context.Context, params client.JobCance
 }
 
 func compliantReport() string {
-	return strings.Join([]string{
-		"complete",
-		"Criteria scored:",
-		"- Done",
-		"",
-		"Receipts:",
-		"- cmd/delegate/main.go:1",
-		"",
-		"Verification:",
-		"- go test ./cmd/delegate",
-		"",
-		"Scope boundary:",
-		"- task-command tests",
-		"",
-	}, "\n")
+	spec, err := policy.DelegateReportSpec()
+	if err != nil || spec.Shape == nil || len(spec.Shape.FirstLineEnum) == 0 {
+		panic("invalid delegate report test spec")
+	}
+	lines := []string{spec.Shape.FirstLineEnum[0], ""}
+	for _, section := range spec.Shape.RequiredSections {
+		lines = append(lines, section+":", "- observed: "+strings.ToLower(section)+" fixture.", "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func compliantContractStamp(t *testing.T, text string) engine.ContractStamp {
@@ -1001,6 +1003,20 @@ func compliantContractStamp(t *testing.T, text string) engine.ContractStamp {
 		t.Fatal(err)
 	}
 	return engine.StampValidation(1, false, "", result, time.Unix(42, 0).UTC())
+}
+
+func promptWithReportFormat(t *testing.T, prompt string) string {
+	t.Helper()
+	return strings.TrimRight(prompt, "\n") + "\n\n" + reportFormatBlock(t)
+}
+
+func reportFormatBlock(t *testing.T) string {
+	t.Helper()
+	block, err := policy.DelegateReportFormatBlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimRight(block, "\n")
 }
 
 func ptr[T any](v T) *T {
