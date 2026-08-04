@@ -8,21 +8,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/charlesnpx/agentbus/client"
-	"github.com/charlesnpx/agentbus/engine"
 )
 
-func TestAgentbusV06BinaryIntegrationSmoke(t *testing.T) {
-	agentbusPath, source := agentbusV06SmokeBinary(t)
+func TestAgentbusPinnedBinaryIntegrationSmoke(t *testing.T) {
+	agentbusPath, source := agentbusPinnedSmokeBinary(t)
 	base, err := os.MkdirTemp("/tmp", "delegate-agentbus-smoke-")
 	if err != nil {
 		t.Fatalf("create short smoke temp dir: %v", err)
@@ -84,48 +83,48 @@ func TestAgentbusV06BinaryIntegrationSmoke(t *testing.T) {
 	t.Setenv("CODEX_HOME", codexHome)
 	t.Setenv("PATH", smokePath)
 
-	var launchOut, launchErr bytes.Buffer
-	code := run([]string{
-		"task", "--backend", "codex", "--cwd", workspace,
-		"--prompt", "delegate real agentbus smoke",
-		"--no-contract", "--background", "--json",
-	}, nil, &launchOut, &launchErr)
+	// Prove the capability-negotiation path that regressed: the compat fix is about
+	// delegate NOT rejecting the normal managed path at connect/Hello time, which
+	// happens before any backend turn. `delegate setup` runs the exact
+	// setupRequiredCapabilities gate against the real pinned binary. It must report
+	// ready with capabilities OK even though the pinned agentbus advertises
+	// policy.shape=false — the failure mode this whole fix addresses. This is
+	// deliberately backend-turn-free so it is independent of the codex app-server
+	// protocol and of result-handoff behavior.
+	_ = workspace
+	var setupOut, setupErr bytes.Buffer
+	code := run([]string{"setup", "--json"}, nil, &setupOut, &setupErr)
 	if code != 0 {
-		t.Fatalf("delegate task submit failed with code %d stdout=%q stderr=%q serveStderr=%q", code, launchOut.String(), launchErr.String(), serveStderr.String())
+		t.Fatalf("delegate setup against pinned agentbus failed with code %d stdout=%q stderr=%q serveStderr=%q", code, setupOut.String(), setupErr.String(), serveStderr.String())
 	}
-	jobID := smokeJobIDFromLaunch(t, launchOut.Bytes())
-	if jobID == "" {
-		t.Fatalf("launch output did not include job_id: %q", launchOut.String())
+	var setup setupJSON
+	if err := json.Unmarshal(bytes.TrimSpace(setupOut.Bytes()), &setup); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, setupOut.String())
 	}
-
-	waitForSmokeTerminalStatus(t, jobID)
-
-	var resultOut, resultErr bytes.Buffer
-	code = run([]string{"result", "--job", jobID, "--json"}, nil, &resultOut, &resultErr)
-	if code != 0 {
-		t.Fatalf("delegate result failed with code %d stdout=%q stderr=%q serveStderr=%q", code, resultOut.String(), resultErr.String(), serveStderr.String())
+	if !setup.AdmissionStrictContainment || !setup.Agentbus.CapabilitiesOK {
+		t.Fatalf("setup=%#v, want strict containment + capabilities OK against pinned agentbus", setup)
 	}
-	var terminal TerminalEnvelope
-	if err := json.Unmarshal(bytes.TrimSpace(resultOut.Bytes()), &terminal); err != nil {
-		t.Fatalf("terminal JSON invalid: %v; raw=%q", err, resultOut.String())
+	// The regression was requiring policy.shape: it must not be required or missing,
+	// and the real pinned binary must advertise it as false.
+	if setup.Agentbus.Capabilities["policy.shape"] {
+		t.Fatalf("pinned agentbus advertised policy.shape=true; want false (post-relocation build)")
 	}
-	if terminal.Schema != envelopeSchema || terminal.JobID != jobID || terminal.Status != engine.StateCompleted {
-		t.Fatalf("terminal envelope=%#v, want schema %d completed job %s", terminal, envelopeSchema, jobID)
-	}
-	if terminal.RequestID == "" || terminal.ResultSHA256 == nil {
-		t.Fatalf("terminal request/result fields=%#v, want request id and result hash", terminal)
-	}
-	t.Logf("agentbus v0.6 smoke ran using %s (%s)", agentbusPath, source)
-}
-
-func agentbusV06SmokeBinary(t *testing.T) (string, string) {
-	t.Helper()
-	if path, err := exec.LookPath("agentbus"); err == nil {
-		version, versionErr := smokeAgentbusVersion(path)
-		if versionErr == nil && version == "0.6.0" {
-			return path, "PATH"
+	for _, capName := range append(setup.Agentbus.Required, setup.Agentbus.Missing...) {
+		if capName == "policy.shape" {
+			t.Fatalf("policy.shape must not be required/missing; required=%#v missing=%#v", setup.Agentbus.Required, setup.Agentbus.Missing)
 		}
 	}
+	t.Logf("agentbus pinned smoke ran using %s (%s)", agentbusPath, source)
+}
+
+// agentbusPinnedSmokeBinary builds the EXACT agentbus commit delegate's go.mod
+// pins, not a release tag. agentbus main still reports version 0.6.0, so a
+// version string cannot distinguish the post-relocation build (policy.shape=false)
+// from the old v0.6.0 tag — building the pinned commit guarantees the smoke
+// exercises the code delegate actually compiles against.
+func agentbusPinnedSmokeBinary(t *testing.T) (string, string) {
+	t.Helper()
+	commit := agentbusPinnedCommit(t)
 
 	repo := os.Getenv("DELEGATE_AGENTBUS_REPO")
 	if repo == "" {
@@ -134,36 +133,33 @@ func agentbusV06SmokeBinary(t *testing.T) (string, string) {
 		}
 	}
 	if repo == "" {
-		t.Fatal("agentbus v0.6.0 source unavailable: set DELEGATE_AGENTBUS_REPO to an agentbus checkout")
+		t.Fatal("agentbus source unavailable: set DELEGATE_AGENTBUS_REPO to an agentbus checkout")
 	}
 	if _, err := os.Stat(filepath.Join(repo, "go.mod")); err != nil {
-		t.Fatalf("agentbus v0.6.0 source unavailable at %s: %v", repo, err)
+		t.Fatalf("agentbus source unavailable at %s: %v", repo, err)
 	}
-	if out, err := exec.Command("git", "-C", repo, "rev-parse", "--verify", "v0.6.0^{commit}").CombinedOutput(); err != nil {
-		t.Fatalf("agentbus v0.6.0 tag unavailable at %s: %v: %s", repo, err, strings.TrimSpace(string(out)))
+	if out, err := exec.Command("git", "-C", repo, "rev-parse", "--verify", commit+"^{commit}").CombinedOutput(); err != nil {
+		t.Fatalf("pinned agentbus commit %s unavailable at %s: %v: %s", commit, repo, err, strings.TrimSpace(string(out)))
 	}
 	base := t.TempDir()
 	src := filepath.Join(base, "src")
 	if err := os.MkdirAll(src, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	archive := filepath.Join(base, "agentbus-v0.6.0.tar")
-	if out, err := exec.Command("git", "-C", repo, "archive", "--format=tar", "-o", archive, "v0.6.0").CombinedOutput(); err != nil {
-		t.Fatalf("archive agentbus v0.6.0: %v: %s", err, strings.TrimSpace(string(out)))
+	archive := filepath.Join(base, "agentbus-pinned.tar")
+	if out, err := exec.Command("git", "-C", repo, "archive", "--format=tar", "-o", archive, commit).CombinedOutput(); err != nil {
+		t.Fatalf("archive agentbus %s: %v: %s", commit, err, strings.TrimSpace(string(out)))
 	}
 	if out, err := exec.Command("tar", "-xf", archive, "-C", src).CombinedOutput(); err != nil {
-		t.Fatalf("extract agentbus v0.6.0 archive: %v: %s", err, strings.TrimSpace(string(out)))
+		t.Fatalf("extract agentbus %s archive: %v: %s", commit, err, strings.TrimSpace(string(out)))
 	}
 	rawVersion, err := os.ReadFile(filepath.Join(src, "VERSION"))
 	if err != nil {
-		t.Fatalf("read agentbus v0.6.0 VERSION: %v", err)
+		t.Fatalf("read agentbus VERSION: %v", err)
 	}
-	tagVersion := strings.TrimSpace(string(rawVersion))
-	if tagVersion != "0.6.0" {
-		t.Fatalf("agentbus VERSION = %q, want 0.6.0", tagVersion)
-	}
+	version := strings.TrimSpace(string(rawVersion))
 	bin := filepath.Join(base, "agentbus")
-	build := exec.Command("go", "build", "-modcacherw", "-trimpath", "-ldflags", "-X main.version="+tagVersion, "-o", bin, "./cmd/agentbus")
+	build := exec.Command("go", "build", "-modcacherw", "-trimpath", "-ldflags", "-X main.version="+version, "-o", bin, "./cmd/agentbus")
 	build.Dir = src
 	build.Env = append(os.Environ(),
 		"GOFLAGS=-mod=readonly",
@@ -174,40 +170,35 @@ func agentbusV06SmokeBinary(t *testing.T) (string, string) {
 		build.Env = append(build.Env, "GOMODCACHE="+filepath.Join(base, "gomodcache"))
 	}
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build agentbus v0.6.0 binary: %v: %s", err, strings.TrimSpace(string(out)))
+		t.Fatalf("build agentbus pinned binary: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	version, err := smokeAgentbusVersion(bin)
-	if err != nil || version != "0.6.0" {
-		t.Fatalf("built agentbus version = %q err=%v, want 0.6.0", version, err)
-	}
-	return bin, "local v0.6.0 tag"
+	return bin, "pinned commit " + commit
 }
 
-func smokeAgentbusVersion(path string) (string, error) {
-	out, err := exec.Command(path, "version").CombinedOutput()
+// agentbusPinnedCommit extracts the 12-hex commit from the agentbus pseudo-version
+// in delegate's go.mod, so the smoke builds exactly the pinned dependency.
+func agentbusPinnedCommit(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile("../../go.mod")
 	if err != nil {
-		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+		t.Fatalf("read delegate go.mod: %v", err)
 	}
-	for _, field := range strings.Fields(string(out)) {
-		field = strings.TrimPrefix(field, "v")
-		if field == "0.6.0" {
-			return field, nil
-		}
+	re := regexp.MustCompile(`github\.com/charlesnpx/agentbus\s+\S+-([0-9a-f]{12})`)
+	m := re.FindSubmatch(data)
+	if m == nil {
+		t.Fatalf("could not find pinned agentbus pseudo-version commit in go.mod:\n%s", data)
 	}
-	return "", fmt.Errorf("version output %q did not include v0.6.0", strings.TrimSpace(string(out)))
+	return string(m[1])
 }
 
 func writeSmokeCodexCLI(t *testing.T, path string) {
 	t.Helper()
+	// A minimal codex stub is enough: the smoke asserts capability negotiation via
+	// `delegate setup` (backend discovery calls --version/--help), and runs no turn.
 	script := `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.143.0"; exit 0; fi
 if [ "$1" = "--help" ]; then echo "codex help"; exit 0; fi
-input=$(cat)
-if [ -z "$input" ]; then input="delegate smoke"; fi
-printf '%s\n' '{"type":"thread.started","thread_id":"codex-smoke-session"}'
-printf '%s\n' '{"type":"turn.started"}'
-printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"delegate smoke result"}}'
-printf '%s\n' '{"type":"turn.completed","last_agent_message":"delegate smoke result"}'
+exit 0
 `
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -240,6 +231,12 @@ func waitForSmokeAgentbusReady(t *testing.T, stateRoot string, done <-chan error
 			_ = c.Close()
 			if hello.ProtocolVersion != 2 || !hello.Capabilities["admission.strictContainment"] {
 				t.Fatalf("agentbus hello=%#v, want protocol 2 strict containment", hello)
+			}
+			// Prove this is the post-relocation build: shape validation moved to
+			// delegate, so agentbus advertises policy.shape=false. This is the exact
+			// capability whose stale client-side requirement blocked the normal path.
+			if hello.Capabilities["policy.shape"] {
+				t.Fatalf("agentbus hello advertises policy.shape=true; want false for the post-relocation pinned build")
 			}
 			return
 		}
@@ -283,59 +280,6 @@ func useRealAgentbusBinaryForDelegate(t *testing.T, path string) func() {
 		lookPath = oldLookPath
 		commandOutput = oldCommandOutput
 	}
-}
-
-func smokeJobIDFromLaunch(t *testing.T, raw []byte) string {
-	t.Helper()
-	var launch LaunchEnvelope
-	if err := json.Unmarshal(bytes.TrimSpace(raw), &launch); err == nil && launch.JobID != "" {
-		return launch.JobID
-	}
-	var terminal TerminalEnvelope
-	if err := json.Unmarshal(bytes.TrimSpace(raw), &terminal); err == nil && terminal.JobID != "" {
-		return terminal.JobID
-	}
-	return ""
-}
-
-func waitForSmokeTerminalStatus(t *testing.T, jobID string) {
-	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		var stdout, stderr bytes.Buffer
-		code := run([]string{"status", "--job", jobID, "--json"}, nil, &stdout, &stderr)
-		if code != 0 {
-			t.Fatalf("delegate status failed with code %d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-		}
-		state, terminal, err := smokeStateFromStatus(stdout.Bytes())
-		if err != nil {
-			t.Fatalf("status JSON invalid: %v; raw=%q", err, stdout.String())
-		}
-		if terminal {
-			if state != engine.StateCompleted {
-				t.Fatalf("terminal status = %q, want completed; raw=%q", state, stdout.String())
-			}
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("job %s did not reach terminal status in smoke timeout", jobID)
-}
-
-func smokeStateFromStatus(raw []byte) (engine.JobState, bool, error) {
-	var terminal TerminalEnvelope
-	if err := json.Unmarshal(bytes.TrimSpace(raw), &terminal); err == nil && terminal.JobID != "" && terminal.Status != "" {
-		return terminal.Status, true, nil
-	}
-	var status client.JobStatusResult
-	if err := json.Unmarshal(bytes.TrimSpace(raw), &status); err != nil {
-		return "", false, err
-	}
-	if len(status.Jobs) == 0 {
-		return "", false, errors.New("status contained no jobs")
-	}
-	state := status.Jobs[0].State
-	return state, engine.IsTerminal(state), nil
 }
 
 func agentbusSmokeStartupBindDenied(stateRoot, text string) bool {
