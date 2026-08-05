@@ -20,7 +20,7 @@ For result handling, preserve the helper's verdict, summary, findings, and next 
 
 ## Monitoring
 
-While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call. Never silently drop the job or substitute your own answer for the delegated run.
+Never scan the Agentbus state root to find results — that layout is private implementation detail. Never silently drop the job or substitute your own answer.
 
 ## Operating Discipline
 

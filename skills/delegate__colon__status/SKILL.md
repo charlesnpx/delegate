@@ -20,7 +20,9 @@ For result handling, preserve the helper's verdict, summary, findings, and next 
 
 ## Monitoring
 
-While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call. Never silently drop the job or substitute your own answer for the delegated run.
+Awaiting a job: "delegate result --job <id> --wait --json" is the canonical await-and-fetch primitive — normally launched as ONE background task. "delegate status --job <id> --wait --json" is a terminal barrier when you do not need the body yet; also background it. A FOREGROUND "--wait" blocks the current host tool call, so reserve it for short bounded checks. Bound long waits with "--wait-timeout <duration>"; on expiry the job keeps running and stays retrievable by id; on a timeout, re-arm one background waiter or fetch the terminal result once it is ready — do not abandon the job. Use one-shot "delegate status --job <id> --json" only for on-demand progress.
+
+Never scan the Agentbus state root to find results — that layout is private implementation detail. Never silently drop the job or substitute your own answer.
 
 ## Operating Discipline
 

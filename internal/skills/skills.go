@@ -508,11 +508,7 @@ Return the launch envelope verbatim. Do not wrap it in prose, do not rename fiel
 
 If submission is unresolved after Agentbus accepted or may have accepted the request, preserve the reported "request_id" and run only the exact recovery command "delegate task --recover-request <request_id> --json". Do not create a replacement request unless the user explicitly asks for a new logical task.
 
-Launch with "--background" and keep the host agent loop free to continue useful work. Long "--wait" calls can hold a host tool call for 100+ seconds and block that loop; use "--wait" only for a short, explicitly bounded terminal check. For an outstanding job, poll "delegate status --job <id>" instead.
-
-## Monitoring
-
-While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call. Never silently drop the job or substitute your own answer for the delegated run.
+Launch with "--background" so the host agent loop stays free. To await the job, start exactly ONE background "delegate result --job <id> --wait --json" task: a background "--wait" is the normal orchestration pattern — it blocks only its own small awaiter process, not a worker slot or the model. A FOREGROUND "--wait" ties up the current host tool call, so use a foreground "--wait" only for a short, explicitly bounded terminal check. Bound long waits with "--wait-timeout <duration>" (on expiry the job keeps running and stays retrievable by id; on a timeout, re-arm one background waiter or fetch the terminal result once it is ready — do not abandon the job). Do NOT write shell polling loops, and never locate results by scanning the Agentbus state root (for example ~/.local/state/agentbus): that storage layout is private implementation detail, and filesystem salvage is an operator-only emergency after a confirmed CLI defect, not a supported path. Use one-shot "delegate status --job <id> --json" only for on-demand progress (for example when the user asks what the job is doing). Never silently drop the job or substitute your own answer for the delegated run.
 
 ## Result Discipline
 
@@ -567,11 +563,7 @@ Return the launch envelope verbatim. Do not wrap it in prose, do not rename fiel
 
 If submission is unresolved after Agentbus accepted or may have accepted the request, preserve the reported "request_id" and run only the exact recovery command "delegate task --recover-request <request_id> --json". Do not create a replacement request unless the user explicitly asks for a new logical review.
 
-Launch with "--background" and keep the host agent loop free to continue useful work. Long "--wait" calls can hold a host tool call for 100+ seconds and block that loop; use "--wait" only for a short, explicitly bounded terminal check. For an outstanding job, poll "delegate status --job <id>" instead.
-
-## Monitoring
-
-While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call. Never silently drop the job or substitute your own answer for the delegated review.
+Launch with "--background" so the host agent loop stays free. To await the job, start exactly ONE background "delegate result --job <id> --wait --json" task: a background "--wait" is the normal orchestration pattern — it blocks only its own small awaiter process, not a worker slot or the model. A FOREGROUND "--wait" ties up the current host tool call, so use a foreground "--wait" only for a short, explicitly bounded terminal check. Bound long waits with "--wait-timeout <duration>" (on expiry the job keeps running and stays retrievable by id; on a timeout, re-arm one background waiter or fetch the terminal result once it is ready — do not abandon the job). Do NOT write shell polling loops, and never locate results by scanning the Agentbus state root (for example ~/.local/state/agentbus): that storage layout is private implementation detail, and filesystem salvage is an operator-only emergency after a confirmed CLI defect, not a supported path. Use one-shot "delegate status --job <id> --json" only for on-demand progress (for example when the user asks what the job is doing). Never silently drop the job or substitute your own answer for the delegated review.
 
 ## Review Result Discipline
 
@@ -598,7 +590,7 @@ Set "JOB_ID" to the delegated job id, then run:
 ~~~
 
 {{if eq .Action "result" -}}
-For a non-terminal job, do not use "delegate result --wait" as the normal host-agent-loop control flow. Long "--wait" calls can hold a host tool call for 100+ seconds and block the host agent loop. Use "--wait" only for a short, explicitly bounded terminal check; otherwise poll "delegate status --job <id>" and fetch the result after the job is terminal.
+For an outstanding job, "delegate result --job <id> --wait --json" is the primary command and is normally launched as ONE background task. Optionally add "--wait-timeout <duration>" to bound the wait; on expiry the job keeps running and stays retrievable by id; on a timeout, re-arm one background waiter or fetch the terminal result once it is ready — do not abandon the job. A FOREGROUND "--wait" blocks the current host tool call, so reserve it for a short, explicitly bounded terminal check.
 
 {{end -}}
 
@@ -606,7 +598,11 @@ For result handling, preserve the helper's verdict, summary, findings, and next 
 
 ## Monitoring
 
-While the delegated job is outstanding, poll "delegate status --job <id>" every 2-5 minutes. Do not wait indefinitely on a single blocking call. Never silently drop the job or substitute your own answer for the delegated run.
+{{if ne .Action "cancel" -}}
+Awaiting a job: "delegate result --job <id> --wait --json" is the canonical await-and-fetch primitive — normally launched as ONE background task. "delegate status --job <id> --wait --json" is a terminal barrier when you do not need the body yet; also background it. A FOREGROUND "--wait" blocks the current host tool call, so reserve it for short bounded checks. Bound long waits with "--wait-timeout <duration>"; on expiry the job keeps running and stays retrievable by id; on a timeout, re-arm one background waiter or fetch the terminal result once it is ready — do not abandon the job. Use one-shot "delegate status --job <id> --json" only for on-demand progress.
+
+{{end -}}
+Never scan the Agentbus state root to find results — that layout is private implementation detail. Never silently drop the job or substitute your own answer.
 
 ## Operating Discipline
 
