@@ -225,19 +225,14 @@ func TestDigestBundleEqualsFile(t *testing.T) {
 	if strings.TrimSpace(DelegateContractDigest()) == "" {
 		t.Fatal("bundled digest is empty")
 	}
-	spec, err := DelegateReportSpec()
-	if err != nil {
-		t.Fatal(err)
-	}
-	shape, err := parseReportShape(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fragments := append([]string{}, shape.RequiredSections...)
-	fragments = append(fragments, "firstLineEnum", "section:")
-	for _, fragment := range fragments {
+	// The digest intentionally documents the required report shape in prose (the
+	// first-line words and section headers) so delegated workers can satisfy the
+	// contract; TestContractDigestStatesReportShape guards that direction. It must
+	// still not leak the internal contract identifiers used by the validator.
+	forbidden := []string{"firstLineEnum", "section:", "requiredSections"}
+	for _, fragment := range forbidden {
 		if strings.Contains(DelegateContractDigest(), fragment) {
-			t.Fatalf("bundled digest contains hand-written contract fragment %q", fragment)
+			t.Fatalf("bundled digest contains internal contract identifier %q", fragment)
 		}
 	}
 	file, err := os.ReadFile("digest/delegate-contract.md")
