@@ -185,6 +185,8 @@ Missing `admission.strictContainment` makes setup not ready and returns nonzero.
 
 Launch with `--background`, then poll `delegate status --job <id>` every 2-5 minutes while a job is outstanding. Long `--wait` calls can block a host agent loop for 100+ seconds; reserve them for short, explicitly bounded terminal checks.
 
+The cheap `delegate status --json --job <id>` poll reports a real terminal `state` (`completed`, `completed_noncompliant`, `failed`, ...) once the job finishes — sourced from the durable authority record, not a transient in-memory map — so a watcher keyed on `engine.IsTerminal(state)` observes termination without any separate call. When you would rather block than poll, `delegate status --job <id> --wait` (and `result --wait`) returns only once the job is terminal and exits with the job's status code; it is the terminal-wait primitive.
+
 ## Development and release
 
 ```sh
