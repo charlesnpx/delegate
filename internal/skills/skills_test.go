@@ -172,6 +172,7 @@ func requireNonBlockingWaitGuidance(t *testing.T, skill GeneratedSkill) {
 			t.Fatalf("%s lacks non-blocking wait guidance %q", skill.Name, fragment)
 		}
 	}
+	requireNoDeprecatedPollingGuidance(t, skill)
 }
 
 func TestTargetRootResolution(t *testing.T) {
@@ -369,5 +370,18 @@ func requireMonitoringGuidance(t *testing.T, skill GeneratedSkill) {
 			"delegate status --job <id> --json",
 			"--wait-timeout <duration>",
 		})
+	}
+	requireNoDeprecatedPollingGuidance(t, skill)
+}
+
+func requireNoDeprecatedPollingGuidance(t *testing.T, skill GeneratedSkill) {
+	t.Helper()
+	for _, deprecated := range []string{
+		"2" + "-5 minutes",
+		`poll "delegate status --job <id>"`,
+	} {
+		if strings.Contains(skill.Content, deprecated) {
+			t.Fatalf("%s contains deprecated polling guidance %q", skill.Name, deprecated)
+		}
 	}
 }
