@@ -1,7 +1,7 @@
 ---
 name: delegate:review:claude
 description: Delegate a code review to claude through sanitized delegate review context and return the launch envelope verbatim.
-version: v0.6.0
+version: v0.7.2
 ---
 
 # delegate:review:claude
