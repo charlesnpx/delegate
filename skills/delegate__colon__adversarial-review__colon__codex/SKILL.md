@@ -1,7 +1,7 @@
 ---
 name: delegate:adversarial-review:codex
 description: Delegate a refute-first adversarial code review to codex through sanitized delegate review context and return the launch envelope verbatim.
-version: v0.6.0
+version: v0.7.2
 ---
 
 # delegate:adversarial-review:codex
