@@ -1,7 +1,7 @@
 ---
 name: delegate:rescue:claude
 description: Delegate a rescue task to claude through delegate and return the launch envelope verbatim.
-version: v0.7.2
+version: v0.7.3
 ---
 
 # delegate:rescue:claude
