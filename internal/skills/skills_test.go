@@ -163,10 +163,10 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 func requireNonBlockingWaitGuidance(t *testing.T, skill GeneratedSkill) {
 	t.Helper()
 	for _, fragment := range []string{
-		"host agent loop",
-		"100+ seconds",
-		"short, explicitly bounded terminal check",
-		"delegate status --job <id>",
+		"delegate result --job <id> --wait --json",
+		"ONE background",
+		"FOREGROUND \"--wait\"",
+		"--wait-timeout <duration>",
 	} {
 		if !strings.Contains(skill.Content, fragment) {
 			t.Fatalf("%s lacks non-blocking wait guidance %q", skill.Name, fragment)
@@ -358,9 +358,16 @@ func requireFragments(t *testing.T, skill GeneratedSkill, fragments []string) {
 func requireMonitoringGuidance(t *testing.T, skill GeneratedSkill) {
 	t.Helper()
 	requireFragments(t, skill, []string{
-		"delegate status --job <id>",
-		"every 2-5 minutes",
+		"Agentbus state root",
 		"silently drop the job",
 		"substitute your own answer",
 	})
+	if skill.Kind == KindJobControl && skill.Name != "delegate:cancel" {
+		requireFragments(t, skill, []string{
+			"delegate result --job <id> --wait --json",
+			"delegate status --job <id> --wait --json",
+			"delegate status --job <id> --json",
+			"--wait-timeout <duration>",
+		})
+	}
 }

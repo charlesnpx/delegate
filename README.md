@@ -183,9 +183,9 @@ Agentbus reports terminal outcome and cleanup proof separately. Delegate removes
 
 Missing `admission.strictContainment` makes setup not ready and returns nonzero.
 
-Launch with `--background`, then poll `delegate status --job <id>` every 2-5 minutes while a job is outstanding. Long `--wait` calls can block a host agent loop for 100+ seconds; reserve them for short, explicitly bounded terminal checks.
+Launch with `--background` so the host agent loop stays free. For an outstanding job, start exactly ONE background `delegate result --job <id> --wait --json` task: a background `--wait` blocks only its small awaiter process, not a worker slot or the model. A foreground `--wait` blocks the current host tool call, so reserve it for a short, explicitly bounded terminal check. Bound long waits with `--wait-timeout <duration>`; on expiry the job keeps running and stays retrievable by id. Do not write shell polling loops or scan the Agentbus state root for results: that storage layout is a private implementation detail, and filesystem salvage is an operator-only emergency after a confirmed CLI defect, not a supported path.
 
-The cheap `delegate status --json --job <id>` poll reports a real terminal `state` (`completed`, `completed_noncompliant`, `failed`, ...) once the job finishes — sourced from the durable authority record, not a transient in-memory map — so a watcher keyed on `engine.IsTerminal(state)` observes termination without any separate call. When you would rather block than poll, `delegate status --job <id> --wait` (and `result --wait`) returns only once the job is terminal and exits with the job's status code; it is the terminal-wait primitive.
+The cheap one-shot `delegate status --json --job <id>` request reports a real terminal `state` (`completed`, `completed_noncompliant`, `failed`, ...) once the job finishes — sourced from the durable authority record, not a transient in-memory map — so a watcher keyed on `engine.IsTerminal(state)` observes termination without any separate call. Use it only for on-demand progress. `delegate status --job <id> --wait` (and `delegate result --job <id> --wait --json`) returns only once the job is terminal and exits with the job's status code; it is the terminal-wait primitive. Run a long terminal wait as one background awaiter rather than tying up the host loop.
 
 ## Development and release
 
