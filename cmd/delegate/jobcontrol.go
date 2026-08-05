@@ -23,6 +23,8 @@ const (
 	maxRetryableJobResultErrorsBeforeStatusFallback = 5
 	// Bounds permanent agentbus fail-stop polling while leaving room for ordinary daemon restarts.
 	maxConsecutiveTransportFailures = 25
+	// An observation timeout leaves the AgentBus job running and retrievable.
+	exitCodeWaitObservationTimeout = 75
 )
 
 var jobPollSleep = sleepContext
@@ -38,22 +40,55 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
+type waitObservationTimeoutJSON struct {
+	JobID              string `json:"job_id"`
+	Wait               string `json:"wait"`
+	ObservationTimeout string `json:"observation_timeout"`
+	Message            string `json:"message"`
+}
+
+func writeWaitObservationTimeout(command, jobID string, timeout time.Duration, jsonOut bool, stdout, stderr io.Writer) (int, error) {
+	message := fmt.Sprintf("delegate %s: observation timed out after %s; job %s is still running and remains retrievable with `delegate %s --job %s`", command, timeout, jobID, command, jobID)
+	if jsonOut {
+		return exitCodeWaitObservationTimeout, writeJSONLine(stdout, waitObservationTimeoutJSON{
+			JobID:              jobID,
+			Wait:               "timed_out",
+			ObservationTimeout: timeout.String(),
+			Message:            message,
+		})
+	}
+	_, err := fmt.Fprintln(stderr, message)
+	return exitCodeWaitObservationTimeout, err
+}
+
 func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	fs := flag.NewFlagSet("delegate status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	jobID := fs.String("job", "", "job id")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	wait := fs.Bool("wait", false, "wait for terminal status")
+	waitTimeout := fs.Duration("wait-timeout", 0, "max time to wait for terminal state (0 = no deadline); requires --wait")
 	if err := fs.Parse(args); err != nil {
 		return 0, err
 	}
 	if fs.NArg() != 0 {
 		return 0, fmt.Errorf("delegate status does not accept positional arguments")
 	}
+	if *waitTimeout != 0 && !*wait {
+		return 0, fmt.Errorf("--wait-timeout requires --wait")
+	}
+	if *waitTimeout < 0 {
+		return 0, fmt.Errorf("--wait-timeout must not be negative")
+	}
 	if *wait && *jobID == "" {
 		return 0, fmt.Errorf("delegate status --wait requires --job")
 	}
 	ctx := context.Background()
+	if *wait && *waitTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *waitTimeout)
+		defer cancel()
+	}
 	stateRoot, err := agentbusStateRootForJob("", *jobID, stderr, true)
 	if err != nil {
 		return 0, err
@@ -71,6 +106,9 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		status, err = c.JobStatus(ctx, client.JobStatusParams{JobID: *jobID, All: *jobID == ""})
 	}
 	if err != nil {
+		if *waitTimeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return writeWaitObservationTimeout("status", *jobID, *waitTimeout, *jsonOut, stdout, stderr)
+		}
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
 	}
 	// delegate status always emits the {"jobs":[...]} JobStatusResult shape for
@@ -165,16 +203,28 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 	jobID := fs.String("job", "", "job id")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	wait := fs.Bool("wait", false, "wait for terminal result")
+	waitTimeout := fs.Duration("wait-timeout", 0, "max time to wait for terminal state (0 = no deadline); requires --wait")
 	if err := fs.Parse(args); err != nil {
 		return 0, err
 	}
 	if fs.NArg() != 0 {
 		return 0, fmt.Errorf("delegate result does not accept positional arguments")
 	}
+	if *waitTimeout != 0 && !*wait {
+		return 0, fmt.Errorf("--wait-timeout requires --wait")
+	}
+	if *waitTimeout < 0 {
+		return 0, fmt.Errorf("--wait-timeout must not be negative")
+	}
 	if *jobID == "" {
 		return 0, fmt.Errorf("delegate result requires --job")
 	}
 	ctx := context.Background()
+	if *wait && *waitTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *waitTimeout)
+		defer cancel()
+	}
 	stateRoot, err := agentbusStateRootForJob("", *jobID, stderr, true)
 	if err != nil {
 		return 0, err
@@ -202,6 +252,9 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 	}
 	if err != nil {
+		if *waitTimeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return writeWaitObservationTimeout("result", *jobID, *waitTimeout, *jsonOut, stdout, stderr)
+		}
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
 	}
 	var correctionWarnings []string
