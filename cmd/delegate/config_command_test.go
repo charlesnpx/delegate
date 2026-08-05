@@ -122,7 +122,7 @@ func TestTerminalEnvelopeModelReportedFallbackReasons(t *testing.T) {
 		capable                    bool
 	}{
 		{name: "reported", capable: true, reported: "backend-model"},
-		{name: "backend did not report", capable: true, wantReason: "backend_did_not_report"},
+		{name: "reported model unavailable", capable: true, wantReason: "model_report_unavailable"},
 		{name: "capability missing", wantReason: "agentbus_capability_missing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
