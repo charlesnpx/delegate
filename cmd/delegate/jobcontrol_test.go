@@ -48,6 +48,65 @@ func TestRunReadCommandsOnlyCleanTheRequestedJob(t *testing.T) {
 	})
 }
 
+func TestRunWaitTimeoutRequiresWait(t *testing.T) {
+	for _, command := range []string{"status", "result"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{command, "--job", "job_wait_timeout_requires_wait", "--wait-timeout", "5s"}, nil, &stdout, &stderr)
+			if code != 2 {
+				t.Fatalf("%s code=%d stderr=%q, want usage exit 2", command, code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "--wait-timeout requires --wait") {
+				t.Fatalf("%s stderr=%q, want wait-timeout usage error", command, stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunWaitTimeoutReportsObservationTimeoutWithoutCancel(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		fake    *fakeAgentbusClient
+	}{
+		{
+			command: "status",
+			fake: &fakeAgentbusClient{
+				hello:  helloWithCapabilities(),
+				status: client.JobStatusResult{Jobs: []client.JobStatus{{JobID: "job_status_wait_timeout", State: engine.StateRunning}}},
+			},
+		},
+		{
+			command: "result",
+			fake: &fakeAgentbusClient{
+				hello:  helloWithCapabilities(),
+				result: client.JobResult{JobID: "job_result_wait_timeout", State: engine.StateRunning},
+			},
+		},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			restore := stubAgentbusGlobals(t, tc.fake)
+			defer restore()
+
+			jobID := "job_" + tc.command + "_wait_timeout"
+			var stdout, stderr bytes.Buffer
+			code := run([]string{tc.command, "--job", jobID, "--wait", "--wait-timeout", "50ms", "--json"}, nil, &stdout, &stderr)
+			if code != exitCodeWaitObservationTimeout {
+				t.Fatalf("%s code=%d stderr=%q stdout=%q, want observation timeout exit %d", tc.command, code, stderr.String(), stdout.String(), exitCodeWaitObservationTimeout)
+			}
+			var result waitObservationTimeoutJSON
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+				t.Fatalf("%s timeout JSON invalid: %v; raw=%q", tc.command, err, stdout.String())
+			}
+			if result.JobID != jobID || result.Wait != "timed_out" || result.ObservationTimeout != "50ms" || !strings.Contains(result.Message, "still running") || !strings.Contains(result.Message, "`delegate "+tc.command+" --job "+jobID+"`") {
+				t.Fatalf("%s timeout JSON=%#v, want requested job, timed_out wait, 50ms observation timeout, and retrieval message", tc.command, result)
+			}
+			if len(tc.fake.cancels) != 0 {
+				t.Fatalf("%s JobCancel calls=%#v, want no job cancellation", tc.command, tc.fake.cancels)
+			}
+		})
+	}
+}
+
 func assertOnlyRequestedStatusCall(t *testing.T, calls []client.JobStatusParams, jobID string) {
 	t.Helper()
 	if len(calls) != 1 {
