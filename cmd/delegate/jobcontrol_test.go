@@ -63,6 +63,21 @@ func TestRunWaitTimeoutRequiresWait(t *testing.T) {
 	}
 }
 
+func TestRunWaitTimeoutRejectsNegative(t *testing.T) {
+	for _, command := range []string{"status", "result"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{command, "--job", "job_wait_timeout_negative", "--wait", "--wait-timeout", "-1s"}, nil, &stdout, &stderr)
+			if code != 2 {
+				t.Fatalf("%s code=%d stderr=%q, want usage exit 2", command, code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "--wait-timeout must not be negative") {
+				t.Fatalf("%s stderr=%q, want negative-duration usage error", command, stderr.String())
+			}
+		})
+	}
+}
+
 func TestRunWaitTimeoutReportsObservationTimeoutWithoutCancel(t *testing.T) {
 	for _, tc := range []struct {
 		command string

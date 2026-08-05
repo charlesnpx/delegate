@@ -77,6 +77,9 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 	if *waitTimeout != 0 && !*wait {
 		return 0, fmt.Errorf("--wait-timeout requires --wait")
 	}
+	if *waitTimeout < 0 {
+		return 0, fmt.Errorf("--wait-timeout must not be negative")
+	}
 	if *wait && *jobID == "" {
 		return 0, fmt.Errorf("delegate status --wait requires --job")
 	}
@@ -103,7 +106,7 @@ func runStatus(args []string, stdout, stderr io.Writer) (int, error) {
 		status, err = c.JobStatus(ctx, client.JobStatusParams{JobID: *jobID, All: *jobID == ""})
 	}
 	if err != nil {
-		if *waitTimeout > 0 && errors.Is(err, context.DeadlineExceeded) {
+		if *waitTimeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return writeWaitObservationTimeout("status", *jobID, *waitTimeout, *jsonOut, stdout, stderr)
 		}
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
@@ -210,6 +213,9 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 	if *waitTimeout != 0 && !*wait {
 		return 0, fmt.Errorf("--wait-timeout requires --wait")
 	}
+	if *waitTimeout < 0 {
+		return 0, fmt.Errorf("--wait-timeout must not be negative")
+	}
 	if *jobID == "" {
 		return 0, fmt.Errorf("delegate result requires --job")
 	}
@@ -246,7 +252,7 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 	}
 	if err != nil {
-		if *waitTimeout > 0 && errors.Is(err, context.DeadlineExceeded) {
+		if *waitTimeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return writeWaitObservationTimeout("result", *jobID, *waitTimeout, *jsonOut, stdout, stderr)
 		}
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
