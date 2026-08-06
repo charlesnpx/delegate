@@ -210,7 +210,7 @@ set_skill_dirs_for_target() {
   local target=$1
   case "$target" in
     claude|codex)
-      SKILL_DIRS=(delegate__colon__rescue__colon__claude delegate__colon__rescue__colon__codex delegate__colon__review__colon__claude delegate__colon__review__colon__codex delegate__colon__adversarial-review__colon__claude delegate__colon__adversarial-review__colon__codex delegate__colon__status delegate__colon__result delegate__colon__cancel delegate__colon__setup delegate__colon__config)
+      SKILL_DIRS=(delegate__colon__rescue__colon__claude delegate__colon__rescue__colon__codex delegate__colon__rescue__colon__cursor delegate__colon__review__colon__claude delegate__colon__review__colon__codex delegate__colon__review__colon__cursor delegate__colon__adversarial-review__colon__claude delegate__colon__adversarial-review__colon__codex delegate__colon__adversarial-review__colon__cursor delegate__colon__status delegate__colon__result delegate__colon__cancel delegate__colon__setup delegate__colon__config)
       ;;
     *)
       die "unsupported skill target $target"

@@ -110,8 +110,8 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 	}
 	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "codex", "--json", "--install-root", root}, env)
 	codexTarget := installed.Targets["codex"]
-	if len(codexTarget.Files) != 11 {
-		t.Fatalf("codex files = %d, want 11: %#v", len(codexTarget.Files), codexTarget.Files)
+	if len(codexTarget.Files) != 14 {
+		t.Fatalf("codex files = %d, want 14: %#v", len(codexTarget.Files), codexTarget.Files)
 	}
 	if len(codexTarget.Removed) != 6 {
 		t.Fatalf("codex removed = %d, want 6: %#v", len(codexTarget.Removed), codexTarget.Removed)
@@ -140,7 +140,7 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 	if rescuePath == "" {
 		t.Fatalf("delegate:rescue:claude file missing from %#v", codexTarget.Files)
 	}
-	for _, name := range []string{"delegate:review:claude", "delegate:adversarial-review:claude", "delegate:rescue:codex"} {
+	for _, name := range []string{"delegate:review:claude", "delegate:adversarial-review:claude", "delegate:rescue:codex", "delegate:rescue:cursor", "delegate:review:cursor", "delegate:adversarial-review:cursor"} {
 		if !installedNames[name] {
 			t.Fatalf("%s file missing from %#v", name, codexTarget.Files)
 		}
@@ -162,7 +162,7 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 	}
 
 	uninstalled := runDelegatedInstallerScript(t, []string{"--uninstall", "--target", "codex", "--json", "--install-root", root}, env)
-	if len(uninstalled.Targets["codex"].Files) != 11 {
+	if len(uninstalled.Targets["codex"].Files) != 14 {
 		t.Fatalf("uninstall files = %#v", uninstalled.Targets["codex"].Files)
 	}
 	if len(uninstalled.Targets["codex"].Removed) != 6 {
@@ -178,7 +178,7 @@ func TestDelegatedInstallerPlanShowsLegacyRemovals(t *testing.T) {
 	codexHome := filepath.Join(root, "codex-home")
 	result := runDelegatedInstallerScript(t, []string{"--plan", "--target", "codex", "--json", "--install-root", root}, []string{"CODEX_HOME=" + codexHome})
 	files := result.Targets["codex"].Files
-	if len(files) != 11 {
+	if len(files) != 14 {
 		t.Fatalf("plan files = %#v", files)
 	}
 	removed := result.Targets["codex"].Removed

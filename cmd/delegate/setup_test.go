@@ -28,6 +28,7 @@ func TestSetupStatePreflightRejectsRelativeAgentbusStateRoot(t *testing.T) {
 		}
 	})
 	t.Setenv("XDG_STATE_HOME", "relative-state")
+	t.Setenv("AGENTBUS_STATE_ROOT", "")
 
 	result := setupStatePreflight()
 	if result.AgentbusStateRootWritable {

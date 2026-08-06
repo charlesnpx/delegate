@@ -51,10 +51,13 @@ func expectedSkillNames() []string {
 	return []string{
 		"delegate:rescue:claude",
 		"delegate:rescue:codex",
+		"delegate:rescue:cursor",
 		"delegate:review:claude",
 		"delegate:review:codex",
+		"delegate:review:cursor",
 		"delegate:adversarial-review:claude",
 		"delegate:adversarial-review:codex",
+		"delegate:adversarial-review:cursor",
 		"delegate:status",
 		"delegate:result",
 		"delegate:cancel",
@@ -152,7 +155,7 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"delegate config set <key> <value>",
 				"all delegated tasks",
 				"ergonomics control, not a security boundary",
-				"supported delegation backends are explicitly \"claude\" and \"codex\"",
+				"supported delegation backends are explicitly \"claude\", \"codex\", and \"cursor\"",
 			})
 		default:
 			t.Fatalf("%s kind = %q", skill.Name, skill.Kind)
