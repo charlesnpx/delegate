@@ -78,6 +78,37 @@ func TestRunWaitTimeoutRejectsNegative(t *testing.T) {
 	}
 }
 
+func TestParseWaitTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "bare integer is seconds", input: "240", want: 240 * time.Second},
+		{name: "go duration", input: "30m", want: 30 * time.Minute},
+		{name: "invalid value", input: "not-a-duration", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseWaitTimeout(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseWaitTimeout(%q) error = nil, want error", tc.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseWaitTimeout(%q) error = %v", tc.input, err)
+			}
+			if got != tc.want {
+				t.Fatalf("parseWaitTimeout(%q) = %s, want %s", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunWaitTimeoutReportsObservationTimeoutWithoutCancel(t *testing.T) {
 	for _, tc := range []struct {
 		command string

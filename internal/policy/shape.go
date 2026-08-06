@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 
@@ -30,8 +31,16 @@ func parseReportShape(spec engine.ContractSpec) (reportShape, error) {
 		return reportShape{}, errors.New("shape validation requires a shape contract")
 	}
 	var shape reportShape
-	if err := json.Unmarshal(spec.Shape, &shape); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(spec.Shape))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&shape); err != nil {
 		return reportShape{}, fmt.Errorf("parse delegate report shape: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return reportShape{}, errors.New("parse delegate report shape: multiple JSON values")
+		}
+		return reportShape{}, fmt.Errorf("parse delegate report shape: invalid trailing JSON: %w", err)
 	}
 	// Fail closed: delegate is now the sole authoritative report validator, so a
 	// constraint-less shape (e.g. `{}`) must not silently pass every report.

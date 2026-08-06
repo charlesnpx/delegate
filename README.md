@@ -1,6 +1,6 @@
 # delegate
 
-`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.6.0 ships `task`, rescue, sanitized review, adversarial-review, job-control workflows, and parent-session audit linkage.
+`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.7.3 ships `task`, rescue, sanitized review, adversarial-review, job-control workflows, and parent-session audit linkage.
 
 agentbus owns execution, supervision, and generic policy enforcement. delegate owns the delegation-specific data and decisions it passes to agentbus: the bundled `delegate-report` contract, the delegate-contract digest, policy tiers, handoff lifecycle, skill matrix, and result envelopes.
 
@@ -37,13 +37,13 @@ delegate install-skills [--plan|--install|--uninstall] [--target claude|codex|al
 
 delegate handoff create --json
 
-delegate task --backend claude|codex [--background|--wait] [--json] [--cwd <abs>]
+delegate task --backend claude|codex|cursor [--background|--wait] [--json] [--cwd <abs>]
               [--model <model>] [--effort <effort>]
               [--timeout <duration>] [--write] [--strict-contract|--no-contract]
-              [--origin <skill>] [--parent-client <client>] [--parent-session <id>] [prompt source]
+              [--output-schema-file <path>] [--origin <skill>] [--parent-client <client>] [--parent-session <id>] [prompt source]
 delegate task --recover-request <request-id> [--background|--wait] [--json]
 
-delegate review|adversarial-review --backend claude|codex [--background|--wait] [--json] [--cwd <abs>]
+delegate review|adversarial-review --backend claude|codex|cursor [--background|--wait] [--json] [--cwd <abs>]
               [--base <ref>] [--scope auto|working-tree|branch] [--allow-live-repo-read]
               [--model <model>] [--effort <effort>] [--timeout <duration>]
               [--strict-contract] [--origin <skill>] [--parent-client <client>] [--parent-session <id>]
@@ -54,6 +54,8 @@ delegate cancel --job <id> [--json]
 ```
 
 Prompt sources are mutually exclusive: `--prompt`, `--prompt-file`, `--prompt-stdin`, `--handoff-prompt-file`, or positional text. `--prompt` and positional text are visible in process arguments and shell history; use stdin, a prompt file, or a handoff file for sensitive input.
+
+For `delegate task`, `--output-schema-file <path>` reads a JSON Schema output contract from a file. Violations return as `<json-pointer>: <message>` with one corrective retry.
 
 Delegate connects through `agentbus/client`, requires `admission.strictContainment` plus the policy capabilities used by the selected contract, persists a durable request identity before submission, and returns a launch envelope unless `--wait` is set.
 
@@ -99,7 +101,7 @@ The source directories escape `:` as `__colon__`; the installer decodes the name
 
 Launch skills preflight shared filesystem and state access, no-fork execution, agentbus capabilities, and target-backend reachability. Rescue skills launch through `delegate task`; review skills launch through the sanitized `delegate review` commands. All return the launch envelope verbatim and never add `--no-contract`. Job-control skills use the same status, result, cancellation, evidence-preservation, and no-substitute-answer discipline. Review prose requires findings ordered by severity, preservation of evidence labels, and no automatic fixes after review.
 
-v0.6.0 retains the breaking namespace rename. On install or upgrade, the managed installer removes the legacy `codex:{rescue,review,adversarial-review,status,result,cancel}` names from Claude Code and the corresponding `claude:{...}` names from Codex; `--plan --json`, `--install --json`, and `--uninstall --json` report them in each target's additive `removed` array (entries of `{"path": ...}`); the `files` array contains only installed skill files.
+v0.7.3 retains the breaking namespace rename. On install or upgrade, the managed installer removes the legacy `codex:{rescue,review,adversarial-review,status,result,cancel}` names from Claude Code and the corresponding `claude:{...}` names from Codex; `--plan --json`, `--install --json`, and `--uninstall --json` report them in each target's additive `removed` array (entries of `{"path": ...}`); the `files` array contains only installed skill files.
 
 ## Contract tiers
 
@@ -193,7 +195,7 @@ The cheap one-shot `delegate status --json --job <id>` request reports a real te
 GOCACHE=/private/tmp/delegate-gocache go test -race ./...
 GOCACHE=/private/tmp/delegate-gocache go vet ./...
 bash -n install-skill.sh scripts/*.sh
-scripts/release-check.sh v0.6.0
+scripts/release-check.sh v0.7.3
 ```
 
 The release check requires a clean worktree, including no modified tracked files and no untracked files outside ignored paths. Manually inspect the same gate with `git status --short --untracked-files=all`. It also requires the requested tag to point exactly at `HEAD`, requires `VERSION` to match `v<version>`, JSON-decodes installer and CLI output, verifies every staged binary/skill hash, and confirms the staged binary reports the release version. `--allow-dirty` is an unsafe escape hatch and always prints a loud warning when used.
