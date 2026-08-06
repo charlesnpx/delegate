@@ -172,6 +172,17 @@ func TestValidateShapeFailsClosedOnEmptyShape(t *testing.T) {
 	}
 }
 
+func TestParseReportShapeRejectsUnknownConstraint(t *testing.T) {
+	spec := engine.ContractSpec{Shape: json.RawMessage(`{"firstLineEnum":["complete"],"requiredSections":["Criteria scored"],"futureConstraint":true}`)}
+	_, err := parseReportShape(spec)
+	if err == nil {
+		t.Fatal("parseReportShape() error = nil, want unknown constraint error")
+	}
+	if !strings.Contains(err.Error(), `unknown field "futureConstraint"`) {
+		t.Fatalf("parseReportShape() error = %q, want unknown constraint name", err)
+	}
+}
+
 // mustParseShape parses the opaque contract shape into delegate's local view.
 func mustParseShape(t *testing.T, spec engine.ContractSpec) reportShape {
 	t.Helper()

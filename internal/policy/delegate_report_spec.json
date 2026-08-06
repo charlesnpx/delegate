@@ -10,8 +10,6 @@
       "Receipts",
       "Verification",
       "Scope boundary"
-    ],
-    "requiredAttestations": [],
-    "evidenceHeuristic": true
+    ]
   }
 }
