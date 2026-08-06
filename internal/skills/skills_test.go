@@ -155,7 +155,7 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"delegate config set <key> <value>",
 				"all delegated tasks",
 				"ergonomics control, not a security boundary",
-				"supported delegation backends are explicitly \"claude\", \"codex\", and \"cursor\"",
+				"managed delegation skills and configurable model/effort defaults for \"claude\", \"codex\", and \"cursor\"",
 			})
 		default:
 			t.Fatalf("%s kind = %q", skill.Name, skill.Kind)
