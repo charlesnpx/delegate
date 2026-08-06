@@ -141,6 +141,61 @@ func TestVerifyHeadUnchanged(t *testing.T) {
 	}
 }
 
+func TestAssembleFailsClosedWhenHEADMovesBetweenSnapshotReads(t *testing.T) {
+	repo := newGitFixture(t)
+	mainHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	gitFixture(t, repo, "switch", "-c", "feature")
+	writeFixtureFile(t, repo, "feature.txt", "feature\n")
+	gitFixture(t, repo, "add", "feature.txt")
+	gitFixture(t, repo, "commit", "-m", "feature")
+	featureHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "checkout-triggered")
+	wrapper := filepath.Join(binDir, "git")
+	const wrapperScript = `#!/bin/sh
+set -eu
+
+case " $* " in
+  *" rev-parse HEAD "*|*" rev-parse --abbrev-ref HEAD "*) snapshot_read=1 ;;
+  *) snapshot_read=0 ;;
+esac
+
+"$DELEGATE_TEST_REAL_GIT" "$@"
+if [ "$snapshot_read" -eq 1 ] && [ ! -e "$DELEGATE_TEST_CHECKOUT_MARKER" ]; then
+  : > "$DELEGATE_TEST_CHECKOUT_MARKER"
+  "$DELEGATE_TEST_REAL_GIT" -C "$DELEGATE_TEST_CHECKOUT_REPO" checkout --quiet main
+fi
+`
+	if err := os.WriteFile(wrapper, []byte(wrapperScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DELEGATE_TEST_REAL_GIT", realGit)
+	t.Setenv("DELEGATE_TEST_CHECKOUT_MARKER", marker)
+	t.Setenv("DELEGATE_TEST_CHECKOUT_REPO", repo)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err = Assemble(context.Background(), Options{
+		CWD:      repo,
+		Scope:    ScopeWorkingTree,
+		StateDir: filepath.Join(t.TempDir(), "state"),
+	})
+	want := "repository HEAD moved during review assembly (" + featureHead + " -> " + mainHead + "); re-run the review on a quiescent repo"
+	if err == nil || err.Error() != want {
+		t.Fatalf("Assemble() error = %v, want %q", err, want)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("checkout trigger marker: %v", err)
+	}
+}
+
 func TestAssembleAutoCombinesCommittedBranchAndWorkingTreeOverlay(t *testing.T) {
 	repo := newGitFixture(t)
 	mainHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")

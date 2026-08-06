@@ -98,14 +98,6 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	if err != nil {
 		return Context{}, err
 	}
-	branch := ""
-	if raw, branchErr := gitOutput(ctx, repoRoot, false, "rev-parse", "--abbrev-ref", "HEAD"); branchErr == nil {
-		branch = strings.TrimSpace(string(raw))
-		if branch == "HEAD" {
-			branch = "(detached)"
-		}
-		branch = RedactSecretLikeDiagnostic(branch)
-	}
 	head := ""
 	if raw, headErr := gitOutput(ctx, repoRoot, false, "rev-parse", "HEAD"); headErr == nil {
 		head = strings.TrimSpace(string(raw))
@@ -113,6 +105,14 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	headRef := head
 	if headRef == "" {
 		headRef = "HEAD"
+	}
+	branch := ""
+	if raw, branchErr := gitOutput(ctx, repoRoot, false, "rev-parse", "--abbrev-ref", "HEAD"); branchErr == nil {
+		branch = strings.TrimSpace(string(raw))
+		if branch == "HEAD" {
+			branch = "(detached)"
+		}
+		branch = RedactSecretLikeDiagnostic(branch)
 	}
 	scope, err := normalizeScope(opts.Scope)
 	if err != nil {
