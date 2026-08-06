@@ -32,6 +32,12 @@ func TestConfigCommandRoundTrip(t *testing.T) {
 	if cfg.Backend.Claude.Model != "unadvertised-model" {
 		t.Fatalf("saved model = %q", cfg.Backend.Claude.Model)
 	}
+	if code := run([]string{"config", "set", delegateconfig.KeyCursorModel, "cursor-model"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("set cursor model code = %d stderr=%q", code, stderr.String())
+	}
+	if code := run([]string{"config", "set", delegateconfig.KeyCursorEffort, "medium"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("set cursor effort code = %d stderr=%q", code, stderr.String())
+	}
 
 	stdout.Reset()
 	stderr.Reset()
@@ -50,8 +56,15 @@ func TestConfigCommandRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &listed); err != nil {
 		t.Fatalf("list JSON = %q: %v", stdout.String(), err)
 	}
-	if listed.Path == "" || listed.Overridable || listed.Backend.Claude.Model != "unadvertised-model" {
+	if listed.Path == "" || listed.Overridable || listed.Backend.Claude.Model != "unadvertised-model" || listed.Backend.Cursor.Model != "cursor-model" || listed.Backend.Cursor.Effort != "medium" {
 		t.Fatalf("list = %#v", listed)
+	}
+	stdout.Reset()
+	if code := run([]string{"config", "list"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("list code=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "backend.cursor.model: cursor-model\nbackend.cursor.effort: medium\n") {
+		t.Fatalf("list = %q", stdout.String())
 	}
 	if code := run([]string{"config", "unset", delegateconfig.KeyClaudeModel}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("unset code=%d stderr=%q", code, stderr.String())

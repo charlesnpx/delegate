@@ -14,7 +14,7 @@ func TestLoadMissingUsesDefaultSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Overridable || cfg.Backend.Claude.Model != "" || cfg.Backend.Codex.Effort != "" {
+	if !cfg.Overridable || cfg.Backend.Claude.Model != "" || cfg.Backend.Codex.Effort != "" || cfg.Backend.Cursor.Model != "" || cfg.Backend.Cursor.Effort != "" {
 		t.Fatalf("missing config = %#v, want overridable with no defaults", cfg)
 	}
 }
@@ -54,6 +54,7 @@ func TestSaveRoundTripUsesPrivateAtomicDestination(t *testing.T) {
 	cfg := Config{Overridable: false, Backend: Backends{
 		Claude: Defaults{Model: "opus", Effort: "high"},
 		Codex:  Defaults{Model: "gpt-test", Effort: "xhigh"},
+		Cursor: Defaults{Model: "cursor-test", Effort: "medium"},
 	}}
 	if err := Save(cfg); err != nil {
 		t.Fatal(err)
@@ -80,7 +81,7 @@ func TestSaveRoundTripUsesPrivateAtomicDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Overridable || loaded.Backend.Claude.Model != "opus" || loaded.Backend.Claude.Effort != "high" || loaded.Backend.Codex.Model != "gpt-test" || loaded.Backend.Codex.Effort != "xhigh" {
+	if loaded.Overridable || loaded.Backend.Claude.Model != "opus" || loaded.Backend.Claude.Effort != "high" || loaded.Backend.Codex.Model != "gpt-test" || loaded.Backend.Codex.Effort != "xhigh" || loaded.Backend.Cursor.Model != "cursor-test" || loaded.Backend.Cursor.Effort != "medium" {
 		t.Fatalf("round-trip config = %#v", loaded)
 	}
 	entries, err := os.ReadDir(filepath.Dir(path))
@@ -108,7 +109,8 @@ func TestSaveAllowsSymlinkedConfigDirectoryWithoutChangingTargetPermissions(t *t
 	}
 	t.Setenv("XDG_CONFIG_HOME", root)
 	cfg := Config{Overridable: false, Backend: Backends{
-		Codex: Defaults{Model: "gpt-test", Effort: "high"},
+		Codex:  Defaults{Model: "gpt-test", Effort: "high"},
+		Cursor: Defaults{Model: "cursor-test", Effort: "medium"},
 	}}
 	if err := Save(cfg); err != nil {
 		t.Fatal(err)
@@ -133,7 +135,7 @@ func TestSaveAllowsSymlinkedConfigDirectoryWithoutChangingTargetPermissions(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Overridable || loaded.Backend.Codex.Model != "gpt-test" || loaded.Backend.Codex.Effort != "high" {
+	if loaded.Overridable || loaded.Backend.Codex.Model != "gpt-test" || loaded.Backend.Codex.Effort != "high" || loaded.Backend.Cursor.Model != "cursor-test" || loaded.Backend.Cursor.Effort != "medium" {
 		t.Fatalf("round-trip config = %#v", loaded)
 	}
 	entries, err := os.ReadDir(target)
@@ -163,6 +165,33 @@ func TestAccessorsValidateKeysAndUnset(t *testing.T) {
 	}
 	if got, err := cfg.Get(KeyClaudeModel); err != nil || got != "" {
 		t.Fatalf("Get after unset = %q, %v", got, err)
+	}
+	if err := cfg.Set(KeyCursorModel, "cursor-test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Set(KeyCursorEffort, "medium"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := cfg.Get(KeyCursorModel); err != nil || got != "cursor-test" {
+		t.Fatalf("Get cursor model = %q, %v", got, err)
+	}
+	if got, err := cfg.Get(KeyCursorEffort); err != nil || got != "medium" {
+		t.Fatalf("Get cursor effort = %q, %v", got, err)
+	}
+	if got := cfg.DefaultsFor("cursor"); got.Model != "cursor-test" || got.Effort != "medium" {
+		t.Fatalf("DefaultsFor(cursor) = %#v", got)
+	}
+	if err := cfg.Unset(KeyCursorModel); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Unset(KeyCursorEffort); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := cfg.Get(KeyCursorModel); err != nil || got != "" {
+		t.Fatalf("Get cursor model after unset = %q, %v", got, err)
+	}
+	if got, err := cfg.Get(KeyCursorEffort); err != nil || got != "" {
+		t.Fatalf("Get cursor effort after unset = %q, %v", got, err)
 	}
 	if _, err := cfg.Get("backend.claude.modle"); err == nil || !strings.Contains(err.Error(), "allowed keys") {
 		t.Fatalf("Get unknown error = %v", err)

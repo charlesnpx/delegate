@@ -254,8 +254,8 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 0 || result.UnresolvedCleanupArtifactCount == nil || *result.UnresolvedCleanupArtifactCount != 0 {
 		t.Fatalf("setup counts = pending:%v unresolved:%v, want zero", result.PendingSubmissionIntentCount, result.UnresolvedCleanupArtifactCount)
 	}
-	if len(result.Skills) != 22 {
-		t.Fatalf("skill statuses = %d, want 22: %#v", len(result.Skills), result.Skills)
+	if len(result.Skills) != 28 {
+		t.Fatalf("skill statuses = %d, want 28: %#v", len(result.Skills), result.Skills)
 	}
 	for _, skill := range result.Skills {
 		if skill.Target == "" || skill.Name == "" || skill.Path == "" {

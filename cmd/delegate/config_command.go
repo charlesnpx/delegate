@@ -53,7 +53,7 @@ func runConfigList(args []string, stdout, stderr io.Writer) (int, error) {
 	if *jsonOut {
 		return 0, writeJSONLine(stdout, configListJSON{Path: path, Overridable: cfg.Overridable, Backend: cfg.Backend})
 	}
-	_, err = fmt.Fprintf(stdout, "config file: %s\noverridable: %t\nbackend.claude.model: %s\nbackend.claude.effort: %s\nbackend.codex.model: %s\nbackend.codex.effort: %s\n", path, cfg.Overridable, cfg.Backend.Claude.Model, cfg.Backend.Claude.Effort, cfg.Backend.Codex.Model, cfg.Backend.Codex.Effort)
+	_, err = fmt.Fprintf(stdout, "config file: %s\noverridable: %t\nbackend.claude.model: %s\nbackend.claude.effort: %s\nbackend.codex.model: %s\nbackend.codex.effort: %s\nbackend.cursor.model: %s\nbackend.cursor.effort: %s\n", path, cfg.Overridable, cfg.Backend.Claude.Model, cfg.Backend.Claude.Effort, cfg.Backend.Codex.Model, cfg.Backend.Codex.Effort, cfg.Backend.Cursor.Model, cfg.Backend.Cursor.Effort)
 	return 0, err
 }
 
