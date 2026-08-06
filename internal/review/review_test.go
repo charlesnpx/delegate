@@ -590,27 +590,56 @@ func TestBranchChangesUseCapturedHead(t *testing.T) {
 	repo := newGitFixture(t)
 	base := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
 	gitFixture(t, repo, "switch", "-c", "feature")
-	writeFixtureFile(t, repo, "captured.go", "package feature\n// CAPTURED_HEAD_CHANGE\n")
+	const capturedSecret = "CAPTURED_SECRET_BLOB_MUST_NOT_LEAK\n"
+	writeFixtureFile(t, repo, ".env", capturedSecret)
+	gitFixture(t, repo, "add", ".env")
+	gitFixture(t, repo, "commit", "-m", "secret ancestor")
+	writeFixtureFile(t, repo, "captured.go", capturedSecret)
 	gitFixture(t, repo, "add", "captured.go")
 	gitFixture(t, repo, "commit", "-m", "captured head")
 	capturedHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	capturedSecretBlob := gitFixtureOutput(t, repo, "rev-parse", capturedHead+":.env")
 	writeFixtureFile(t, repo, "later.go", "package feature\n// LATER_HEAD_CHANGE\n")
-	gitFixture(t, repo, "add", "later.go")
+	writeFixtureFile(t, repo, "later-secret.txt", "LATER_SECRET_BLOB_MUST_NOT_LEAK\n")
+	gitFixture(t, repo, "add", "later.go", "later-secret.txt")
 	gitFixture(t, repo, "commit", "-m", "later head")
+	laterSecretBlob := gitFixtureOutput(t, repo, "rev-parse", "HEAD:later-secret.txt")
+	gitFixture(t, repo, "rm", "later-secret.txt")
+	gitFixture(t, repo, "commit", "-m", "remove later secret")
 
 	files, diffBase, err := branchChanges(context.Background(), repo, base, capturedHead)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 || files[0].Path != "captured.go" {
-		t.Fatalf("captured-head files = %#v, want only captured.go", files)
+	if len(files) != 2 || files[0].Path != ".env" || files[1].Path != "captured.go" {
+		t.Fatalf("captured-head files = %#v, want only .env and captured.go", files)
 	}
-	diff, err := trackedDiff(context.Background(), repo, diffBase, capturedHead, files[0].paths()...)
+	diff, err := trackedDiff(context.Background(), repo, diffBase, capturedHead, files[1].paths()...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(diff), "CAPTURED_HEAD_CHANGE") || strings.Contains(string(diff), "LATER_HEAD_CHANGE") {
+	if !strings.Contains(string(diff), "CAPTURED_SECRET_BLOB_MUST_NOT_LEAK") || strings.Contains(string(diff), "LATER_HEAD_CHANGE") {
 		t.Fatalf("captured-head diff = %q", diff)
+	}
+	paths, err := collectSecretPathTaint(context.Background(), repo, diffBase, capturedHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !paths[".env"] || paths["later-secret.txt"] {
+		t.Fatalf("captured-head secret paths = %#v", paths)
+	}
+	hashes, err := collectSecretBlobHashes(context.Background(), repo, diffBase, capturedHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := hashes[capturedSecretBlob]; !ok {
+		t.Fatalf("captured secret blob %q was not tainted", capturedSecretBlob)
+	}
+	if _, ok := hashes[laterSecretBlob]; ok {
+		t.Fatalf("later secret blob %q was tainted outside captured range", laterSecretBlob)
+	}
+	if !diffReferencesSecretBlob(diff, hashes) {
+		t.Fatal("captured secret blob did not redact the captured diff")
 	}
 }
 

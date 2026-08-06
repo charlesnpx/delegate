@@ -124,6 +124,8 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	var changed []changedFile
 	switch scope {
 	case ScopeAuto:
+		// Auto reviews the live working tree over the captured HEAD; its head
+		// stamp identifies the committed baseline, not a frozen tip.
 		base, err = ResolveBase(ctx, repoRoot, opts.Base)
 		if err != nil {
 			return Context{}, err
@@ -140,8 +142,8 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	if err != nil {
 		return Context{}, err
 	}
-	secretBlobs, blobErr := collectSecretBlobHashes(ctx, repoRoot, diffBase)
-	secretPaths, pathErr := collectSecretPathTaint(ctx, repoRoot, diffBase)
+	secretBlobs, blobErr := collectSecretBlobHashes(ctx, repoRoot, diffBase, headRef)
+	secretPaths, pathErr := collectSecretPathTaint(ctx, repoRoot, diffBase, headRef)
 	redactAll := blobErr != nil || pathErr != nil
 
 	for i := range changed {
@@ -571,14 +573,14 @@ type pathHistoryGraph struct {
 // through committed review history. Edges are undirected so a secret-looking
 // name taints every earlier and later path in the same lineage, even after the
 // content changes. The caller redacts every output path if this walk fails.
-func collectSecretPathTaint(ctx context.Context, repoRoot, historyBase string) (map[string]bool, error) {
+func collectSecretPathTaint(ctx context.Context, repoRoot, historyBase, upperRev string) (map[string]bool, error) {
 	graph := pathHistoryGraph{
 		edges:   make(map[pathHistoryNode]map[pathHistoryNode]struct{}),
 		tainted: make(map[pathHistoryNode]struct{}),
 		trees:   make(map[string]map[string]string),
 	}
 	if historyBase == "" {
-		if _, err := graph.loadTree(ctx, repoRoot, "HEAD"); err != nil {
+		if _, err := graph.loadTree(ctx, repoRoot, upperRev); err != nil {
 			return nil, err
 		}
 		return graph.propagatedPathNames(), nil
@@ -587,7 +589,7 @@ func collectSecretPathTaint(ctx context.Context, repoRoot, historyBase string) (
 	if _, err := graph.loadTree(ctx, repoRoot, historyBase); err != nil {
 		return nil, err
 	}
-	raw, err := gitOutput(ctx, repoRoot, false, "rev-list", "--reverse", "--topo-order", "--parents", historyBase+"..HEAD")
+	raw, err := gitOutput(ctx, repoRoot, false, "rev-list", "--reverse", "--topo-order", "--parents", historyBase+".."+upperRev)
 	if err != nil {
 		return nil, fmt.Errorf("collect review path history: %w", err)
 	}
@@ -724,17 +726,17 @@ func (graph *pathHistoryGraph) propagatedPathNames() map[string]bool {
 // collectSecretBlobHashes taints content that appeared at a secret-looking
 // path anywhere in the committed review range, index, or current worktree.
 // Diffs referencing a tainted pre- or post-image are rendered path/status-only.
-func collectSecretBlobHashes(ctx context.Context, repoRoot, historyBase string) (map[string]struct{}, error) {
+func collectSecretBlobHashes(ctx context.Context, repoRoot, historyBase, upperRev string) (map[string]struct{}, error) {
 	hashes := make(map[string]struct{})
 	var commits []string
 	if historyBase != "" {
-		raw, err := gitOutput(ctx, repoRoot, false, "rev-list", historyBase+"..HEAD")
+		raw, err := gitOutput(ctx, repoRoot, false, "rev-list", historyBase+".."+upperRev)
 		if err != nil {
 			return nil, fmt.Errorf("collect review commits for secret redaction: %w", err)
 		}
 		commits = strings.Fields(string(raw))
 	} else {
-		commits = []string{"HEAD"}
+		commits = []string{upperRev}
 	}
 	for _, commit := range commits {
 		raw, err := gitOutput(ctx, repoRoot, false, "ls-tree", "-r", "-z", "--full-tree", commit)
