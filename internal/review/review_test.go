@@ -108,6 +108,39 @@ func TestResolveBasePushedFeaturePrefersDefaultRemoteBranch(t *testing.T) {
 	}
 }
 
+func TestVerifyHeadUnchanged(t *testing.T) {
+	const captured = "1111111111111111111111111111111111111111"
+	tests := []struct {
+		name     string
+		captured string
+		current  string
+		wantErr  string
+	}{
+		{name: "equal", captured: captured, current: captured},
+		{
+			name:     "different",
+			captured: captured,
+			current:  "2222222222222222222222222222222222222222",
+			wantErr:  "repository HEAD moved during review assembly (1111111111111111111111111111111111111111 -> 2222222222222222222222222222222222222222); re-run the review on a quiescent repo",
+		},
+		{name: "initial fallback", captured: "HEAD", current: "2222222222222222222222222222222222222222"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := verifyHeadUnchanged(test.captured, test.current)
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("verifyHeadUnchanged(%q, %q) error = %v", test.captured, test.current, err)
+				}
+				return
+			}
+			if err == nil || err.Error() != test.wantErr {
+				t.Fatalf("verifyHeadUnchanged(%q, %q) error = %v, want %q", test.captured, test.current, err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestAssembleAutoCombinesCommittedBranchAndWorkingTreeOverlay(t *testing.T) {
 	repo := newGitFixture(t)
 	mainHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")

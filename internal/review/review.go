@@ -174,6 +174,11 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	// same redacted payload is subsequently used for both inline and spilled
 	// delivery. Nothing adds diff or artifact content after this scan.
 	redactSecretLikeContent(changed)
+	if currentHeadRaw, currentHeadErr := gitOutput(ctx, repoRoot, false, "rev-parse", "HEAD"); currentHeadErr == nil {
+		if err := verifyHeadUnchanged(headRef, strings.TrimSpace(string(currentHeadRaw))); err != nil {
+			return Context{}, err
+		}
+	}
 	payload := renderSanitizedContext(scope, base, branch, head, changed)
 	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{StateDir: opts.StateDir})
 	if err != nil {
@@ -226,6 +231,16 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 		return Context{}, err
 	}
 	return result, nil
+}
+
+// verifyHeadUnchanged rejects a context assembled across two committed tips.
+// A captured "HEAD" denotes an initial best-effort fallback, for which this
+// check intentionally preserves the existing behavior.
+func verifyHeadUnchanged(captured, current string) error {
+	if captured == "HEAD" || captured == current {
+		return nil
+	}
+	return fmt.Errorf("repository HEAD moved during review assembly (%s -> %s); re-run the review on a quiescent repo", captured, current)
 }
 
 // ResolveBase follows the required explicit, default-remote, unpushed-upstream
