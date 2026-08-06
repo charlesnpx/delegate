@@ -68,6 +68,8 @@ type Context struct {
 	Inline            string
 	Scope             string
 	Base              Base
+	Branch            string
+	Head              string
 	Files             []File
 	SanitizedBytes    int
 	AllowLiveRepoRead bool
@@ -95,6 +97,17 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	repoRoot, err := repositoryRoot(ctx, canonicalCWD)
 	if err != nil {
 		return Context{}, err
+	}
+	branch := ""
+	if raw, branchErr := gitOutput(ctx, repoRoot, false, "rev-parse", "--abbrev-ref", "HEAD"); branchErr == nil {
+		branch = strings.TrimSpace(string(raw))
+		if branch == "HEAD" {
+			branch = "(detached)"
+		}
+	}
+	head := ""
+	if raw, headErr := gitOutput(ctx, repoRoot, false, "rev-parse", "HEAD"); headErr == nil {
+		head = strings.TrimSpace(string(raw))
 	}
 	scope, err := normalizeScope(opts.Scope)
 	if err != nil {
@@ -154,7 +167,7 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	// same redacted payload is subsequently used for both inline and spilled
 	// delivery. Nothing adds diff or artifact content after this scan.
 	redactSecretLikeContent(changed)
-	payload := renderSanitizedContext(scope, base, changed)
+	payload := renderSanitizedContext(scope, base, branch, head, changed)
 	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{StateDir: opts.StateDir})
 	if err != nil {
 		return Context{}, err
@@ -169,6 +182,8 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 		StateDir:          stateDir,
 		Scope:             scope,
 		Base:              base,
+		Branch:            branch,
+		Head:              head,
 		SanitizedBytes:    len(payload),
 		AllowLiveRepoRead: opts.AllowLiveRepoRead,
 		Files:             publicFiles(changed),
@@ -315,6 +330,15 @@ func ComposePrompt(kind string, assembled Context) (string, error) {
 	prompt.WriteString("Effective scope: " + assembled.Scope + ".\n")
 	if assembled.Base.Ref != "" {
 		prompt.WriteString("Resolved base: " + strconv.Quote(assembled.Base.Ref) + " (" + assembled.Base.Source + ").\n")
+	}
+	if assembled.Base.Commit != "" {
+		prompt.WriteString("Base commit: " + assembled.Base.Commit + ".\n")
+	}
+	if assembled.Branch != "" {
+		prompt.WriteString("Branch under review: " + strconv.Quote(assembled.Branch) + ".\n")
+	}
+	if assembled.Head != "" {
+		prompt.WriteString("HEAD commit: " + assembled.Head + ".\n")
 	}
 	if assembled.AllowLiveRepoRead {
 		prompt.WriteString("LIVE-REPOSITORY MODE was explicitly enabled. Delegate still applies its path/history redaction and final content scan to the context it assembles; this flag makes backend file reads easier by using the live repository as its working directory. You may inspect the current repository to validate and self-collect context, but remain read-only and do not expose secret-looking file contents in the response.\n")
@@ -868,12 +892,21 @@ func sortChanged(files []changedFile) {
 	})
 }
 
-func renderSanitizedContext(scope string, base Base, files []changedFile) []byte {
+func renderSanitizedContext(scope string, base Base, branch, head string, files []changedFile) []byte {
 	var out bytes.Buffer
 	out.WriteString(sanitizedContextHeader + "\n")
 	out.WriteString("scope\t" + strconv.Quote(scope) + "\n")
 	if base.Ref != "" {
 		out.WriteString("base\t" + strconv.Quote(base.Ref) + "\n")
+	}
+	if base.Commit != "" {
+		out.WriteString("base_commit\t" + base.Commit + "\n")
+	}
+	if branch != "" {
+		out.WriteString("branch\t" + strconv.Quote(branch) + "\n")
+	}
+	if head != "" {
+		out.WriteString("head\t" + head + "\n")
 	}
 	out.WriteString(fmt.Sprintf("file_count\t%d\n", len(files)))
 	for _, file := range files {

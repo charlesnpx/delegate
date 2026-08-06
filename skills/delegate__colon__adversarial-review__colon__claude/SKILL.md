@@ -23,6 +23,8 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
+Review commands never pass "--write" and intentionally run the backend read-only.
+
 When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id, job record, contract stamps, and read-only profile.
 
 ## Parent Audit Linkage

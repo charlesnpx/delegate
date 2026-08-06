@@ -484,6 +484,8 @@ Superseding escape hatch: if the requester explicitly asks you to perform the ta
 - stdin handoff: sensitive prompt text can be piped to "delegate handoff create --json".
 - backend reachability: "delegate setup --json" shows agentbus capabilities and {{.Backend}} backend availability.
 
+By default "delegate task" runs the backend READ-ONLY; pass "--write" when the task must modify the repository or workspace (create/edit files, or run builds/tests that write caches). Omitting "--write" yields a read-only profile and write attempts fail.
+
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
 When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id, job record, contract stamps, and read-only profile.
@@ -540,6 +542,8 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 - backend reachability: "delegate setup --json" shows agentbus capabilities and {{.Backend}} backend availability.
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
+
+Review commands never pass "--write" and intentionally run the backend read-only.
 
 When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id, job record, contract stamps, and read-only profile.
 

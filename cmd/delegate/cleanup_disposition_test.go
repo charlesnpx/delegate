@@ -136,6 +136,9 @@ func TestOrphanedTerminalWaitStopsEmitsEnvelopeAndRetainsArtifacts(t *testing.T)
 func TestTerminalEnvelopeSchema2FieldsFromResultAndStatus(t *testing.T) {
 	jobID := "job_terminal_schema2"
 	resultSHA := strings.Repeat("e", 64)
+	startedAt := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	heartbeatAt := startedAt.Add(time.Minute)
+	updatedAt := heartbeatAt.Add(time.Minute)
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		result: client.JobResult{
@@ -151,6 +154,9 @@ func TestTerminalEnvelopeSchema2FieldsFromResultAndStatus(t *testing.T) {
 			CleanupDisposition: cleanupDispositionUnresolved,
 			LateFinalization:   true,
 			Warnings:           []string{"cleanup could not prove absence"},
+			StartedAt:          &startedAt,
+			HeartbeatAt:        &heartbeatAt,
+			UpdatedAt:          &updatedAt,
 		}}},
 	}
 	restore := stubAgentbusGlobals(t, fake)
@@ -177,6 +183,9 @@ func TestTerminalEnvelopeSchema2FieldsFromResultAndStatus(t *testing.T) {
 	}
 	if env.ResultSHA256 == nil || *env.ResultSHA256 != resultSHA || env.ResultUnavailableReason != "" {
 		t.Fatalf("result fields sha=%#v reason=%q", env.ResultSHA256, env.ResultUnavailableReason)
+	}
+	if env.StartedAt == nil || !env.StartedAt.Equal(startedAt) || env.HeartbeatAt == nil || !env.HeartbeatAt.Equal(heartbeatAt) || env.UpdatedAt == nil || !env.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("terminal timestamps started=%v heartbeat=%v updated=%v", env.StartedAt, env.HeartbeatAt, env.UpdatedAt)
 	}
 	assertPathExists(t, inputPath)
 	assertPathExists(t, workspace)

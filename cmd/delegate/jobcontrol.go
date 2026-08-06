@@ -389,6 +389,12 @@ func (result terminalJobResult) envelopeOptions(option terminalEnvelopeOptions) 
 		if result.statusJob.UpdatedAt != nil {
 			option.UpdatedAt = result.statusJob.UpdatedAt
 		}
+		if result.statusJob.StartedAt != nil {
+			option.StartedAt = result.statusJob.StartedAt
+		}
+		if result.statusJob.HeartbeatAt != nil {
+			option.HeartbeatAt = result.statusJob.HeartbeatAt
+		}
 	}
 	return option
 }

@@ -501,6 +501,8 @@ func TestAssembleBranchScopeUsesResolvedBaseAndCanonicalCWD(t *testing.T) {
 	writeFixtureFile(t, repo, "branch-secret.txt", "BRANCH_SECRET_NEVER\n")
 	gitFixture(t, repo, "add", "branch.go", "branch-secret.txt")
 	gitFixture(t, repo, "commit", "-m", "feature change")
+	baseCommit := gitFixtureOutput(t, repo, "rev-parse", "main")
+	head := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
 	link := filepath.Join(t.TempDir(), "repo-link")
 	if err := os.Symlink(repo, link); err != nil {
 		t.Fatal(err)
@@ -526,8 +528,33 @@ func TestAssembleBranchScopeUsesResolvedBaseAndCanonicalCWD(t *testing.T) {
 	if assembled.Base.Source != "explicit" || assembled.Base.Ref != "main" || assembled.Scope != ScopeBranch {
 		t.Fatalf("base/scope=%#v %q", assembled.Base, assembled.Scope)
 	}
+	if assembled.Branch != "feature" || assembled.Head != head {
+		t.Fatalf("branch/head=%q/%q, want feature/%q", assembled.Branch, assembled.Head, head)
+	}
+	for _, want := range []string{
+		"base_commit\t" + baseCommit,
+		"branch\t\"feature\"",
+		"head\t" + head,
+	} {
+		if !strings.Contains(assembled.Inline, want) {
+			t.Fatalf("branch sanitized context missing %q: %q", want, assembled.Inline)
+		}
+	}
 	if !strings.Contains(assembled.Inline, "BRANCH_CHANGE") || strings.Contains(assembled.Inline, "BRANCH_SECRET_NEVER") || !strings.Contains(assembled.Inline, `"branch-secret.txt"`) {
 		t.Fatalf("branch sanitized context=%q", assembled.Inline)
+	}
+	prompt, err := ComposePrompt(KindReview, assembled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Base commit: " + baseCommit + ".",
+		"Branch under review: \"feature\".",
+		"HEAD commit: " + head + ".",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("review prompt missing %q: %q", want, prompt)
+		}
 	}
 }
 
