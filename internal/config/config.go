@@ -19,6 +19,8 @@ const (
 	KeyClaudeEffort = "backend.claude.effort"
 	KeyCodexModel   = "backend.codex.model"
 	KeyCodexEffort  = "backend.codex.effort"
+	KeyCursorModel  = "backend.cursor.model"
+	KeyCursorEffort = "backend.cursor.effort"
 )
 
 // Config is delegate's user-level model and effort preference configuration.
@@ -34,6 +36,7 @@ type Config struct {
 type Backends struct {
 	Claude Defaults `json:"claude"`
 	Codex  Defaults `json:"codex"`
+	Cursor Defaults `json:"cursor"`
 }
 
 // Defaults holds optional model and effort values for one backend.
@@ -50,6 +53,7 @@ type diskConfig struct {
 type diskBackends struct {
 	Claude diskDefaults `toml:"claude"`
 	Codex  diskDefaults `toml:"codex"`
+	Cursor diskDefaults `toml:"cursor"`
 }
 
 type diskDefaults struct {
@@ -215,6 +219,10 @@ func (c Config) Get(key string) (string, error) {
 		return c.Backend.Codex.Model, nil
 	case KeyCodexEffort:
 		return c.Backend.Codex.Effort, nil
+	case KeyCursorModel:
+		return c.Backend.Cursor.Model, nil
+	case KeyCursorEffort:
+		return c.Backend.Cursor.Effort, nil
 	default:
 		return "", unsupportedKeyError(key)
 	}
@@ -241,6 +249,10 @@ func (c *Config) Set(key, value string) error {
 		c.Backend.Codex.Model = value
 	case KeyCodexEffort:
 		c.Backend.Codex.Effort = value
+	case KeyCursorModel:
+		c.Backend.Cursor.Model = value
+	case KeyCursorEffort:
+		c.Backend.Cursor.Effort = value
 	default:
 		return unsupportedKeyError(key)
 	}
@@ -262,6 +274,10 @@ func (c *Config) Unset(key string) error {
 		c.Backend.Codex.Model = ""
 	case KeyCodexEffort:
 		c.Backend.Codex.Effort = ""
+	case KeyCursorModel:
+		c.Backend.Cursor.Model = ""
+	case KeyCursorEffort:
+		c.Backend.Cursor.Effort = ""
 	default:
 		return unsupportedKeyError(key)
 	}
@@ -276,13 +292,15 @@ func (c Config) DefaultsFor(backend string) Defaults {
 		return c.Backend.Claude
 	case "codex":
 		return c.Backend.Codex
+	case "cursor":
+		return c.Backend.Cursor
 	default:
 		return Defaults{}
 	}
 }
 
 func unsupportedKeyError(key string) error {
-	return fmt.Errorf("unsupported config key %q; allowed keys: %s, %s, %s, %s, %s", key, KeyOverridable, KeyClaudeModel, KeyClaudeEffort, KeyCodexModel, KeyCodexEffort)
+	return fmt.Errorf("unsupported config key %q; allowed keys: %s, %s, %s, %s, %s, %s, %s", key, KeyOverridable, KeyClaudeModel, KeyClaudeEffort, KeyCodexModel, KeyCodexEffort, KeyCursorModel, KeyCursorEffort)
 }
 
 func fromDisk(disk diskConfig) Config {
@@ -303,6 +321,12 @@ func fromDisk(disk diskConfig) Config {
 	if disk.Backend.Codex.Effort != nil {
 		cfg.Backend.Codex.Effort = *disk.Backend.Codex.Effort
 	}
+	if disk.Backend.Cursor.Model != nil {
+		cfg.Backend.Cursor.Model = *disk.Backend.Cursor.Model
+	}
+	if disk.Backend.Cursor.Effort != nil {
+		cfg.Backend.Cursor.Effort = *disk.Backend.Cursor.Effort
+	}
 	return cfg
 }
 
@@ -311,6 +335,7 @@ func toDisk(cfg Config) diskConfig {
 		Backend: diskBackends{
 			Claude: diskDefaults{Model: stringPointerIfSet(cfg.Backend.Claude.Model), Effort: stringPointerIfSet(cfg.Backend.Claude.Effort)},
 			Codex:  diskDefaults{Model: stringPointerIfSet(cfg.Backend.Codex.Model), Effort: stringPointerIfSet(cfg.Backend.Codex.Effort)},
+			Cursor: diskDefaults{Model: stringPointerIfSet(cfg.Backend.Cursor.Model), Effort: stringPointerIfSet(cfg.Backend.Cursor.Effort)},
 		},
 	}
 	if cfg.overridableSet || !cfg.Overridable {
