@@ -108,6 +108,39 @@ func TestResolveBasePushedFeaturePrefersDefaultRemoteBranch(t *testing.T) {
 	}
 }
 
+func TestVerifyHeadUnchanged(t *testing.T) {
+	const captured = "1111111111111111111111111111111111111111"
+	tests := []struct {
+		name     string
+		captured string
+		current  string
+		wantErr  string
+	}{
+		{name: "equal", captured: captured, current: captured},
+		{
+			name:     "different",
+			captured: captured,
+			current:  "2222222222222222222222222222222222222222",
+			wantErr:  "repository HEAD moved during review assembly (1111111111111111111111111111111111111111 -> 2222222222222222222222222222222222222222); re-run the review on a quiescent repo",
+		},
+		{name: "initial fallback", captured: "HEAD", current: "2222222222222222222222222222222222222222"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := verifyHeadUnchanged(test.captured, test.current)
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("verifyHeadUnchanged(%q, %q) error = %v", test.captured, test.current, err)
+				}
+				return
+			}
+			if err == nil || err.Error() != test.wantErr {
+				t.Fatalf("verifyHeadUnchanged(%q, %q) error = %v, want %q", test.captured, test.current, err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestAssembleAutoCombinesCommittedBranchAndWorkingTreeOverlay(t *testing.T) {
 	repo := newGitFixture(t)
 	mainHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
@@ -501,6 +534,8 @@ func TestAssembleBranchScopeUsesResolvedBaseAndCanonicalCWD(t *testing.T) {
 	writeFixtureFile(t, repo, "branch-secret.txt", "BRANCH_SECRET_NEVER\n")
 	gitFixture(t, repo, "add", "branch.go", "branch-secret.txt")
 	gitFixture(t, repo, "commit", "-m", "feature change")
+	baseCommit := gitFixtureOutput(t, repo, "rev-parse", "main")
+	head := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
 	link := filepath.Join(t.TempDir(), "repo-link")
 	if err := os.Symlink(repo, link); err != nil {
 		t.Fatal(err)
@@ -526,8 +561,118 @@ func TestAssembleBranchScopeUsesResolvedBaseAndCanonicalCWD(t *testing.T) {
 	if assembled.Base.Source != "explicit" || assembled.Base.Ref != "main" || assembled.Scope != ScopeBranch {
 		t.Fatalf("base/scope=%#v %q", assembled.Base, assembled.Scope)
 	}
+	if assembled.Branch != "feature" || assembled.Head != head {
+		t.Fatalf("branch/head=%q/%q, want feature/%q", assembled.Branch, assembled.Head, head)
+	}
+	for _, want := range []string{
+		"base_commit\t" + baseCommit,
+		"branch\t\"feature\"",
+		"head\t" + head,
+	} {
+		if !strings.Contains(assembled.Inline, want) {
+			t.Fatalf("branch sanitized context missing %q: %q", want, assembled.Inline)
+		}
+	}
 	if !strings.Contains(assembled.Inline, "BRANCH_CHANGE") || strings.Contains(assembled.Inline, "BRANCH_SECRET_NEVER") || !strings.Contains(assembled.Inline, `"branch-secret.txt"`) {
 		t.Fatalf("branch sanitized context=%q", assembled.Inline)
+	}
+	prompt, err := ComposePrompt(KindReview, assembled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Base commit: " + baseCommit + ".",
+		"Branch under review: \"feature\".",
+		"HEAD commit: " + head + ".",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("review prompt missing %q: %q", want, prompt)
+		}
+	}
+}
+
+func TestAssembleRedactsSecretLikeBranchMetadata(t *testing.T) {
+	repo := newGitFixture(t)
+	const secret = "AKIAIOSFODNN7EXAMPLE"
+	gitFixture(t, repo, "switch", "-c", "feature-"+secret)
+
+	assembled, err := Assemble(context.Background(), Options{
+		CWD:      repo,
+		Scope:    ScopeWorkingTree,
+		StateDir: filepath.Join(t.TempDir(), "state"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	prompt, err := ComposePrompt(KindReview, assembled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, emitted := range []string{assembled.Branch, assembled.Inline, prompt} {
+		if strings.Contains(emitted, secret) {
+			t.Fatalf("branch metadata leaked secret-shaped content: %q", emitted)
+		}
+		if !strings.Contains(emitted, secretRedactionMarker) {
+			t.Fatalf("branch metadata missing redaction marker: %q", emitted)
+		}
+	}
+}
+
+func TestBranchChangesUseCapturedHead(t *testing.T) {
+	repo := newGitFixture(t)
+	base := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	gitFixture(t, repo, "switch", "-c", "feature")
+	const capturedSecret = "CAPTURED_SECRET_BLOB_MUST_NOT_LEAK\n"
+	writeFixtureFile(t, repo, ".env", capturedSecret)
+	gitFixture(t, repo, "add", ".env")
+	gitFixture(t, repo, "commit", "-m", "secret ancestor")
+	writeFixtureFile(t, repo, "captured.go", capturedSecret)
+	gitFixture(t, repo, "add", "captured.go")
+	gitFixture(t, repo, "commit", "-m", "captured head")
+	capturedHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	capturedSecretBlob := gitFixtureOutput(t, repo, "rev-parse", capturedHead+":.env")
+	writeFixtureFile(t, repo, "later.go", "package feature\n// LATER_HEAD_CHANGE\n")
+	writeFixtureFile(t, repo, "later-secret.txt", "LATER_SECRET_BLOB_MUST_NOT_LEAK\n")
+	gitFixture(t, repo, "add", "later.go", "later-secret.txt")
+	gitFixture(t, repo, "commit", "-m", "later head")
+	laterSecretBlob := gitFixtureOutput(t, repo, "rev-parse", "HEAD:later-secret.txt")
+	gitFixture(t, repo, "rm", "later-secret.txt")
+	gitFixture(t, repo, "commit", "-m", "remove later secret")
+
+	files, diffBase, err := branchChanges(context.Background(), repo, base, capturedHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 || files[0].Path != ".env" || files[1].Path != "captured.go" {
+		t.Fatalf("captured-head files = %#v, want only .env and captured.go", files)
+	}
+	diff, err := trackedDiff(context.Background(), repo, diffBase, capturedHead, files[1].paths()...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(diff), "CAPTURED_SECRET_BLOB_MUST_NOT_LEAK") || strings.Contains(string(diff), "LATER_HEAD_CHANGE") {
+		t.Fatalf("captured-head diff = %q", diff)
+	}
+	paths, err := collectSecretPathTaint(context.Background(), repo, diffBase, capturedHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !paths[".env"] || paths["later-secret.txt"] {
+		t.Fatalf("captured-head secret paths = %#v", paths)
+	}
+	hashes, err := collectSecretBlobHashes(context.Background(), repo, diffBase, capturedHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := hashes[capturedSecretBlob]; !ok {
+		t.Fatalf("captured secret blob %q was not tainted", capturedSecretBlob)
+	}
+	if _, ok := hashes[laterSecretBlob]; ok {
+		t.Fatalf("later secret blob %q was tainted outside captured range", laterSecretBlob)
+	}
+	if !diffReferencesSecretBlob(diff, hashes) {
+		t.Fatal("captured secret blob did not redact the captured diff")
 	}
 }
 

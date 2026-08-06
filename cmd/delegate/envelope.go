@@ -58,6 +58,8 @@ type TerminalEnvelope struct {
 	ModelReportedUnavailableReason string                     `json:"model_reported_unavailable_reason,omitempty"`
 	SubmittedAt                    *time.Time                 `json:"submitted_at,omitempty"`
 	UpdatedAt                      *time.Time                 `json:"updated_at,omitempty"`
+	StartedAt                      *time.Time                 `json:"started_at,omitempty"`
+	HeartbeatAt                    *time.Time                 `json:"heartbeat_at,omitempty"`
 	Origin                         *envelopeOrigin            `json:"origin,omitempty"`
 }
 
@@ -76,6 +78,8 @@ type terminalEnvelopeOptions struct {
 	ResultPath             string
 	SubmittedAt            *time.Time
 	UpdatedAt              *time.Time
+	StartedAt              *time.Time
+	HeartbeatAt            *time.Time
 }
 
 type launchEnvelopeOptions struct {
@@ -109,6 +113,8 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		ModelReportedUnavailableReason string                     `json:"model_reported_unavailable_reason,omitempty"`
 		SubmittedAt                    *time.Time                 `json:"submitted_at,omitempty"`
 		UpdatedAt                      *time.Time                 `json:"updated_at,omitempty"`
+		StartedAt                      *time.Time                 `json:"started_at,omitempty"`
+		HeartbeatAt                    *time.Time                 `json:"heartbeat_at,omitempty"`
 		Origin                         *envelopeOrigin            `json:"origin,omitempty"`
 	}
 	return json.Marshal(terminalEnvelopeJSON{
@@ -134,6 +140,8 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		ModelReportedUnavailableReason: e.ModelReportedUnavailableReason,
 		SubmittedAt:                    e.SubmittedAt,
 		UpdatedAt:                      e.UpdatedAt,
+		StartedAt:                      e.StartedAt,
+		HeartbeatAt:                    e.HeartbeatAt,
 		Origin:                         e.Origin,
 	})
 }
@@ -212,6 +220,8 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 		ModelReportedUnavailableReason: modelReportedUnavailableReason(option.ModelsReportedCapable, option.ModelReported),
 		SubmittedAt:                    option.SubmittedAt,
 		UpdatedAt:                      option.UpdatedAt,
+		StartedAt:                      option.StartedAt,
+		HeartbeatAt:                    option.HeartbeatAt,
 		ResultPath:                     option.ResultPath,
 		Origin:                         envelopeOriginPointer(option.Origin),
 	}

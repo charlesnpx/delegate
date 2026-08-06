@@ -68,6 +68,8 @@ type Context struct {
 	Inline            string
 	Scope             string
 	Base              Base
+	Branch            string
+	Head              string
 	Files             []File
 	SanitizedBytes    int
 	AllowLiveRepoRead bool
@@ -96,6 +98,22 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	if err != nil {
 		return Context{}, err
 	}
+	branch := ""
+	if raw, branchErr := gitOutput(ctx, repoRoot, false, "rev-parse", "--abbrev-ref", "HEAD"); branchErr == nil {
+		branch = strings.TrimSpace(string(raw))
+		if branch == "HEAD" {
+			branch = "(detached)"
+		}
+		branch = RedactSecretLikeDiagnostic(branch)
+	}
+	head := ""
+	if raw, headErr := gitOutput(ctx, repoRoot, false, "rev-parse", "HEAD"); headErr == nil {
+		head = strings.TrimSpace(string(raw))
+	}
+	headRef := head
+	if headRef == "" {
+		headRef = "HEAD"
+	}
 	scope, err := normalizeScope(opts.Scope)
 	if err != nil {
 		return Context{}, err
@@ -106,24 +124,26 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	var changed []changedFile
 	switch scope {
 	case ScopeAuto:
+		// Auto reviews the live working tree over the captured HEAD; its head
+		// stamp identifies the committed baseline, not a frozen tip.
 		base, err = ResolveBase(ctx, repoRoot, opts.Base)
 		if err != nil {
 			return Context{}, err
 		}
-		changed, diffBase, err = autoChanges(ctx, repoRoot, base.Commit)
+		changed, diffBase, err = autoChanges(ctx, repoRoot, base.Commit, headRef)
 	case ScopeWorkingTree:
 		changed, err = workingTreeChanges(ctx, repoRoot)
 	case ScopeBranch:
 		base, err = ResolveBase(ctx, repoRoot, opts.Base)
 		if err == nil {
-			changed, diffBase, err = branchChanges(ctx, repoRoot, base.Commit)
+			changed, diffBase, err = branchChanges(ctx, repoRoot, base.Commit, headRef)
 		}
 	}
 	if err != nil {
 		return Context{}, err
 	}
-	secretBlobs, blobErr := collectSecretBlobHashes(ctx, repoRoot, diffBase)
-	secretPaths, pathErr := collectSecretPathTaint(ctx, repoRoot, diffBase)
+	secretBlobs, blobErr := collectSecretBlobHashes(ctx, repoRoot, diffBase, headRef)
+	secretPaths, pathErr := collectSecretPathTaint(ctx, repoRoot, diffBase, headRef)
 	redactAll := blobErr != nil || pathErr != nil
 
 	for i := range changed {
@@ -135,7 +155,7 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 		if changed[i].untracked {
 			changed[i].diff, err = untrackedDiff(ctx, repoRoot, changed[i].Path)
 		} else if scope == ScopeBranch {
-			changed[i].diff, err = trackedDiff(ctx, repoRoot, diffBase, "HEAD", changed[i].paths()...)
+			changed[i].diff, err = trackedDiff(ctx, repoRoot, diffBase, headRef, changed[i].paths()...)
 		} else if scope == ScopeAuto {
 			changed[i].diff, err = trackedDiff(ctx, repoRoot, diffBase, "", changed[i].paths()...)
 		} else {
@@ -154,7 +174,12 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	// same redacted payload is subsequently used for both inline and spilled
 	// delivery. Nothing adds diff or artifact content after this scan.
 	redactSecretLikeContent(changed)
-	payload := renderSanitizedContext(scope, base, changed)
+	if currentHeadRaw, currentHeadErr := gitOutput(ctx, repoRoot, false, "rev-parse", "HEAD"); currentHeadErr == nil {
+		if err := verifyHeadUnchanged(headRef, strings.TrimSpace(string(currentHeadRaw))); err != nil {
+			return Context{}, err
+		}
+	}
+	payload := renderSanitizedContext(scope, base, branch, head, changed)
 	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{StateDir: opts.StateDir})
 	if err != nil {
 		return Context{}, err
@@ -169,6 +194,8 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 		StateDir:          stateDir,
 		Scope:             scope,
 		Base:              base,
+		Branch:            branch,
+		Head:              head,
 		SanitizedBytes:    len(payload),
 		AllowLiveRepoRead: opts.AllowLiveRepoRead,
 		Files:             publicFiles(changed),
@@ -204,6 +231,16 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 		return Context{}, err
 	}
 	return result, nil
+}
+
+// verifyHeadUnchanged rejects a context assembled across two committed tips.
+// A captured "HEAD" denotes an initial best-effort fallback, for which this
+// check intentionally preserves the existing behavior.
+func verifyHeadUnchanged(captured, current string) error {
+	if captured == "HEAD" || captured == current {
+		return nil
+	}
+	return fmt.Errorf("repository HEAD moved during review assembly (%s -> %s); re-run the review on a quiescent repo", captured, current)
 }
 
 // ResolveBase follows the required explicit, default-remote, unpushed-upstream
@@ -315,6 +352,15 @@ func ComposePrompt(kind string, assembled Context) (string, error) {
 	prompt.WriteString("Effective scope: " + assembled.Scope + ".\n")
 	if assembled.Base.Ref != "" {
 		prompt.WriteString("Resolved base: " + strconv.Quote(assembled.Base.Ref) + " (" + assembled.Base.Source + ").\n")
+	}
+	if assembled.Base.Commit != "" {
+		prompt.WriteString("Base commit: " + assembled.Base.Commit + ".\n")
+	}
+	if assembled.Branch != "" {
+		prompt.WriteString("Branch under review: " + strconv.Quote(assembled.Branch) + ".\n")
+	}
+	if assembled.Head != "" {
+		prompt.WriteString("HEAD commit: " + assembled.Head + ".\n")
 	}
 	if assembled.AllowLiveRepoRead {
 		prompt.WriteString("LIVE-REPOSITORY MODE was explicitly enabled. Delegate still applies its path/history redaction and final content scan to the context it assembles; this flag makes backend file reads easier by using the live repository as its working directory. You may inspect the current repository to validate and self-collect context, but remain read-only and do not expose secret-looking file contents in the response.\n")
@@ -455,13 +501,13 @@ func workingTreeChanges(ctx context.Context, repoRoot string) ([]changedFile, er
 	return files, nil
 }
 
-func branchChanges(ctx context.Context, repoRoot, baseCommit string) ([]changedFile, string, error) {
-	mergeBaseRaw, err := gitOutput(ctx, repoRoot, false, "merge-base", baseCommit, "HEAD")
+func branchChanges(ctx context.Context, repoRoot, baseCommit, headRef string) ([]changedFile, string, error) {
+	mergeBaseRaw, err := gitOutput(ctx, repoRoot, false, "merge-base", baseCommit, headRef)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve merge base for %q: %w", baseCommit, err)
 	}
 	mergeBase := strings.TrimSpace(string(mergeBaseRaw))
-	raw, err := gitOutput(ctx, repoRoot, false, nameStatusArgs(mergeBase, "HEAD")...)
+	raw, err := gitOutput(ctx, repoRoot, false, nameStatusArgs(mergeBase, headRef)...)
 	if err != nil {
 		return nil, "", fmt.Errorf("collect branch paths: %w", err)
 	}
@@ -473,8 +519,8 @@ func branchChanges(ctx context.Context, repoRoot, baseCommit string) ([]changedF
 	return files, mergeBase, nil
 }
 
-func autoChanges(ctx context.Context, repoRoot, baseCommit string) ([]changedFile, string, error) {
-	mergeBaseRaw, err := gitOutput(ctx, repoRoot, false, "merge-base", baseCommit, "HEAD")
+func autoChanges(ctx context.Context, repoRoot, baseCommit, headRef string) ([]changedFile, string, error) {
+	mergeBaseRaw, err := gitOutput(ctx, repoRoot, false, "merge-base", baseCommit, headRef)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve merge base for %q: %w", baseCommit, err)
 	}
@@ -542,14 +588,14 @@ type pathHistoryGraph struct {
 // through committed review history. Edges are undirected so a secret-looking
 // name taints every earlier and later path in the same lineage, even after the
 // content changes. The caller redacts every output path if this walk fails.
-func collectSecretPathTaint(ctx context.Context, repoRoot, historyBase string) (map[string]bool, error) {
+func collectSecretPathTaint(ctx context.Context, repoRoot, historyBase, upperRev string) (map[string]bool, error) {
 	graph := pathHistoryGraph{
 		edges:   make(map[pathHistoryNode]map[pathHistoryNode]struct{}),
 		tainted: make(map[pathHistoryNode]struct{}),
 		trees:   make(map[string]map[string]string),
 	}
 	if historyBase == "" {
-		if _, err := graph.loadTree(ctx, repoRoot, "HEAD"); err != nil {
+		if _, err := graph.loadTree(ctx, repoRoot, upperRev); err != nil {
 			return nil, err
 		}
 		return graph.propagatedPathNames(), nil
@@ -558,7 +604,7 @@ func collectSecretPathTaint(ctx context.Context, repoRoot, historyBase string) (
 	if _, err := graph.loadTree(ctx, repoRoot, historyBase); err != nil {
 		return nil, err
 	}
-	raw, err := gitOutput(ctx, repoRoot, false, "rev-list", "--reverse", "--topo-order", "--parents", historyBase+"..HEAD")
+	raw, err := gitOutput(ctx, repoRoot, false, "rev-list", "--reverse", "--topo-order", "--parents", historyBase+".."+upperRev)
 	if err != nil {
 		return nil, fmt.Errorf("collect review path history: %w", err)
 	}
@@ -695,17 +741,17 @@ func (graph *pathHistoryGraph) propagatedPathNames() map[string]bool {
 // collectSecretBlobHashes taints content that appeared at a secret-looking
 // path anywhere in the committed review range, index, or current worktree.
 // Diffs referencing a tainted pre- or post-image are rendered path/status-only.
-func collectSecretBlobHashes(ctx context.Context, repoRoot, historyBase string) (map[string]struct{}, error) {
+func collectSecretBlobHashes(ctx context.Context, repoRoot, historyBase, upperRev string) (map[string]struct{}, error) {
 	hashes := make(map[string]struct{})
 	var commits []string
 	if historyBase != "" {
-		raw, err := gitOutput(ctx, repoRoot, false, "rev-list", historyBase+"..HEAD")
+		raw, err := gitOutput(ctx, repoRoot, false, "rev-list", historyBase+".."+upperRev)
 		if err != nil {
 			return nil, fmt.Errorf("collect review commits for secret redaction: %w", err)
 		}
 		commits = strings.Fields(string(raw))
 	} else {
-		commits = []string{"HEAD"}
+		commits = []string{upperRev}
 	}
 	for _, commit := range commits {
 		raw, err := gitOutput(ctx, repoRoot, false, "ls-tree", "-r", "-z", "--full-tree", commit)
@@ -868,12 +914,21 @@ func sortChanged(files []changedFile) {
 	})
 }
 
-func renderSanitizedContext(scope string, base Base, files []changedFile) []byte {
+func renderSanitizedContext(scope string, base Base, branch, head string, files []changedFile) []byte {
 	var out bytes.Buffer
 	out.WriteString(sanitizedContextHeader + "\n")
 	out.WriteString("scope\t" + strconv.Quote(scope) + "\n")
 	if base.Ref != "" {
 		out.WriteString("base\t" + strconv.Quote(base.Ref) + "\n")
+	}
+	if base.Commit != "" {
+		out.WriteString("base_commit\t" + base.Commit + "\n")
+	}
+	if branch != "" {
+		out.WriteString("branch\t" + strconv.Quote(branch) + "\n")
+	}
+	if head != "" {
+		out.WriteString("head\t" + head + "\n")
 	}
 	out.WriteString(fmt.Sprintf("file_count\t%d\n", len(files)))
 	for _, file := range files {
