@@ -558,6 +558,62 @@ func TestAssembleBranchScopeUsesResolvedBaseAndCanonicalCWD(t *testing.T) {
 	}
 }
 
+func TestAssembleRedactsSecretLikeBranchMetadata(t *testing.T) {
+	repo := newGitFixture(t)
+	const secret = "AKIAIOSFODNN7EXAMPLE"
+	gitFixture(t, repo, "switch", "-c", "feature-"+secret)
+
+	assembled, err := Assemble(context.Background(), Options{
+		CWD:      repo,
+		Scope:    ScopeWorkingTree,
+		StateDir: filepath.Join(t.TempDir(), "state"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	prompt, err := ComposePrompt(KindReview, assembled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, emitted := range []string{assembled.Branch, assembled.Inline, prompt} {
+		if strings.Contains(emitted, secret) {
+			t.Fatalf("branch metadata leaked secret-shaped content: %q", emitted)
+		}
+		if !strings.Contains(emitted, secretRedactionMarker) {
+			t.Fatalf("branch metadata missing redaction marker: %q", emitted)
+		}
+	}
+}
+
+func TestBranchChangesUseCapturedHead(t *testing.T) {
+	repo := newGitFixture(t)
+	base := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	gitFixture(t, repo, "switch", "-c", "feature")
+	writeFixtureFile(t, repo, "captured.go", "package feature\n// CAPTURED_HEAD_CHANGE\n")
+	gitFixture(t, repo, "add", "captured.go")
+	gitFixture(t, repo, "commit", "-m", "captured head")
+	capturedHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	writeFixtureFile(t, repo, "later.go", "package feature\n// LATER_HEAD_CHANGE\n")
+	gitFixture(t, repo, "add", "later.go")
+	gitFixture(t, repo, "commit", "-m", "later head")
+
+	files, diffBase, err := branchChanges(context.Background(), repo, base, capturedHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Path != "captured.go" {
+		t.Fatalf("captured-head files = %#v, want only captured.go", files)
+	}
+	diff, err := trackedDiff(context.Background(), repo, diffBase, capturedHead, files[0].paths()...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(diff), "CAPTURED_HEAD_CHANGE") || strings.Contains(string(diff), "LATER_HEAD_CHANGE") {
+		t.Fatalf("captured-head diff = %q", diff)
+	}
+}
+
 func TestReviewWorkspaceAndArtifactCleanup(t *testing.T) {
 	t.Run("inline workspace", func(t *testing.T) {
 		repo := newGitFixture(t)

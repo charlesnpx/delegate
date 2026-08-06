@@ -104,10 +104,15 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 		if branch == "HEAD" {
 			branch = "(detached)"
 		}
+		branch = RedactSecretLikeDiagnostic(branch)
 	}
 	head := ""
 	if raw, headErr := gitOutput(ctx, repoRoot, false, "rev-parse", "HEAD"); headErr == nil {
 		head = strings.TrimSpace(string(raw))
+	}
+	headRef := head
+	if headRef == "" {
+		headRef = "HEAD"
 	}
 	scope, err := normalizeScope(opts.Scope)
 	if err != nil {
@@ -123,13 +128,13 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 		if err != nil {
 			return Context{}, err
 		}
-		changed, diffBase, err = autoChanges(ctx, repoRoot, base.Commit)
+		changed, diffBase, err = autoChanges(ctx, repoRoot, base.Commit, headRef)
 	case ScopeWorkingTree:
 		changed, err = workingTreeChanges(ctx, repoRoot)
 	case ScopeBranch:
 		base, err = ResolveBase(ctx, repoRoot, opts.Base)
 		if err == nil {
-			changed, diffBase, err = branchChanges(ctx, repoRoot, base.Commit)
+			changed, diffBase, err = branchChanges(ctx, repoRoot, base.Commit, headRef)
 		}
 	}
 	if err != nil {
@@ -148,7 +153,7 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 		if changed[i].untracked {
 			changed[i].diff, err = untrackedDiff(ctx, repoRoot, changed[i].Path)
 		} else if scope == ScopeBranch {
-			changed[i].diff, err = trackedDiff(ctx, repoRoot, diffBase, "HEAD", changed[i].paths()...)
+			changed[i].diff, err = trackedDiff(ctx, repoRoot, diffBase, headRef, changed[i].paths()...)
 		} else if scope == ScopeAuto {
 			changed[i].diff, err = trackedDiff(ctx, repoRoot, diffBase, "", changed[i].paths()...)
 		} else {
@@ -479,13 +484,13 @@ func workingTreeChanges(ctx context.Context, repoRoot string) ([]changedFile, er
 	return files, nil
 }
 
-func branchChanges(ctx context.Context, repoRoot, baseCommit string) ([]changedFile, string, error) {
-	mergeBaseRaw, err := gitOutput(ctx, repoRoot, false, "merge-base", baseCommit, "HEAD")
+func branchChanges(ctx context.Context, repoRoot, baseCommit, headRef string) ([]changedFile, string, error) {
+	mergeBaseRaw, err := gitOutput(ctx, repoRoot, false, "merge-base", baseCommit, headRef)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve merge base for %q: %w", baseCommit, err)
 	}
 	mergeBase := strings.TrimSpace(string(mergeBaseRaw))
-	raw, err := gitOutput(ctx, repoRoot, false, nameStatusArgs(mergeBase, "HEAD")...)
+	raw, err := gitOutput(ctx, repoRoot, false, nameStatusArgs(mergeBase, headRef)...)
 	if err != nil {
 		return nil, "", fmt.Errorf("collect branch paths: %w", err)
 	}
@@ -497,8 +502,8 @@ func branchChanges(ctx context.Context, repoRoot, baseCommit string) ([]changedF
 	return files, mergeBase, nil
 }
 
-func autoChanges(ctx context.Context, repoRoot, baseCommit string) ([]changedFile, string, error) {
-	mergeBaseRaw, err := gitOutput(ctx, repoRoot, false, "merge-base", baseCommit, "HEAD")
+func autoChanges(ctx context.Context, repoRoot, baseCommit, headRef string) ([]changedFile, string, error) {
+	mergeBaseRaw, err := gitOutput(ctx, repoRoot, false, "merge-base", baseCommit, headRef)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve merge base for %q: %w", baseCommit, err)
 	}
