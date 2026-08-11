@@ -47,16 +47,18 @@ type setupConfig struct {
 }
 
 type setupAgentbus struct {
-	Found           bool                 `json:"found"`
-	Path            string               `json:"path"`
-	Version         string               `json:"version,omitempty"`
-	ProtocolVersion int                  `json:"protocolVersion"`
-	Backends        []string             `json:"backends"`
-	BackendMetadata []client.BackendInfo `json:"backendMetadata,omitempty"`
-	Capabilities    map[string]bool      `json:"capabilities"`
-	Required        []string             `json:"requiredCapabilities"`
-	Missing         []string             `json:"missingCapabilities,omitempty"`
-	CapabilitiesOK  bool                 `json:"capabilitiesOK"`
+	Found                   bool                 `json:"found"`
+	Path                    string               `json:"path"`
+	Version                 string               `json:"version,omitempty"`
+	MinimumSupportedVersion string               `json:"minimumSupportedVersion"`
+	VersionStatus           string               `json:"versionStatus"`
+	ProtocolVersion         int                  `json:"protocolVersion"`
+	Backends                []string             `json:"backends"`
+	BackendMetadata         []client.BackendInfo `json:"backendMetadata,omitempty"`
+	Capabilities            map[string]bool      `json:"capabilities"`
+	Required                []string             `json:"requiredCapabilities"`
+	Missing                 []string             `json:"missingCapabilities,omitempty"`
+	CapabilitiesOK          bool                 `json:"capabilitiesOK"`
 }
 
 // setupSkill reports whether one managed skill is present and matches the
@@ -85,6 +87,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, err
 	}
 	version := agentbusVersion(path)
+	versionAssessment := assessAgentbusVersion(version)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	agentbusRoot, err := resolveAgentbusStateRoot()
@@ -101,6 +104,9 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	missingCapabilities := missingCapabilities(hello, requiredCapabilities)
 	capabilitiesOK := len(missingCapabilities) == 0
 	preflight := setupStatePreflightWithAgentbusRoot(agentbusRoot, nil)
+	if versionAssessment.Warning != "" {
+		preflight.Warnings = append(preflight.Warnings, versionAssessment.Warning)
+	}
 	pendingSubmissionIntents, countWarnings := setupPendingSubmissionIntentCount(preflight.DelegateStateRoot)
 	preflight.Warnings = append(preflight.Warnings, countWarnings...)
 	unresolvedCleanupArtifacts, countWarnings := setupUnresolvedCleanupArtifactCount(preflight.DelegateStateRoot)
@@ -117,23 +123,25 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	ready := capabilitiesOK && preflight.StateRootWritable && preflight.AgentbusStateRootWritable && preflight.AgentbusAutostartLockRootWritable
-	readinessErr := setupReadinessError(hello, version, missingCapabilities, preflight)
+	ready := capabilitiesOK && versionAssessment.Status != agentbusVersionStatusTooOld && preflight.StateRootWritable && preflight.AgentbusStateRootWritable && preflight.AgentbusAutostartLockRootWritable
+	readinessErr := setupReadinessError(hello, version, versionAssessment, missingCapabilities, preflight)
 	if *jsonOut {
 		err := writeJSONLine(stdout, setupJSON{
 			Schema:   commandJSONSchema,
 			Delegate: versionLine(),
 			Agentbus: setupAgentbus{
-				Found:           true,
-				Path:            path,
-				Version:         version,
-				ProtocolVersion: hello.ProtocolVersion,
-				Backends:        hello.Backends,
-				BackendMetadata: hello.BackendMetadata,
-				Capabilities:    hello.Capabilities,
-				Required:        requiredCapabilities,
-				Missing:         missingCapabilities,
-				CapabilitiesOK:  capabilitiesOK,
+				Found:                   true,
+				Path:                    path,
+				Version:                 version,
+				MinimumSupportedVersion: minimumSupportedAgentbusVersion,
+				VersionStatus:           versionAssessment.Status,
+				ProtocolVersion:         hello.ProtocolVersion,
+				Backends:                hello.Backends,
+				BackendMetadata:         hello.BackendMetadata,
+				Capabilities:            hello.Capabilities,
+				Required:                requiredCapabilities,
+				Missing:                 missingCapabilities,
+				CapabilitiesOK:          capabilitiesOK,
 			},
 			Config: setupConfig{
 				Path:        configPath,
@@ -168,6 +176,9 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 		if _, err := fmt.Fprintf(stdout, "agentbus version: %s\n", version); err != nil {
 			return 0, err
 		}
+	}
+	if _, err := fmt.Fprintf(stdout, "agentbus minimum supported version: %s\nagentbus version status: %s\n", minimumSupportedAgentbusVersion, versionAssessment.Status); err != nil {
+		return 0, err
 	}
 	capabilityStatus := "ok"
 	if !capabilitiesOK {
@@ -209,8 +220,11 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	return 0, nil
 }
 
-func setupReadinessError(hello client.HelloResult, version string, missingCapabilities []string, preflight setupStatePreflightResult) error {
+func setupReadinessError(hello client.HelloResult, version string, versionAssessment agentbusVersionAssessment, missingCapabilities []string, preflight setupStatePreflightResult) error {
 	var errs []error
+	if versionAssessment.Status == agentbusVersionStatusTooOld {
+		errs = append(errs, agentbusMinimumVersionError(version))
+	}
 	if len(missingCapabilities) > 0 {
 		errs = append(errs, capabilityMissingError(hello, version, missingCapabilities[0]))
 	}

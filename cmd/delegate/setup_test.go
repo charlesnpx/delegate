@@ -121,6 +121,115 @@ func TestSetupReportsPendingSubmissionAndUnresolvedCleanupCounts(t *testing.T) {
 	}
 }
 
+func TestSetupAgentbusVersionReadiness(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		output      string
+		wantReady   bool
+		wantStatus  string
+		wantWarning string
+		wantRemedy  string
+	}{
+		{
+			name:       "below_floor",
+			output:     "agentbus v0.9.0\n",
+			wantStatus: agentbusVersionStatusTooOld,
+			wantRemedy: "agentbus v0.9.0 is older than the minimum supported version " + minimumSupportedAgentbusVersion + "; run mise-en-place install agentbus to upgrade",
+		},
+		{
+			name:       "same_core_prerelease_is_below_floor",
+			output:     "agentbus v0.9.1-rc.1\n",
+			wantStatus: agentbusVersionStatusTooOld,
+			wantRemedy: "agentbus v0.9.1-rc.1 is older than the minimum supported version " + minimumSupportedAgentbusVersion + "; run mise-en-place install agentbus to upgrade",
+		},
+		{
+			name:       "at_floor",
+			output:     "agentbus v0.9.1\n",
+			wantReady:  true,
+			wantStatus: agentbusVersionStatusSupported,
+		},
+		{
+			name:       "above_floor_multidigit_prerelease",
+			output:     "agentbus 0.10.0-rc.1+build.4\n",
+			wantReady:  true,
+			wantStatus: agentbusVersionStatusSupported,
+		},
+		{
+			name:        "unparseable",
+			output:      "agentbus development-build\n",
+			wantReady:   true,
+			wantStatus:  agentbusVersionStatusUnknown,
+			wantWarning: "agentbus version \"development-build\" could not be parsed",
+		},
+		{
+			name:        "absent",
+			wantReady:   true,
+			wantStatus:  agentbusVersionStatusUnknown,
+			wantWarning: "agentbus version could not be discovered",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+			defer restore()
+			commandOutput = func(string, ...string) ([]byte, error) {
+				return []byte(tc.output), nil
+			}
+			t.Setenv("HOME", t.TempDir())
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
+			if got := code == 0; got != tc.wantReady {
+				t.Fatalf("setup exit success = %t, want %t; stderr=%q", got, tc.wantReady, stderr.String())
+			}
+			var result setupJSON
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+				t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+			}
+			if result.Ready != tc.wantReady {
+				t.Fatalf("ready = %t, want %t", result.Ready, tc.wantReady)
+			}
+			if result.Agentbus.MinimumSupportedVersion != minimumSupportedAgentbusVersion || result.Agentbus.VersionStatus != tc.wantStatus {
+				t.Fatalf("agentbus version result = %#v, want minimum=%q status=%q", result.Agentbus, minimumSupportedAgentbusVersion, tc.wantStatus)
+			}
+			if tc.wantWarning == "" {
+				if len(result.Warnings) != 0 {
+					t.Fatalf("warnings = %#v, want no warning", result.Warnings)
+				}
+			} else if !strings.Contains(strings.Join(result.Warnings, "\n"), tc.wantWarning) {
+				t.Fatalf("warnings = %#v, want %q", result.Warnings, tc.wantWarning)
+			}
+			if tc.wantRemedy != "" && !strings.Contains(stderr.String(), tc.wantRemedy) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.wantRemedy)
+			}
+		})
+	}
+}
+
+func TestMinimumSupportedAgentbusVersionDoesNotExceedGoModPin(t *testing.T) {
+	raw, err := os.ReadFile("../../go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pinned string
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "github.com/charlesnpx/agentbus" {
+			pinned = fields[1]
+			break
+		}
+	}
+	if pinned == "" {
+		t.Fatal("agentbus module pin not found in go.mod")
+	}
+	comparison, err := compareAgentbusSemver(minimumSupportedAgentbusVersion, pinned)
+	if err != nil {
+		t.Fatalf("compare declared floor %q with go.mod pin %q: %v", minimumSupportedAgentbusVersion, pinned, err)
+	}
+	if comparison > 0 {
+		t.Fatalf("minimum supported agentbus version %q exceeds go.mod pin %q", minimumSupportedAgentbusVersion, pinned)
+	}
+}
+
 func TestSetupReadyRequiresWritableAgentbusStateRoot(t *testing.T) {
 	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
 	defer restore()
