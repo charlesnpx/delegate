@@ -180,7 +180,7 @@ func TestSetupCapabilityGateReportsMissingStrictContainment(t *testing.T) {
 	if len(result.Agentbus.Missing) == 0 || result.Agentbus.Missing[0] != "admission.strictContainment" {
 		t.Fatalf("missing capabilities=%#v, want strict containment first", result.Agentbus.Missing)
 	}
-	want := "agentbus v0.0.7 lacks capability `admission.strictContainment`; run mise-en-place install agentbus"
+	want := "agentbus v0.9.1 lacks capability `admission.strictContainment`; run mise-en-place install agentbus"
 	if !strings.Contains(stderr.String(), want) {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
@@ -205,7 +205,7 @@ func TestSetupOutputIncludesReadinessFields(t *testing.T) {
 			t.Fatalf("setup stdout = %q, want %q", stdout.String(), line)
 		}
 	}
-	for _, line := range []string{"agentbusStateRoot:", "agentbusAutostartLockRoot:", "agentbusAutostartLockRootWritable: true", "admission.strictContainment: true", "pendingSubmissionIntentCount: 0", "unresolvedCleanupArtifactCount: 0", "ready: true"} {
+	for _, line := range []string{"agentbus minimum supported version: " + minimumSupportedAgentbusVersion, "agentbus version status: supported", "agentbusStateRoot:", "agentbusAutostartLockRoot:", "agentbusAutostartLockRootWritable: true", "admission.strictContainment: true", "pendingSubmissionIntentCount: 0", "unresolvedCleanupArtifactCount: 0", "ready: true"} {
 		if !strings.Contains(stdout.String(), line) {
 			t.Fatalf("setup stdout = %q, want %q", stdout.String(), line)
 		}
@@ -1068,7 +1068,7 @@ func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 		return "/tmp/agentbus", nil
 	}
 	commandOutput = func(string, ...string) ([]byte, error) {
-		return []byte("agentbus v0.0.7\n"), nil
+		return []byte("agentbus v0.9.1\n"), nil
 	}
 	return func() {
 		connectAgentbus = oldConnect
