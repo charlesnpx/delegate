@@ -74,7 +74,17 @@ delegate task --backend codex --origin delegate:rescue:codex --cwd "$PWD" \
   --handoff-prompt-file "$HANDOFF_PATH" --background --json
 ```
 
-`delegate handoff create --json` creates a private `0600` handoff file in delegate state. `task` persists the exact Agentbus submission parameters, copies the prompt to the job input after acknowledgement, fsyncs it, and removes the handoff. The job input is removed only when Agentbus reports `cleanupDisposition` of `verified_absent` or `no_execution_possible`; it is retained when cleanup is `unresolved` or absent.
+`delegate handoff create --json` creates a private `0600` handoff file in delegate state. `task` persists the exact Agentbus submission parameters, copies the prompt to the job input after acknowledgement, fsyncs it, and removes the handoff. A handoff prompt file is single-use: create a new one before relaunching the same packet. The job input is removed only when Agentbus reports `cleanupDisposition` of `verified_absent` or `no_execution_possible`; it is retained when cleanup is `unresolved` or absent.
+
+## Worker sandbox boundaries
+
+The following are Agentbus v0.9.1 worker-sandbox contract rules. Route work accordingly:
+
+- A `--write` task runs as `workspaceWrite` with only its job `--cwd` writable. Keep task outputs there; a write worker can build and test only when `GOCACHE` and `GOMODCACHE` also point under that cwd, because the usual Go cache locations are outside the worker's writable roots.
+- Write workers have no outbound network (`networkAccess: false`). Run `go get`, proxy-dependent `go mod tidy`, toolchain downloads, and other network-bound work in the orchestrator.
+- A task without `--write` and every review worker run read-only with no network. A read-only worker cannot create a temporary or build directory, so the caller must run compile, test, and other runtime gates for review verification.
+- Approval policy is `never`, so approval requests are auto-declined. A denied worker write cannot be escalated; change the routing or stop the worker.
+- Writes in `.git` are commonly denied, including index locks. The orchestrator owns commits and other Git metadata changes.
 
 ## Review workflow and security model
 

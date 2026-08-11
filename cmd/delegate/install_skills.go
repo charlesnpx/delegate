@@ -129,7 +129,9 @@ func codexSandboxInstallerWarnings(operation, target, installRoot string) []stri
 		return []string{"codex sandbox writable_roots entries left in place; uninstall does not remove security configuration automatically"}
 	case "install":
 		if !isLiveSkillInstallRoot(installRoot) {
-			return []string{fmt.Sprintf("codex sandbox writable_roots skipped: staged install root %q is not the live home directory", installRoot)}
+			// Staged installs are the normal mise-en-place path. They must not
+			// touch the live Codex configuration, but that expected skip is not a warning.
+			return []string{}
 		}
 		result := configureCodexSandboxAt(paths)
 		switch result.Action {
