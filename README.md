@@ -146,7 +146,7 @@ Launch envelopes are returned by a non-waiting task:
 }
 ```
 
-Terminal envelopes are returned by `delegate result --job <id>`, `cancel`, and `delegate task --wait`. `delegate status --json` is the exception: it always returns a `JobStatusResult` (`{"jobs": [...]}`), for both running and terminal jobs, so a poller sees one stable shape across a job's lifetime. Running admission jobs also carry `startedAt`, `heartbeatAt`, and `updatedAt` liveness fields (`heartbeatAt` is the last provider-event time, an activity signal, not a process lease); these are absent once the job is terminal.
+Terminal envelopes are returned by `delegate result --job <id>`, `cancel`, and `delegate task --wait`. `delegate status --json` is the exception: it always returns a `JobStatusResult` (`{"jobs": [...]}`), for both running and terminal jobs, so a poller sees one stable shape across a job's lifetime. Running admission jobs carry `startedAt`, `heartbeatAt`, and `updatedAt` liveness fields (`heartbeatAt` is the last provider-event time, an activity signal, not a process lease); those liveness fields are absent from terminal status jobs. Terminal status jobs instead may carry the complete `finalAttemptStartedAt`/`finalAttemptEndedAt` pair for the FINAL attempt. That pair is not a whole-job duration, and a retry replaces its start time.
 
 The terminal envelope shape:
 
@@ -176,6 +176,14 @@ The terminal envelope shape:
 ```
 
 Possible contract statuses are `compliant`, `retried`, `noncompliant`, `skipped`, and `disabled`. `kind` is `task`, `review`, or `adversarial_review`. `orphaned` is a first-class terminal state with exit code 14; it does not fabricate a result, and `result_unavailable_reason` explains the missing result.
+
+For `failed`, `interrupted`, and `quarantined` terminals, Agentbus may also supply a redacted, length-bounded `failure_reason` and closed-set `failure_class`. They answer what went wrong and are independent of `result_unavailable_reason`, which only explains why no result is present. They are omitted when Agentbus supplies neither. `delegate status --json` exposes the same metadata within each JobStatus using Agentbus's `failureReason` and `failureClass` names; terminal envelopes use Delegate's snake_case names. Terminal envelopes likewise expose the complete FINAL-attempt pair as `final_attempt_started_at` and `final_attempt_ended_at`; callers can subtract them when needed, but Delegate does not emit a derived duration.
+
+- `backend_not_started`: Agentbus could not start backend work, so no backend work was possible.
+- `backend_error`: a launched backend turn failed; work may have happened before it failed.
+- `backend_interrupted`: a backend turn stopped without Agentbus requesting the interruption.
+- `finalization_error`: the backend succeeded and Agentbus lost the result; inspect the worktree and salvage completed work before retrying.
+- `internal_error`: Agentbus has no more specific failure category.
 
 ## Cleanup Disposition
 

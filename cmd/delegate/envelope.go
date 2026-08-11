@@ -51,6 +51,8 @@ type TerminalEnvelope struct {
 	ResultSHA256                   *string                    `json:"result_sha256"`
 	ResultPath                     string                     `json:"result_path,omitempty"`
 	ResultUnavailableReason        string                     `json:"result_unavailable_reason,omitempty"`
+	FailureReason                  string                     `json:"failure_reason,omitempty"`
+	FailureClass                   engine.FailureClass        `json:"failure_class,omitempty"`
 	BackendError                   string                     `json:"backend_error,omitempty"`
 	Model                          config.DimensionResolution `json:"model"`
 	Effort                         config.DimensionResolution `json:"effort"`
@@ -60,6 +62,8 @@ type TerminalEnvelope struct {
 	UpdatedAt                      *time.Time                 `json:"updated_at,omitempty"`
 	StartedAt                      *time.Time                 `json:"started_at,omitempty"`
 	HeartbeatAt                    *time.Time                 `json:"heartbeat_at,omitempty"`
+	FinalAttemptStartedAt          *time.Time                 `json:"final_attempt_started_at,omitempty"`
+	FinalAttemptEndedAt            *time.Time                 `json:"final_attempt_ended_at,omitempty"`
 	Origin                         *envelopeOrigin            `json:"origin,omitempty"`
 }
 
@@ -80,6 +84,10 @@ type terminalEnvelopeOptions struct {
 	UpdatedAt              *time.Time
 	StartedAt              *time.Time
 	HeartbeatAt            *time.Time
+	FinalAttemptStartedAt  *time.Time
+	FinalAttemptEndedAt    *time.Time
+	FailureReason          string
+	FailureClass           engine.FailureClass
 }
 
 type launchEnvelopeOptions struct {
@@ -90,6 +98,7 @@ type launchEnvelopeOptions struct {
 }
 
 func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
+	finalAttemptStartedAt, finalAttemptEndedAt := completeFinalAttemptTiming(e.FinalAttemptStartedAt, e.FinalAttemptEndedAt)
 	type terminalEnvelopeJSON struct {
 		Schema                         int                        `json:"schema"`
 		RequestID                      string                     `json:"request_id,omitempty"`
@@ -106,6 +115,8 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		ResultSHA256                   *string                    `json:"result_sha256"`
 		ResultPath                     string                     `json:"result_path,omitempty"`
 		ResultUnavailableReason        string                     `json:"result_unavailable_reason,omitempty"`
+		FailureReason                  string                     `json:"failure_reason,omitempty"`
+		FailureClass                   engine.FailureClass        `json:"failure_class,omitempty"`
 		BackendError                   string                     `json:"backend_error,omitempty"`
 		Model                          config.DimensionResolution `json:"model"`
 		Effort                         config.DimensionResolution `json:"effort"`
@@ -115,6 +126,8 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		UpdatedAt                      *time.Time                 `json:"updated_at,omitempty"`
 		StartedAt                      *time.Time                 `json:"started_at,omitempty"`
 		HeartbeatAt                    *time.Time                 `json:"heartbeat_at,omitempty"`
+		FinalAttemptStartedAt          *time.Time                 `json:"final_attempt_started_at,omitempty"`
+		FinalAttemptEndedAt            *time.Time                 `json:"final_attempt_ended_at,omitempty"`
 		Origin                         *envelopeOrigin            `json:"origin,omitempty"`
 	}
 	return json.Marshal(terminalEnvelopeJSON{
@@ -133,6 +146,8 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		ResultSHA256:                   e.ResultSHA256,
 		ResultPath:                     e.ResultPath,
 		ResultUnavailableReason:        e.ResultUnavailableReason,
+		FailureReason:                  e.FailureReason,
+		FailureClass:                   e.FailureClass,
 		BackendError:                   e.BackendError,
 		Model:                          e.Model,
 		Effort:                         e.Effort,
@@ -142,6 +157,8 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		UpdatedAt:                      e.UpdatedAt,
 		StartedAt:                      e.StartedAt,
 		HeartbeatAt:                    e.HeartbeatAt,
+		FinalAttemptStartedAt:          finalAttemptStartedAt,
+		FinalAttemptEndedAt:            finalAttemptEndedAt,
 		Origin:                         e.Origin,
 	})
 }
@@ -200,6 +217,7 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 		option = options[0]
 	}
 	modelEffort := normalizedModelEffort(option.ModelEffort)
+	finalAttemptStartedAt, finalAttemptEndedAt := completeFinalAttemptTiming(option.FinalAttemptStartedAt, option.FinalAttemptEndedAt)
 	env := TerminalEnvelope{
 		Schema:                         envelopeSchema,
 		RequestID:                      option.RequestID,
@@ -213,6 +231,8 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 		Kind:                           kind,
 		ContractKind:                   contractKind,
 		Contract:                       stamp,
+		FailureReason:                  option.FailureReason,
+		FailureClass:                   option.FailureClass,
 		BackendError:                   backendError,
 		Model:                          modelEffort.Model,
 		Effort:                         modelEffort.Effort,
@@ -222,6 +242,8 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 		UpdatedAt:                      option.UpdatedAt,
 		StartedAt:                      option.StartedAt,
 		HeartbeatAt:                    option.HeartbeatAt,
+		FinalAttemptStartedAt:          finalAttemptStartedAt,
+		FinalAttemptEndedAt:            finalAttemptEndedAt,
 		ResultPath:                     option.ResultPath,
 		Origin:                         envelopeOriginPointer(option.Origin),
 	}
@@ -231,6 +253,17 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 		env.ResultUnavailableReason = resultUnavailableReason(state)
 	}
 	return env, nil
+}
+
+// completeFinalAttemptTiming returns only a complete, non-zero final-attempt
+// timing pair. Agentbus promises terminal jobs have the pair together; keeping
+// that invariant here avoids exposing a partial or fabricated duration when a
+// stale or malformed response is encountered.
+func completeFinalAttemptTiming(startedAt, endedAt *time.Time) (*time.Time, *time.Time) {
+	if startedAt == nil || endedAt == nil || startedAt.IsZero() || endedAt.IsZero() {
+		return nil, nil
+	}
+	return startedAt, endedAt
 }
 
 func resultUnavailableReason(state engine.JobState) string {

@@ -180,7 +180,7 @@ func TestSetupCapabilityGateReportsMissingStrictContainment(t *testing.T) {
 	if len(result.Agentbus.Missing) == 0 || result.Agentbus.Missing[0] != "admission.strictContainment" {
 		t.Fatalf("missing capabilities=%#v, want strict containment first", result.Agentbus.Missing)
 	}
-	want := "agentbus v0.9.1 lacks capability `admission.strictContainment`; run mise-en-place install agentbus"
+	want := "agentbus " + minimumSupportedAgentbusVersion + " lacks capability `admission.strictContainment`; run mise-en-place install agentbus"
 	if !strings.Contains(stderr.String(), want) {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
@@ -1068,13 +1068,17 @@ func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 		return "/tmp/agentbus", nil
 	}
 	commandOutput = func(string, ...string) ([]byte, error) {
-		return []byte("agentbus v0.9.1\n"), nil
+		return []byte(agentbusVersionFixtureOutput(minimumSupportedAgentbusVersion)), nil
 	}
 	return func() {
 		connectAgentbus = oldConnect
 		lookPath = oldLookPath
 		commandOutput = oldCommandOutput
 	}
+}
+
+func agentbusVersionFixtureOutput(version string) string {
+	return "agentbus " + version + "\n"
 }
 
 func helloWithCapabilities() client.HelloResult {

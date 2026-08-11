@@ -18,7 +18,7 @@ import (
 // minimumSupportedAgentbusVersion is the oldest installed agentbus binary this
 // delegate build is known to work against. Update it when the
 // github.com/charlesnpx/agentbus requirement in go.mod is bumped.
-const minimumSupportedAgentbusVersion = "v0.9.1"
+const minimumSupportedAgentbusVersion = "v0.10.0"
 
 const (
 	agentbusVersionStatusSupported = "supported"

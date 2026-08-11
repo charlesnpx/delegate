@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -125,6 +126,11 @@ func TestSetupReportsPendingSubmissionAndUnresolvedCleanupCounts(t *testing.T) {
 }
 
 func TestSetupAgentbusVersionReadiness(t *testing.T) {
+	belowFloorVersion := setupFixtureAgentbusVersionBelowFloor(t)
+	atFloorVersion := minimumSupportedAgentbusVersion
+	prereleaseOfFloorVersion := atFloorVersion + "-rc.1"
+	aboveFloorPrereleaseVersion := strings.TrimPrefix(setupFixtureAgentbusVersionAboveFloor(t), "v") + "-rc.1+build.4"
+
 	for _, tc := range []struct {
 		name        string
 		output      string
@@ -135,25 +141,25 @@ func TestSetupAgentbusVersionReadiness(t *testing.T) {
 	}{
 		{
 			name:       "below_floor_with_working_client",
-			output:     "agentbus v0.9.0\n",
+			output:     agentbusVersionFixtureOutput(belowFloorVersion),
 			wantStatus: agentbusVersionStatusTooOld,
-			wantRemedy: "agentbus v0.9.0 is older than the minimum supported version " + minimumSupportedAgentbusVersion + "; run mise-en-place install agentbus to upgrade",
+			wantRemedy: "agentbus " + belowFloorVersion + " is older than the minimum supported version " + minimumSupportedAgentbusVersion + "; run mise-en-place install agentbus to upgrade",
 		},
 		{
 			name:       "same_core_prerelease_is_below_floor",
-			output:     "agentbus v0.9.1-rc.1\n",
+			output:     agentbusVersionFixtureOutput(prereleaseOfFloorVersion),
 			wantStatus: agentbusVersionStatusTooOld,
-			wantRemedy: "agentbus v0.9.1-rc.1 is older than the minimum supported version " + minimumSupportedAgentbusVersion + "; run mise-en-place install agentbus to upgrade",
+			wantRemedy: "agentbus " + prereleaseOfFloorVersion + " is older than the minimum supported version " + minimumSupportedAgentbusVersion + "; run mise-en-place install agentbus to upgrade",
 		},
 		{
 			name:       "at_floor",
-			output:     "agentbus v0.9.1\n",
+			output:     agentbusVersionFixtureOutput(atFloorVersion),
 			wantReady:  true,
 			wantStatus: agentbusVersionStatusSupported,
 		},
 		{
 			name:       "above_floor_multidigit_prerelease",
-			output:     "agentbus 0.10.0-rc.1+build.4\n",
+			output:     agentbusVersionFixtureOutput(aboveFloorPrereleaseVersion),
 			wantReady:  true,
 			wantStatus: agentbusVersionStatusSupported,
 		},
@@ -208,16 +214,66 @@ func TestSetupAgentbusVersionReadiness(t *testing.T) {
 	}
 }
 
+func setupFixtureAgentbusVersionBelowFloor(t *testing.T) string {
+	t.Helper()
+	return setupFixtureAgentbusVersionAdjacentToFloor(t, -1)
+}
+
+func setupFixtureAgentbusVersionAboveFloor(t *testing.T) string {
+	t.Helper()
+	return setupFixtureAgentbusVersionAdjacentToFloor(t, 1)
+}
+
+func setupFixtureAgentbusVersionAdjacentToFloor(t *testing.T, direction int) string {
+	t.Helper()
+	floor, err := parseAgentbusSemver(minimumSupportedAgentbusVersion)
+	if err != nil {
+		t.Fatalf("parse minimum supported agentbus version %q: %v", minimumSupportedAgentbusVersion, err)
+	}
+	major, err := strconv.ParseUint(floor.major, 10, 64)
+	if err != nil {
+		t.Fatalf("parse minimum supported agentbus major version %q: %v", floor.major, err)
+	}
+	minor, err := strconv.ParseUint(floor.minor, 10, 64)
+	if err != nil {
+		t.Fatalf("parse minimum supported agentbus minor version %q: %v", floor.minor, err)
+	}
+	patch, err := strconv.ParseUint(floor.patch, 10, 64)
+	if err != nil {
+		t.Fatalf("parse minimum supported agentbus patch version %q: %v", floor.patch, err)
+	}
+
+	switch direction {
+	case -1:
+		switch {
+		case patch > 0:
+			patch--
+		case minor > 0:
+			minor--
+		case major > 0:
+			major--
+		default:
+			t.Fatal("minimum supported agentbus version has no lower released semantic version")
+		}
+	case 1:
+		patch++
+	default:
+		t.Fatalf("unsupported adjacent agentbus version direction %d", direction)
+	}
+	return "v" + strconv.FormatUint(major, 10) + "." + strconv.FormatUint(minor, 10) + "." + strconv.FormatUint(patch, 10)
+}
+
 func TestSetupTooOldAgentbusSkipsConnectionAndReportsKnownJSON(t *testing.T) {
 	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
 	defer restore()
+	belowFloorVersion := setupFixtureAgentbusVersionBelowFloor(t)
 	connected := false
 	connectAgentbus = func(context.Context, client.Options) (agentbusClient, error) {
 		connected = true
 		return nil, errors.New("connect should not be called for a too-old agentbus")
 	}
 	commandOutput = func(string, ...string) ([]byte, error) {
-		return []byte("agentbus v0.9.0\n"), nil
+		return []byte(agentbusVersionFixtureOutput(belowFloorVersion)), nil
 	}
 	t.Setenv("HOME", t.TempDir())
 
@@ -236,7 +292,7 @@ func TestSetupTooOldAgentbusSkipsConnectionAndReportsKnownJSON(t *testing.T) {
 	if result.Schema != commandJSONSchema || result.Delegate != versionLine() || result.Ready {
 		t.Fatalf("setup result = %#v, want schema/delegate and ready=false", result)
 	}
-	if !result.Agentbus.Found || result.Agentbus.Path != "/tmp/agentbus" || result.Agentbus.Version != "v0.9.0" || result.Agentbus.MinimumSupportedVersion != minimumSupportedAgentbusVersion || result.Agentbus.VersionStatus != agentbusVersionStatusTooOld {
+	if !result.Agentbus.Found || result.Agentbus.Path != "/tmp/agentbus" || result.Agentbus.Version != belowFloorVersion || result.Agentbus.MinimumSupportedVersion != minimumSupportedAgentbusVersion || result.Agentbus.VersionStatus != agentbusVersionStatusTooOld {
 		t.Fatalf("agentbus result = %#v, want known too-old discovery facts", result.Agentbus)
 	}
 	var raw struct {
@@ -250,7 +306,7 @@ func TestSetupTooOldAgentbusSkipsConnectionAndReportsKnownJSON(t *testing.T) {
 			t.Fatalf("agentbus JSON contains unobserved handshake field %q: %s", field, stdout.String())
 		}
 	}
-	wantRemedy := "agentbus v0.9.0 is older than the minimum supported version " + minimumSupportedAgentbusVersion + "; run mise-en-place install agentbus to upgrade"
+	wantRemedy := "agentbus " + belowFloorVersion + " is older than the minimum supported version " + minimumSupportedAgentbusVersion + "; run mise-en-place install agentbus to upgrade"
 	if !strings.Contains(stderr.String(), wantRemedy) {
 		t.Fatalf("stderr=%q, want %q", stderr.String(), wantRemedy)
 	}
@@ -259,8 +315,9 @@ func TestSetupTooOldAgentbusSkipsConnectionAndReportsKnownJSON(t *testing.T) {
 func TestSetupTooOldAgentbusPlaintextReportsVersionRemedy(t *testing.T) {
 	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
 	defer restore()
+	belowFloorVersion := setupFixtureAgentbusVersionBelowFloor(t)
 	commandOutput = func(string, ...string) ([]byte, error) {
-		return []byte("agentbus v0.9.0\n"), nil
+		return []byte(agentbusVersionFixtureOutput(belowFloorVersion)), nil
 	}
 	t.Setenv("HOME", t.TempDir())
 
@@ -269,12 +326,12 @@ func TestSetupTooOldAgentbusPlaintextReportsVersionRemedy(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("setup code=%d, want readiness failure 1; stderr=%q", code, stderr.String())
 	}
-	for _, line := range []string{"agentbus version: v0.9.0", "agentbus version status: " + agentbusVersionStatusTooOld, "ready: false"} {
+	for _, line := range []string{"agentbus version: " + belowFloorVersion, "agentbus version status: " + agentbusVersionStatusTooOld, "ready: false"} {
 		if !strings.Contains(stdout.String(), line) {
 			t.Fatalf("stdout=%q, want %q", stdout.String(), line)
 		}
 	}
-	wantRemedy := "agentbus v0.9.0 is older than the minimum supported version " + minimumSupportedAgentbusVersion + "; run mise-en-place install agentbus to upgrade"
+	wantRemedy := "agentbus " + belowFloorVersion + " is older than the minimum supported version " + minimumSupportedAgentbusVersion + "; run mise-en-place install agentbus to upgrade"
 	if !strings.Contains(stderr.String(), wantRemedy) {
 		t.Fatalf("stderr=%q, want %q", stderr.String(), wantRemedy)
 	}
