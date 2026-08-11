@@ -59,6 +59,9 @@ func TestReviewCommandsUseReadOnlySanitizedTaskPipelineAndEnvelopeKinds(t *testi
 			if code != 0 {
 				t.Fatalf("%s code=%d stderr=%q", tc.command, code, stderr.String())
 			}
+			if strings.Contains(stderr.String(), readOnlyTaskHint) {
+				t.Fatalf("%s emitted task read-only hint: %q", tc.command, stderr.String())
+			}
 			if len(fake.submits) != 1 {
 				t.Fatalf("submits=%d, want 1", len(fake.submits))
 			}

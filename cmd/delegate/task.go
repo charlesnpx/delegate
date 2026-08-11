@@ -86,6 +86,7 @@ type taskRunResult struct {
 const (
 	delegateRequestIDTag = "delegate.request_id"
 	agentbusMaxTimeout   = 4 * time.Hour
+	readOnlyTaskHint     = "notice: task will run with a read-only backend profile; pass --write for edits or builds."
 )
 
 func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
@@ -128,6 +129,11 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 	})
 	if err != nil {
 		return 0, err
+	}
+	if !opts.Write && opts.RecoverRequest == "" {
+		if _, err := fmt.Fprintln(stderr, readOnlyTaskHint); err != nil {
+			return 0, err
+		}
 	}
 	result, err := executeTask(opts, resolved, turnPolicy, stderr)
 	if err != nil {

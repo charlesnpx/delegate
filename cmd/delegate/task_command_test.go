@@ -1017,6 +1017,39 @@ func TestTaskPassesThroughUnadvertisedCatalogModelAndEffort(t *testing.T) {
 	}
 }
 
+func TestTaskReadOnlyHintStaysOnStderr(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		flags    []string
+		wantHint bool
+	}{
+		{name: "read_only", wantHint: true},
+		{name: "write", flags: []string{"--write"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+
+			args := append([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--background", "--json"}, tc.flags...)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+			}
+			var launch LaunchEnvelope
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &launch); err != nil {
+				t.Fatalf("stdout is not valid launch JSON: %v; raw=%q", err, stdout.String())
+			}
+			if strings.Contains(stdout.String(), readOnlyTaskHint) {
+				t.Fatalf("stdout contains read-only hint: %q", stdout.String())
+			}
+			if got := strings.Count(stderr.String(), readOnlyTaskHint); (got == 1) != tc.wantHint {
+				t.Fatalf("read-only hint count = %d, want present=%t; stderr=%q", got, tc.wantHint, stderr.String())
+			}
+		})
+	}
+}
+
 func stubAgentbusGlobals(t *testing.T, fake *fakeAgentbusClient) func() {
 	return stubAgentbusClientGlobals(t, fake)
 }
