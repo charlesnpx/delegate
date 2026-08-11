@@ -1,7 +1,7 @@
 ---
 name: delegate:result
 description: Fetch and present a delegated job result through delegate.
-version: v0.7.3
+version: v0.8.1
 ---
 
 # delegate:result

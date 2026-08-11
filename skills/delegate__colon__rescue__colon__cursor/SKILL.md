@@ -1,7 +1,7 @@
 ---
 name: delegate:rescue:cursor
 description: Delegate a rescue task to cursor through delegate and return the launch envelope verbatim.
-version: v0.7.3
+version: v0.8.1
 ---
 
 # delegate:rescue:cursor

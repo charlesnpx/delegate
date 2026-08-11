@@ -1,7 +1,7 @@
 ---
 name: delegate:adversarial-review:cursor
 description: Delegate a refute-first adversarial code review to cursor through sanitized delegate review context and return the launch envelope verbatim.
-version: v0.7.3
+version: v0.8.1
 ---
 
 # delegate:adversarial-review:cursor

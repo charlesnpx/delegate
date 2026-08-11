@@ -1,7 +1,7 @@
 ---
 name: delegate:adversarial-review:claude
 description: Delegate a refute-first adversarial code review to claude through sanitized delegate review context and return the launch envelope verbatim.
-version: v0.7.3
+version: v0.8.1
 ---
 
 # delegate:adversarial-review:claude
