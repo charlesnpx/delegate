@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -34,6 +35,19 @@ func TestTerminalEnvelopeWithoutResultAcrossTerminalStates(t *testing.T) {
 			}
 			if env.ResultSHA256 != nil || env.ResultUnavailableReason != tc.reason || env.Contract.Status != engine.ContractSkipped {
 				t.Fatalf("terminal envelope = %#v", env)
+			}
+			raw, err := json.Marshal(env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"failure_reason", "failure_class"} {
+				if _, found := fields[field]; found {
+					t.Fatalf("terminal envelope JSON=%s unexpectedly contains %q", raw, field)
+				}
 			}
 		})
 	}
@@ -68,12 +82,30 @@ func TestCaptureBackendErrorPersistsAndSurfacesStderr(t *testing.T) {
 	if err := captureBackendError(stateDir, client.JobStatus{JobID: "job_backend_error", State: engine.StateFailed, LogPaths: engine.LogPaths{Stderr: stderrPath}}); err != nil {
 		t.Fatal(err)
 	}
-	env, err := terminalEnvelopeFromJobResult(stateDir, client.JobResult{JobID: "job_backend_error", State: engine.StateFailed})
+	env, err := terminalEnvelopeFromJobResult(stateDir, client.JobResult{
+		JobID:         "job_backend_error",
+		State:         engine.StateFailed,
+		FailureReason: "credential helper unavailable",
+		FailureClass:  engine.FailureClassBackendError,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if env.BackendError != "launch failed: credential helper unavailable" || env.Contract.Reason != string(engine.SkipBackendError) || env.ResultSHA256 != nil {
+	if env.BackendError != "launch failed: credential helper unavailable" || env.Contract.Reason != string(engine.SkipBackendError) || env.ResultSHA256 != nil || env.ResultUnavailableReason != "failed_without_result" || env.FailureReason != "credential helper unavailable" || env.FailureClass != engine.FailureClassBackendError {
 		t.Fatalf("backend error envelope = %#v", env)
+	}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"failure_reason", "failure_class"} {
+		if _, found := fields[field]; !found {
+			t.Fatalf("terminal envelope JSON=%s, missing %q", raw, field)
+		}
 	}
 }
 

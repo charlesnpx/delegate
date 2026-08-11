@@ -399,6 +399,18 @@ func terminalJobResultFromResultAndStatus(result client.JobResult, statusJob cli
 		if result.ModelReported == "" {
 			result.ModelReported = statusJob.ModelReported
 		}
+		if result.FailureReason == "" {
+			result.FailureReason = statusJob.FailureReason
+		}
+		if result.FailureClass == "" {
+			result.FailureClass = statusJob.FailureClass
+		}
+		finalAttemptStartedAt, finalAttemptEndedAt := completeFinalAttemptTiming(result.FinalAttemptStartedAt, result.FinalAttemptEndedAt)
+		if finalAttemptStartedAt == nil {
+			finalAttemptStartedAt, finalAttemptEndedAt = completeFinalAttemptTiming(statusJob.FinalAttemptStartedAt, statusJob.FinalAttemptEndedAt)
+		}
+		result.FinalAttemptStartedAt = finalAttemptStartedAt
+		result.FinalAttemptEndedAt = finalAttemptEndedAt
 		result.LateFinalization = result.LateFinalization || statusJob.LateFinalization
 	}
 	return terminalJobResult{result: result, statusJob: statusJob, statusFound: statusFound}
@@ -621,7 +633,18 @@ func terminalJobResultFallback(ctx context.Context, c agentbusClient, stateDir, 
 }
 
 func terminalJobResultEnvelopeInputFromStatus(job client.JobStatus) client.JobResult {
-	return client.JobResult{JobID: job.JobID, SessionID: job.SessionID, State: job.State, CleanupDisposition: job.CleanupDisposition, LateFinalization: job.LateFinalization, ModelReported: job.ModelReported}
+	return client.JobResult{
+		JobID:                 job.JobID,
+		SessionID:             job.SessionID,
+		State:                 job.State,
+		CleanupDisposition:    job.CleanupDisposition,
+		LateFinalization:      job.LateFinalization,
+		ModelReported:         job.ModelReported,
+		FinalAttemptStartedAt: job.FinalAttemptStartedAt,
+		FinalAttemptEndedAt:   job.FinalAttemptEndedAt,
+		FailureReason:         job.FailureReason,
+		FailureClass:          job.FailureClass,
+	}
 }
 
 func cleanupDispositionFromResultAndStatus(result client.JobResult, statusJob client.JobStatus, statusFound bool) string {
@@ -788,6 +811,16 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 	option.Origin = origin
 	option.CleanupDisposition = cleanupDisposition
 	option.LateFinalization = option.LateFinalization || result.LateFinalization
+	if option.FailureReason == "" {
+		option.FailureReason = result.FailureReason
+	}
+	if option.FailureClass == "" {
+		option.FailureClass = result.FailureClass
+	}
+	option.FinalAttemptStartedAt, option.FinalAttemptEndedAt = completeFinalAttemptTiming(option.FinalAttemptStartedAt, option.FinalAttemptEndedAt)
+	if option.FinalAttemptStartedAt == nil {
+		option.FinalAttemptStartedAt, option.FinalAttemptEndedAt = completeFinalAttemptTiming(result.FinalAttemptStartedAt, result.FinalAttemptEndedAt)
+	}
 	// submitted_at is delegate's stable local submission time; updated_at comes
 	// ONLY from agentbus's runtime status (set in envelopeOptions). We do not fall
 	// back to meta.UpdatedAt: that field is bumped on every local metadata write,
