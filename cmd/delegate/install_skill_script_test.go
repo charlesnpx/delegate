@@ -109,6 +109,9 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 		}
 	}
 	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "codex", "--json", "--install-root", root}, env)
+	if containsInstallerWarning(installed.Warnings, "staged install root") {
+		t.Fatalf("staged install warning = %#v, want no staged-root warning", installed.Warnings)
+	}
 	codexTarget := installed.Targets["codex"]
 	if len(codexTarget.Files) != 14 {
 		t.Fatalf("codex files = %d, want 14: %#v", len(codexTarget.Files), codexTarget.Files)

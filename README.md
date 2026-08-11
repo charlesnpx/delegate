@@ -74,7 +74,19 @@ delegate task --backend codex --origin delegate:rescue:codex --cwd "$PWD" \
   --handoff-prompt-file "$HANDOFF_PATH" --background --json
 ```
 
-`delegate handoff create --json` creates a private `0600` handoff file in delegate state. `task` persists the exact Agentbus submission parameters, copies the prompt to the job input after acknowledgement, fsyncs it, and removes the handoff. The job input is removed only when Agentbus reports `cleanupDisposition` of `verified_absent` or `no_execution_possible`; it is retained when cleanup is `unresolved` or absent.
+`delegate handoff create --json` creates a private `0600` handoff file in delegate state. `task` persists the exact Agentbus submission parameters, copies the prompt to the job input after acknowledgement, fsyncs it, and removes the handoff. A handoff prompt file is single-use: create a new one before relaunching the same packet. The job input is removed only when Agentbus reports `cleanupDisposition` of `verified_absent` or `no_execution_possible`; it is retained when cleanup is `unresolved` or absent.
+
+## Worker sandbox boundaries
+
+The following are Agentbus v0.10.0 worker-sandbox contract rules. These rules are unchanged since v0.9.1; the v0.10.0 label marks the current contract version rather than a sandbox-policy change. Route work accordingly:
+
+- A `--write` task runs as `workspaceWrite` with only its job `--cwd` writable. Keep task outputs there; a write worker can build and test only when `GOCACHE` and `GOMODCACHE` also point under that cwd, because the usual Go cache locations are outside the worker's writable roots.
+- Write workers have no outbound network (`networkAccess: false`). Run `go get`, proxy-dependent `go mod tidy`, toolchain downloads, and other network-bound work in the orchestrator.
+- A task without `--write` and every review worker run read-only with no network. A read-only worker cannot create a temporary or build directory, so the caller must run compile, test, and other runtime gates for review verification.
+- Approval policy is `never`, so approval requests are auto-declined. A denied worker write cannot be escalated; change the routing or stop the worker.
+- Writes in `.git` are commonly denied, including index locks. The orchestrator owns commits and other Git metadata changes.
+
+Observed behavior, not an Agentbus guarantee: the OS temporary directory is writable, so ordinary Go builds and tests work with only `GOCACHE` and `GOMODCACHE` relocated under the job cwd. A worker may nevertheless be denied deletion of a temp file; do not treat its cleanup as required or fail a task merely because temp artifacts remain.
 
 ## Review workflow and security model
 
@@ -136,7 +148,7 @@ Launch envelopes are returned by a non-waiting task:
 }
 ```
 
-Terminal envelopes are returned by `delegate result --job <id>`, `cancel`, and `delegate task --wait`. `delegate status --json` is the exception: it always returns a `JobStatusResult` (`{"jobs": [...]}`), for both running and terminal jobs, so a poller sees one stable shape across a job's lifetime. Running admission jobs also carry `startedAt`, `heartbeatAt`, and `updatedAt` liveness fields (`heartbeatAt` is the last provider-event time, an activity signal, not a process lease); these are absent once the job is terminal.
+Terminal envelopes are returned by `delegate result --job <id>`, `cancel`, and `delegate task --wait`. `delegate status --json` is the exception: it always returns a `JobStatusResult` (`{"jobs": [...]}`), for both running and terminal jobs, so a poller sees one stable shape across a job's lifetime. Running admission jobs carry `startedAt`, `heartbeatAt`, and `updatedAt` liveness fields (`heartbeatAt` is the last provider-event time, an activity signal, not a process lease); those liveness fields are absent from terminal status jobs. Terminal status jobs instead may carry the complete `finalAttemptStartedAt`/`finalAttemptEndedAt` pair for the FINAL attempt. That pair is not a whole-job duration, and a retry replaces its start time.
 
 The terminal envelope shape:
 
@@ -166,6 +178,14 @@ The terminal envelope shape:
 ```
 
 Possible contract statuses are `compliant`, `retried`, `noncompliant`, `skipped`, and `disabled`. `kind` is `task`, `review`, or `adversarial_review`. `orphaned` is a first-class terminal state with exit code 14; it does not fabricate a result, and `result_unavailable_reason` explains the missing result.
+
+For `failed`, `interrupted`, and `quarantined` terminals, Agentbus may also supply a redacted, length-bounded `failure_reason` and closed-set `failure_class`. They answer what went wrong and are independent of `result_unavailable_reason`, which only explains why no result is present. They are omitted when Agentbus supplies neither. `delegate status --json` exposes the same metadata within each JobStatus using Agentbus's `failureReason` and `failureClass` names; terminal envelopes use Delegate's snake_case names. Terminal envelopes likewise expose the complete FINAL-attempt pair as `final_attempt_started_at` and `final_attempt_ended_at`; callers can subtract them when needed, but Delegate does not emit a derived duration.
+
+- `backend_not_started`: Agentbus could not start backend work, so no backend work was possible.
+- `backend_error`: a launched backend turn failed; work may have happened before it failed.
+- `backend_interrupted`: a backend turn stopped without Agentbus requesting the interruption.
+- `finalization_error`: the backend succeeded and Agentbus lost the result; inspect the worktree and salvage completed work before retrying.
+- `internal_error`: Agentbus has no more specific failure category.
 
 ## Cleanup Disposition
 

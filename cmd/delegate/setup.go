@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -47,16 +48,46 @@ type setupConfig struct {
 }
 
 type setupAgentbus struct {
-	Found           bool                 `json:"found"`
-	Path            string               `json:"path"`
-	Version         string               `json:"version,omitempty"`
-	ProtocolVersion int                  `json:"protocolVersion"`
-	Backends        []string             `json:"backends"`
-	BackendMetadata []client.BackendInfo `json:"backendMetadata,omitempty"`
-	Capabilities    map[string]bool      `json:"capabilities"`
-	Required        []string             `json:"requiredCapabilities"`
-	Missing         []string             `json:"missingCapabilities,omitempty"`
-	CapabilitiesOK  bool                 `json:"capabilitiesOK"`
+	Found                   bool                 `json:"found"`
+	Path                    string               `json:"path"`
+	Version                 string               `json:"version,omitempty"`
+	MinimumSupportedVersion string               `json:"minimumSupportedVersion"`
+	VersionStatus           string               `json:"versionStatus"`
+	ProtocolVersion         int                  `json:"protocolVersion"`
+	Backends                []string             `json:"backends"`
+	BackendMetadata         []client.BackendInfo `json:"backendMetadata,omitempty"`
+	Capabilities            map[string]bool      `json:"capabilities"`
+	Required                []string             `json:"requiredCapabilities"`
+	Missing                 []string             `json:"missingCapabilities,omitempty"`
+	CapabilitiesOK          bool                 `json:"capabilitiesOK"`
+
+	// handshakeKnown distinguishes a deliberately skipped handshake from an
+	// observed handshake whose fields happen to have zero values. It is never
+	// serialized directly.
+	handshakeKnown bool
+}
+
+// MarshalJSON preserves the established setup JSON after a handshake, while a
+// known-too-old binary reports only discovery facts instead of manufacturing
+// protocol or capability values that were never observed.
+func (agentbus setupAgentbus) MarshalJSON() ([]byte, error) {
+	if agentbus.handshakeKnown {
+		type setupAgentbusWithHandshake setupAgentbus
+		return json.Marshal(setupAgentbusWithHandshake(agentbus))
+	}
+	return json.Marshal(struct {
+		Found                   bool   `json:"found"`
+		Path                    string `json:"path"`
+		Version                 string `json:"version,omitempty"`
+		MinimumSupportedVersion string `json:"minimumSupportedVersion"`
+		VersionStatus           string `json:"versionStatus"`
+	}{
+		Found:                   agentbus.Found,
+		Path:                    agentbus.Path,
+		Version:                 agentbus.Version,
+		MinimumSupportedVersion: agentbus.MinimumSupportedVersion,
+		VersionStatus:           agentbus.VersionStatus,
+	})
 }
 
 // setupSkill reports whether one managed skill is present and matches the
@@ -85,6 +116,12 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 		return 0, err
 	}
 	version := agentbusVersion(path)
+	versionAssessment := assessAgentbusVersion(version)
+	if versionAssessment.Status == agentbusVersionStatusTooOld {
+		// Do not connect a binary already known to be unsupported: connecting can
+		// autostart its daemon, and an unsupported daemon must not be started.
+		return setupTooOldAgentbusResult(*jsonOut, stdout, path, version, versionAssessment)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	agentbusRoot, err := resolveAgentbusStateRoot()
@@ -101,6 +138,9 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	missingCapabilities := missingCapabilities(hello, requiredCapabilities)
 	capabilitiesOK := len(missingCapabilities) == 0
 	preflight := setupStatePreflightWithAgentbusRoot(agentbusRoot, nil)
+	if versionAssessment.Warning != "" {
+		preflight.Warnings = append(preflight.Warnings, versionAssessment.Warning)
+	}
 	pendingSubmissionIntents, countWarnings := setupPendingSubmissionIntentCount(preflight.DelegateStateRoot)
 	preflight.Warnings = append(preflight.Warnings, countWarnings...)
 	unresolvedCleanupArtifacts, countWarnings := setupUnresolvedCleanupArtifactCount(preflight.DelegateStateRoot)
@@ -124,16 +164,19 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 			Schema:   commandJSONSchema,
 			Delegate: versionLine(),
 			Agentbus: setupAgentbus{
-				Found:           true,
-				Path:            path,
-				Version:         version,
-				ProtocolVersion: hello.ProtocolVersion,
-				Backends:        hello.Backends,
-				BackendMetadata: hello.BackendMetadata,
-				Capabilities:    hello.Capabilities,
-				Required:        requiredCapabilities,
-				Missing:         missingCapabilities,
-				CapabilitiesOK:  capabilitiesOK,
+				Found:                   true,
+				Path:                    path,
+				Version:                 version,
+				MinimumSupportedVersion: minimumSupportedAgentbusVersion,
+				VersionStatus:           versionAssessment.Status,
+				ProtocolVersion:         hello.ProtocolVersion,
+				Backends:                hello.Backends,
+				BackendMetadata:         hello.BackendMetadata,
+				Capabilities:            hello.Capabilities,
+				Required:                requiredCapabilities,
+				Missing:                 missingCapabilities,
+				CapabilitiesOK:          capabilitiesOK,
+				handshakeKnown:          true,
 			},
 			Config: setupConfig{
 				Path:        configPath,
@@ -168,6 +211,9 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 		if _, err := fmt.Fprintf(stdout, "agentbus version: %s\n", version); err != nil {
 			return 0, err
 		}
+	}
+	if _, err := fmt.Fprintf(stdout, "agentbus minimum supported version: %s\nagentbus version status: %s\n", minimumSupportedAgentbusVersion, versionAssessment.Status); err != nil {
+		return 0, err
 	}
 	capabilityStatus := "ok"
 	if !capabilitiesOK {
@@ -207,6 +253,29 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 		return 1, readinessErr
 	}
 	return 0, nil
+}
+
+func setupTooOldAgentbusResult(jsonOut bool, stdout io.Writer, path, version string, versionAssessment agentbusVersionAssessment) (int, error) {
+	if jsonOut {
+		if err := writeJSONLine(stdout, setupJSON{
+			Schema:   commandJSONSchema,
+			Delegate: versionLine(),
+			Agentbus: setupAgentbus{
+				Found:                   true,
+				Path:                    path,
+				Version:                 version,
+				MinimumSupportedVersion: minimumSupportedAgentbusVersion,
+				VersionStatus:           versionAssessment.Status,
+			},
+			Ready: false,
+		}); err != nil {
+			return 0, err
+		}
+	} else if _, err := fmt.Fprintf(stdout, "%s\nagentbus: %s\nagentbus version: %s\nagentbus minimum supported version: %s\nagentbus version status: %s\nready: false\n", versionLine(), path, version, minimumSupportedAgentbusVersion, versionAssessment.Status); err != nil {
+		return 0, err
+	}
+	// Setup readiness failures conventionally use exit status 1.
+	return 1, agentbusMinimumVersionError(version)
 }
 
 func setupReadinessError(hello client.HelloResult, version string, missingCapabilities []string, preflight setupStatePreflightResult) error {

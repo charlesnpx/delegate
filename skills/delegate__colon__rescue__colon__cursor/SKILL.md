@@ -21,7 +21,7 @@ Superseding escape hatch: if the requester explicitly asks you to perform the ta
 - stdin handoff: sensitive prompt text can be piped to "delegate handoff create --json".
 - backend reachability: "delegate setup --json" shows agentbus capabilities and cursor backend availability.
 
-By default "delegate task" runs the backend READ-ONLY; pass "--write" when the task must modify the repository or workspace (create/edit files, or run builds/tests that write caches). Omitting "--write" yields a read-only profile and write attempts fail.
+"delegate task" is read-only unless it has "--write". The worker sandbox is offline, and a write turn can write only inside the job "--cwd"; use it for repo-local edits/builds/tests and point "GOCACHE" and "GOMODCACHE" under that cwd. Route module downloads, other network work, and Git commits to the caller/orchestrator.
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
@@ -40,6 +40,8 @@ Delegate records the originating skill plus best-effort parent session identity 
 ~~~bash
 delegate task --backend cursor --origin delegate:rescue:cursor --cwd "$PWD" --handoff-prompt-file "$HANDOFF_PATH" --background --json
 ~~~
+
+Each handoff prompt file is single-use: after the task consumes it, create a new handoff file before a relaunch of the same packet.
 
 When the caller has a machine-readable output schema, pass it with "--output-schema-file" instead of placing it in prompt prose. Violations return as "<json-pointer>: <message>", and one corrective retry runs automatically.
 

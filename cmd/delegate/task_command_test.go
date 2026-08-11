@@ -180,7 +180,7 @@ func TestSetupCapabilityGateReportsMissingStrictContainment(t *testing.T) {
 	if len(result.Agentbus.Missing) == 0 || result.Agentbus.Missing[0] != "admission.strictContainment" {
 		t.Fatalf("missing capabilities=%#v, want strict containment first", result.Agentbus.Missing)
 	}
-	want := "agentbus v0.0.7 lacks capability `admission.strictContainment`; run mise-en-place install agentbus"
+	want := "agentbus " + minimumSupportedAgentbusVersion + " lacks capability `admission.strictContainment`; run mise-en-place install agentbus"
 	if !strings.Contains(stderr.String(), want) {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
@@ -205,7 +205,7 @@ func TestSetupOutputIncludesReadinessFields(t *testing.T) {
 			t.Fatalf("setup stdout = %q, want %q", stdout.String(), line)
 		}
 	}
-	for _, line := range []string{"agentbusStateRoot:", "agentbusAutostartLockRoot:", "agentbusAutostartLockRootWritable: true", "admission.strictContainment: true", "pendingSubmissionIntentCount: 0", "unresolvedCleanupArtifactCount: 0", "ready: true"} {
+	for _, line := range []string{"agentbus minimum supported version: " + minimumSupportedAgentbusVersion, "agentbus version status: supported", "agentbusStateRoot:", "agentbusAutostartLockRoot:", "agentbusAutostartLockRootWritable: true", "admission.strictContainment: true", "pendingSubmissionIntentCount: 0", "unresolvedCleanupArtifactCount: 0", "ready: true"} {
 		if !strings.Contains(stdout.String(), line) {
 			t.Fatalf("setup stdout = %q, want %q", stdout.String(), line)
 		}
@@ -1017,6 +1017,39 @@ func TestTaskPassesThroughUnadvertisedCatalogModelAndEffort(t *testing.T) {
 	}
 }
 
+func TestTaskReadOnlyHintStaysOnStderr(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		flags    []string
+		wantHint bool
+	}{
+		{name: "read_only", wantHint: true},
+		{name: "write", flags: []string{"--write"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+
+			args := append([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--background", "--json"}, tc.flags...)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+			}
+			var launch LaunchEnvelope
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &launch); err != nil {
+				t.Fatalf("stdout is not valid launch JSON: %v; raw=%q", err, stdout.String())
+			}
+			if strings.Contains(stdout.String(), readOnlyTaskHint) {
+				t.Fatalf("stdout contains read-only hint: %q", stdout.String())
+			}
+			if got := strings.Count(stderr.String(), readOnlyTaskHint); (got == 1) != tc.wantHint {
+				t.Fatalf("read-only hint count = %d, want present=%t; stderr=%q", got, tc.wantHint, stderr.String())
+			}
+		})
+	}
+}
+
 func stubAgentbusGlobals(t *testing.T, fake *fakeAgentbusClient) func() {
 	return stubAgentbusClientGlobals(t, fake)
 }
@@ -1035,13 +1068,17 @@ func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 		return "/tmp/agentbus", nil
 	}
 	commandOutput = func(string, ...string) ([]byte, error) {
-		return []byte("agentbus v0.0.7\n"), nil
+		return []byte(agentbusVersionFixtureOutput(minimumSupportedAgentbusVersion)), nil
 	}
 	return func() {
 		connectAgentbus = oldConnect
 		lookPath = oldLookPath
 		commandOutput = oldCommandOutput
 	}
+}
+
+func agentbusVersionFixtureOutput(version string) string {
+	return "agentbus " + version + "\n"
 }
 
 func helloWithCapabilities() client.HelloResult {

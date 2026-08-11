@@ -15,6 +15,22 @@ import (
 	"github.com/charlesnpx/agentbus/engine"
 )
 
+// minimumSupportedAgentbusVersion is the oldest installed agentbus binary this
+// delegate build is known to work against. Update it when the
+// github.com/charlesnpx/agentbus requirement in go.mod is bumped.
+const minimumSupportedAgentbusVersion = "v0.10.0"
+
+const (
+	agentbusVersionStatusSupported = "supported"
+	agentbusVersionStatusTooOld    = "too_old"
+	agentbusVersionStatusUnknown   = "unknown"
+)
+
+type agentbusVersionAssessment struct {
+	Status  string
+	Warning string
+}
+
 type agentbusClient interface {
 	Close() error
 	HelloResult() client.HelloResult
@@ -296,6 +312,184 @@ func agentbusVersion(path string) string {
 		return fields[0]
 	}
 	return ""
+}
+
+// assessAgentbusVersion compares the version token already extracted by
+// agentbusVersion with this build's declared floor. Discovery failures and
+// malformed output stay warnings so a changed version-reporting format cannot
+// make setup unusable.
+func assessAgentbusVersion(version string) agentbusVersionAssessment {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return agentbusVersionAssessment{
+			Status:  agentbusVersionStatusUnknown,
+			Warning: fmt.Sprintf("agentbus version could not be discovered; minimum supported version is %s (setup will not block readiness)", minimumSupportedAgentbusVersion),
+		}
+	}
+	comparison, err := compareAgentbusSemver(version, minimumSupportedAgentbusVersion)
+	if err != nil {
+		return agentbusVersionAssessment{
+			Status:  agentbusVersionStatusUnknown,
+			Warning: fmt.Sprintf("agentbus version %q could not be parsed; minimum supported version is %s (setup will not block readiness)", version, minimumSupportedAgentbusVersion),
+		}
+	}
+	if comparison < 0 {
+		return agentbusVersionAssessment{Status: agentbusVersionStatusTooOld}
+	}
+	return agentbusVersionAssessment{Status: agentbusVersionStatusSupported}
+}
+
+func agentbusMinimumVersionError(version string) error {
+	return fmt.Errorf("agentbus %s is older than the minimum supported version %s; run mise-en-place install agentbus to upgrade", version, minimumSupportedAgentbusVersion)
+}
+
+type agentbusSemver struct {
+	major      string
+	minor      string
+	patch      string
+	prerelease []string
+}
+
+func compareAgentbusSemver(a, b string) (int, error) {
+	parsedA, err := parseAgentbusSemver(a)
+	if err != nil {
+		return 0, err
+	}
+	parsedB, err := parseAgentbusSemver(b)
+	if err != nil {
+		return 0, err
+	}
+	return compareParsedAgentbusSemver(parsedA, parsedB), nil
+}
+
+func parseAgentbusSemver(version string) (agentbusSemver, error) {
+	version = strings.TrimSpace(version)
+	version = strings.TrimPrefix(version, "v")
+	if version == "" {
+		return agentbusSemver{}, errors.New("empty semantic version")
+	}
+
+	coreAndPrerelease, build, hasBuild := strings.Cut(version, "+")
+	if hasBuild && !validAgentbusSemverIdentifiers(build, false) {
+		return agentbusSemver{}, fmt.Errorf("invalid semantic version build metadata %q", build)
+	}
+	core, prerelease, hasPrerelease := strings.Cut(coreAndPrerelease, "-")
+	if hasPrerelease && !validAgentbusSemverIdentifiers(prerelease, true) {
+		return agentbusSemver{}, fmt.Errorf("invalid semantic version prerelease %q", prerelease)
+	}
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return agentbusSemver{}, fmt.Errorf("semantic version %q must have major, minor, and patch components", version)
+	}
+	for _, part := range parts {
+		if !validAgentbusSemverNumber(part) {
+			return agentbusSemver{}, fmt.Errorf("invalid semantic version number %q", part)
+		}
+	}
+	parsed := agentbusSemver{major: parts[0], minor: parts[1], patch: parts[2]}
+	if hasPrerelease {
+		parsed.prerelease = strings.Split(prerelease, ".")
+	}
+	return parsed, nil
+}
+
+func validAgentbusSemverNumber(value string) bool {
+	if value == "" || (len(value) > 1 && value[0] == '0') {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validAgentbusSemverIdentifiers(value string, rejectLeadingZeroNumbers bool) bool {
+	for _, identifier := range strings.Split(value, ".") {
+		if identifier == "" {
+			return false
+		}
+		numeric := true
+		for _, char := range identifier {
+			if !((char >= '0' && char <= '9') || (char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') || char == '-') {
+				return false
+			}
+			if char < '0' || char > '9' {
+				numeric = false
+			}
+		}
+		if numeric && rejectLeadingZeroNumbers && len(identifier) > 1 && identifier[0] == '0' {
+			return false
+		}
+	}
+	return true
+}
+
+func compareParsedAgentbusSemver(a, b agentbusSemver) int {
+	for _, components := range [][2]string{{a.major, b.major}, {a.minor, b.minor}, {a.patch, b.patch}} {
+		if comparison := compareAgentbusSemverNumber(components[0], components[1]); comparison != 0 {
+			return comparison
+		}
+	}
+	if len(a.prerelease) == 0 && len(b.prerelease) == 0 {
+		return 0
+	}
+	if len(a.prerelease) == 0 {
+		return 1
+	}
+	if len(b.prerelease) == 0 {
+		return -1
+	}
+	for index := 0; index < len(a.prerelease) && index < len(b.prerelease); index++ {
+		if comparison := compareAgentbusSemverIdentifier(a.prerelease[index], b.prerelease[index]); comparison != 0 {
+			return comparison
+		}
+	}
+	if len(a.prerelease) < len(b.prerelease) {
+		return -1
+	}
+	if len(a.prerelease) > len(b.prerelease) {
+		return 1
+	}
+	return 0
+}
+
+func compareAgentbusSemverIdentifier(a, b string) int {
+	aNumeric := validAgentbusSemverNumber(a)
+	bNumeric := validAgentbusSemverNumber(b)
+	if aNumeric && bNumeric {
+		return compareAgentbusSemverNumber(a, b)
+	}
+	if aNumeric {
+		return -1
+	}
+	if bNumeric {
+		return 1
+	}
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+
+func compareAgentbusSemverNumber(a, b string) int {
+	if len(a) < len(b) {
+		return -1
+	}
+	if len(a) > len(b) {
+		return 1
+	}
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
 }
 
 func optionalAgentbusBinaryVersion() (string, string) {

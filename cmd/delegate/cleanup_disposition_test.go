@@ -139,6 +139,8 @@ func TestTerminalEnvelopeSchema2FieldsFromResultAndStatus(t *testing.T) {
 	startedAt := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	heartbeatAt := startedAt.Add(time.Minute)
 	updatedAt := heartbeatAt.Add(time.Minute)
+	finalAttemptStartedAt := updatedAt.Add(time.Minute)
+	finalAttemptEndedAt := finalAttemptStartedAt.Add(time.Minute)
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		result: client.JobResult{
@@ -148,15 +150,17 @@ func TestTerminalEnvelopeSchema2FieldsFromResultAndStatus(t *testing.T) {
 			Result:    &engine.ResultInfo{SHA256: resultSHA},
 		},
 		status: client.JobStatusResult{Jobs: []client.JobStatus{{
-			JobID:              jobID,
-			SessionID:          "session_terminal_schema2",
-			State:              engine.StateCompleted,
-			CleanupDisposition: cleanupDispositionUnresolved,
-			LateFinalization:   true,
-			Warnings:           []string{"cleanup could not prove absence"},
-			StartedAt:          &startedAt,
-			HeartbeatAt:        &heartbeatAt,
-			UpdatedAt:          &updatedAt,
+			JobID:                 jobID,
+			SessionID:             "session_terminal_schema2",
+			State:                 engine.StateCompleted,
+			CleanupDisposition:    cleanupDispositionUnresolved,
+			LateFinalization:      true,
+			Warnings:              []string{"cleanup could not prove absence"},
+			StartedAt:             &startedAt,
+			HeartbeatAt:           &heartbeatAt,
+			UpdatedAt:             &updatedAt,
+			FinalAttemptStartedAt: &finalAttemptStartedAt,
+			FinalAttemptEndedAt:   &finalAttemptEndedAt,
 		}}},
 	}
 	restore := stubAgentbusGlobals(t, fake)
@@ -186,6 +190,18 @@ func TestTerminalEnvelopeSchema2FieldsFromResultAndStatus(t *testing.T) {
 	}
 	if env.StartedAt == nil || !env.StartedAt.Equal(startedAt) || env.HeartbeatAt == nil || !env.HeartbeatAt.Equal(heartbeatAt) || env.UpdatedAt == nil || !env.UpdatedAt.Equal(updatedAt) {
 		t.Fatalf("terminal timestamps started=%v heartbeat=%v updated=%v", env.StartedAt, env.HeartbeatAt, env.UpdatedAt)
+	}
+	if env.FinalAttemptStartedAt == nil || !env.FinalAttemptStartedAt.Equal(finalAttemptStartedAt) || env.FinalAttemptEndedAt == nil || !env.FinalAttemptEndedAt.Equal(finalAttemptEndedAt) {
+		t.Fatalf("terminal final-attempt timing started=%v ended=%v", env.FinalAttemptStartedAt, env.FinalAttemptEndedAt)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"final_attempt_started_at", "final_attempt_ended_at"} {
+		if _, found := fields[field]; !found {
+			t.Fatalf("terminal envelope JSON=%q, missing %q", stdout.String(), field)
+		}
 	}
 	assertPathExists(t, inputPath)
 	assertPathExists(t, workspace)

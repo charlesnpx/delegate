@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	skillpkg "github.com/charlesnpx/delegate/internal/skills"
 )
 
 func TestInstallSkillsPlanJSONShowsLegacyRemovals(t *testing.T) {
@@ -119,7 +121,13 @@ func TestInstallSkillsCodexSandboxWarningsAndLiveGuard(t *testing.T) {
 	if err := json.Unmarshal(stagedOut.Bytes(), &staged); err != nil {
 		t.Fatal(err)
 	}
-	if len(staged.Warnings) != 1 || !strings.Contains(staged.Warnings[0], "staged install root") {
-		t.Fatalf("staged warnings = %#v", staged.Warnings)
+	if len(staged.Warnings) != 0 {
+		t.Fatalf("staged warnings = %#v, want none for expected staged install", staged.Warnings)
+	}
+
+	t.Setenv("CODEX_HOME", "relative-codex-home")
+	unexpected := codexSandboxInstallerWarnings("install", skillpkg.TargetCodex, "")
+	if len(unexpected) != 1 || !strings.Contains(unexpected[0], "writable_roots skipped") {
+		t.Fatalf("unexpected live-root skip warnings = %#v", unexpected)
 	}
 }

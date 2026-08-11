@@ -333,8 +333,8 @@ record_codex_sandbox_action() {
       # --install-root, then copies staged files into the live destination.
       # Configuring from that staged invocation would mutate the user's Codex
       # sandbox even though the staged skills have not been installed live.
+      # This expected skip is intentionally silent rather than a warning.
       if [[ "$ROOT" != "$live_root" ]]; then
-        add_warning "codex sandbox writable_roots skipped: staged install root $ROOT is not the live home directory"
         return 0
       fi
 
