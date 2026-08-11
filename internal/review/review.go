@@ -362,8 +362,11 @@ func ComposePrompt(kind string, assembled Context) (string, error) {
 	if assembled.Head != "" {
 		prompt.WriteString("HEAD commit: " + assembled.Head + ".\n")
 	}
+	prompt.WriteString("The supplied effective scope, resolved base, base commit, branch under review, and HEAD commit are authoritative for this review. Report them as given rather than as unavailable.\n")
+	prompt.WriteString("For the report's Scope boundary, use the supplied branch, base commit, and HEAD commit identifiers; do not infer or claim a full commit list.\n")
+	prompt.WriteString("Reading the assembled context is the first and only required step. Do not run git or any other repository-inspection command to recover metadata or context, and do not put a repository probe before the context read with &&. A sandbox denial of an unnecessary probe is not a reason to stop: read the assembled context and complete the review.\n")
 	if assembled.AllowLiveRepoRead {
-		prompt.WriteString("LIVE-REPOSITORY MODE was explicitly enabled. Delegate still applies its path/history redaction and final content scan to the context it assembles; this flag makes backend file reads easier by using the live repository as its working directory. You may inspect the current repository to validate and self-collect context, but remain read-only and do not expose secret-looking file contents in the response.\n")
+		prompt.WriteString("LIVE-REPOSITORY MODE was explicitly enabled. Delegate still applies its path/history redaction and final content scan to the context it assembles; this flag makes backend file reads easier by using the live repository as its working directory. Although those reads are available, the assembled context and supplied identifiers remain authoritative; do not self-collect them, and do not expose secret-looking file contents in the response.\n")
 	} else {
 		prompt.WriteString("Delegate has provided only its assembled context in this workspace, with secret-looking paths represented as path/status only and secret-like diff hunks replaced by a redaction marker. This does not prevent a same-user backend from reading repository or other filesystem files itself; review only this context and do not try to inspect or reconstruct redacted content. OS-level isolation requires a container or sandbox profile.\n")
 	}

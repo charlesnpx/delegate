@@ -125,6 +125,12 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"Never auto-fix",
 				"accident prevention",
 				"delete-and-recreate",
+				"Git is used by host-side delegate assembly only",
+				"Scope boundary",
+				"full commit list",
+				"first and only required step",
+				"repository-inspection command",
+				"with \"&&\"",
 				"--recover-request <request_id>",
 				"cleanup_disposition",
 			})

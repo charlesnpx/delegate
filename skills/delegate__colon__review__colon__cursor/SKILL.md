@@ -16,7 +16,7 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 
 - no-fork support: the job must run through "delegate review"/agentbus supervision, not an unmanaged background shell or a local substitute review.
 - shared fs: the parent harness, "delegate", agentbus, and the cursor backend can see the delegate state path. Using the private workspace as backend cwd is not OS isolation; a same-user backend can still read repository or other filesystem files when process permissions allow it.
-- exec: "delegate", "agentbus", "git", and the cursor backend executable are runnable.
+- exec: "delegate", "agentbus", "git", and the cursor backend executable are runnable. Git is used by host-side delegate assembly only; it is not a review-worker preflight or input source.
 - repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate applies path/history redaction and a final content scan to every assembled inline or spilled diff payload.
 - cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
 - backend reachability: "delegate setup --json" shows agentbus capabilities and cursor backend availability.
@@ -34,6 +34,12 @@ Delegate records the originating skill plus best-effort parent session identity 
 Threat model: delegate's review context is accident prevention, not a security boundary against an adversarial repository or history. Deliberate history shuffles such as delete-and-recreate sequences intended to evade the heuristics are out of scope.
 
 Do not add "--allow-live-repo-read" unless the user explicitly requests live-repository access after being told that using the repository as backend cwd makes backend file reads easier. It does not change OS filesystem permissions.
+
+## Review Context Discipline
+
+Delegate performs Git collection on the host before the review worker starts and its composed review prompt supplies effective scope, resolved base, base commit, branch under review, and HEAD commit. These supplied values are authoritative: the reviewer must report them as given, including in Scope boundary, rather than treating them as unavailable or inferring a full commit list.
+
+Reading the assembled context is the first and only required step. Do not instruct the review worker to run "git" or another repository-inspection command to recover metadata or context, and do not put a repository probe before "review.patch" with "&&". A sandbox denial of an unnecessary probe must not stop the review; it should read the assembled context and complete the review.
 
 ## Launch
 

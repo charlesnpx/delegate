@@ -646,6 +646,33 @@ func TestAssembleBranchScopeUsesResolvedBaseAndCanonicalCWD(t *testing.T) {
 	}
 }
 
+func TestAssemblePublishesReviewIdentityForBranchWorktreeAndDetachedHEAD(t *testing.T) {
+	t.Run("checked-out branch", func(t *testing.T) {
+		repo := newGitFixture(t)
+		gitFixture(t, repo, "switch", "-c", "feature")
+
+		assertAssembledReviewIdentity(t, repo, "feature", gitFixtureOutput(t, repo, "rev-parse", "HEAD"))
+	})
+
+	t.Run("linked worktree", func(t *testing.T) {
+		repo := newGitFixture(t)
+		worktree := filepath.Join(t.TempDir(), "linked")
+		gitFixture(t, repo, "worktree", "add", "-b", "linked", worktree, "main")
+
+		assertAssembledReviewIdentity(t, worktree, "linked", gitFixtureOutput(t, worktree, "rev-parse", "HEAD"))
+	})
+
+	t.Run("detached HEAD", func(t *testing.T) {
+		repo := newGitFixture(t)
+		gitFixture(t, repo, "checkout", "--detach")
+		if got := gitFixtureOutput(t, repo, "rev-parse", "--abbrev-ref", "HEAD"); got != "HEAD" {
+			t.Fatalf("detached branch label = %q, want HEAD", got)
+		}
+
+		assertAssembledReviewIdentity(t, repo, "(detached)", gitFixtureOutput(t, repo, "rev-parse", "HEAD"))
+	})
+}
+
 func TestAssembleRedactsSecretLikeBranchMetadata(t *testing.T) {
 	repo := newGitFixture(t)
 	const secret = "AKIAIOSFODNN7EXAMPLE"
@@ -794,7 +821,7 @@ func TestAllowLiveRepoReadGatesBackendCWDAndPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if live.BackendCWD != live.CanonicalCWD || !strings.Contains(livePrompt, "LIVE-REPOSITORY MODE") || !strings.Contains(livePrompt, "makes backend file reads easier") || !strings.Contains(livePrompt, "self-collect") {
+	if live.BackendCWD != live.CanonicalCWD || !strings.Contains(livePrompt, "LIVE-REPOSITORY MODE") || !strings.Contains(livePrompt, "makes backend file reads easier") || !strings.Contains(livePrompt, "remain authoritative") {
 		t.Fatalf("live gating failed: cwd=%q prompt=%q", live.BackendCWD, livePrompt)
 	}
 }
@@ -806,6 +833,39 @@ func TestComposeAdversarialPromptIsRefuteFirst(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "refute-first") || !strings.Contains(prompt, "trying to disprove") {
 		t.Fatalf("adversarial prompt = %q", prompt)
+	}
+}
+
+func TestComposePromptTreatsSuppliedReviewContextAsAuthoritative(t *testing.T) {
+	assembled := Context{
+		Scope:        ScopeBranch,
+		Base:         Base{Ref: "origin/main", Commit: "1111111111111111111111111111111111111111", Source: "default-remote"},
+		Branch:       "feature",
+		Head:         "2222222222222222222222222222222222222222",
+		ArtifactPath: filepath.Join(t.TempDir(), artifactFilename),
+	}
+	for _, kind := range []string{KindReview, KindAdversarialReview} {
+		t.Run(kind, func(t *testing.T) {
+			prompt, err := ComposePrompt(kind, assembled)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{
+				"The supplied effective scope, resolved base, base commit, branch under review, and HEAD commit are authoritative for this review.",
+				"Report them as given rather than as unavailable.",
+				"For the report's Scope boundary, use the supplied branch, base commit, and HEAD commit identifiers; do not infer or claim a full commit list.",
+				"Reading the assembled context is the first and only required step.",
+				"Do not run git or any other repository-inspection command to recover metadata or context, and do not put a repository probe before the context read with &&.",
+				"A sandbox denial of an unnecessary probe is not a reason to stop: read the assembled context and complete the review.",
+				"Branch under review: \"feature\".",
+				"HEAD commit: 2222222222222222222222222222222222222222.",
+				"\"review.patch\"",
+			} {
+				if !strings.Contains(prompt, want) {
+					t.Fatalf("review prompt missing %q:\n%s", want, prompt)
+				}
+			}
+		})
 	}
 }
 
@@ -978,4 +1038,24 @@ func gitFixtureOutput(t *testing.T, repo string, args ...string) string {
 		t.Fatalf("git %v: %v\n%s", args, err, raw)
 	}
 	return strings.TrimSpace(string(raw))
+}
+
+func assertAssembledReviewIdentity(t *testing.T, cwd, wantBranch, wantHead string) {
+	t.Helper()
+	assembled, err := Assemble(context.Background(), Options{
+		CWD:      cwd,
+		Scope:    ScopeWorkingTree,
+		StateDir: filepath.Join(t.TempDir(), "state"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := Cleanup(assembled); err != nil {
+			t.Errorf("Cleanup() error = %v", err)
+		}
+	})
+	if assembled.Branch != wantBranch || assembled.Head != wantHead {
+		t.Fatalf("branch/head=%q/%q, want %q/%q", assembled.Branch, assembled.Head, wantBranch, wantHead)
+	}
 }
