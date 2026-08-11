@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
 	"github.com/charlesnpx/delegate/internal/handoff"
 )
@@ -131,7 +134,7 @@ func TestSetupAgentbusVersionReadiness(t *testing.T) {
 		wantRemedy  string
 	}{
 		{
-			name:       "below_floor",
+			name:       "below_floor_with_working_client",
 			output:     "agentbus v0.9.0\n",
 			wantStatus: agentbusVersionStatusTooOld,
 			wantRemedy: "agentbus v0.9.0 is older than the minimum supported version " + minimumSupportedAgentbusVersion + "; run mise-en-place install agentbus to upgrade",
@@ -202,6 +205,106 @@ func TestSetupAgentbusVersionReadiness(t *testing.T) {
 				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.wantRemedy)
 			}
 		})
+	}
+}
+
+func TestSetupTooOldAgentbusSkipsConnectionAndReportsKnownJSON(t *testing.T) {
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	connected := false
+	connectAgentbus = func(context.Context, client.Options) (agentbusClient, error) {
+		connected = true
+		return nil, errors.New("connect should not be called for a too-old agentbus")
+	}
+	commandOutput = func(string, ...string) ([]byte, error) {
+		return []byte("agentbus v0.9.0\n"), nil
+	}
+	t.Setenv("HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("setup code=%d, want readiness failure 1; stderr=%q", code, stderr.String())
+	}
+	if connected {
+		t.Fatal("connectAgentbus was called for a too-old agentbus")
+	}
+	var result setupJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if result.Schema != commandJSONSchema || result.Delegate != versionLine() || result.Ready {
+		t.Fatalf("setup result = %#v, want schema/delegate and ready=false", result)
+	}
+	if !result.Agentbus.Found || result.Agentbus.Path != "/tmp/agentbus" || result.Agentbus.Version != "v0.9.0" || result.Agentbus.MinimumSupportedVersion != minimumSupportedAgentbusVersion || result.Agentbus.VersionStatus != agentbusVersionStatusTooOld {
+		t.Fatalf("agentbus result = %#v, want known too-old discovery facts", result.Agentbus)
+	}
+	var raw struct {
+		Agentbus map[string]json.RawMessage `json:"agentbus"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &raw); err != nil {
+		t.Fatalf("raw setup JSON invalid: %v", err)
+	}
+	for _, field := range []string{"protocolVersion", "backends", "backendMetadata", "capabilities", "requiredCapabilities", "missingCapabilities", "capabilitiesOK"} {
+		if _, found := raw.Agentbus[field]; found {
+			t.Fatalf("agentbus JSON contains unobserved handshake field %q: %s", field, stdout.String())
+		}
+	}
+	wantRemedy := "agentbus v0.9.0 is older than the minimum supported version " + minimumSupportedAgentbusVersion + "; run mise-en-place install agentbus to upgrade"
+	if !strings.Contains(stderr.String(), wantRemedy) {
+		t.Fatalf("stderr=%q, want %q", stderr.String(), wantRemedy)
+	}
+}
+
+func TestSetupTooOldAgentbusPlaintextReportsVersionRemedy(t *testing.T) {
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	commandOutput = func(string, ...string) ([]byte, error) {
+		return []byte("agentbus v0.9.0\n"), nil
+	}
+	t.Setenv("HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup"}, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("setup code=%d, want readiness failure 1; stderr=%q", code, stderr.String())
+	}
+	for _, line := range []string{"agentbus version: v0.9.0", "agentbus version status: " + agentbusVersionStatusTooOld, "ready: false"} {
+		if !strings.Contains(stdout.String(), line) {
+			t.Fatalf("stdout=%q, want %q", stdout.String(), line)
+		}
+	}
+	wantRemedy := "agentbus v0.9.0 is older than the minimum supported version " + minimumSupportedAgentbusVersion + "; run mise-en-place install agentbus to upgrade"
+	if !strings.Contains(stderr.String(), wantRemedy) {
+		t.Fatalf("stderr=%q, want %q", stderr.String(), wantRemedy)
+	}
+}
+
+func TestSetupUnknownAgentbusVersionKeepsConnectErrorPath(t *testing.T) {
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	connectAgentbus = func(context.Context, client.Options) (agentbusClient, error) {
+		return nil, errors.New("agentbus unavailable")
+	}
+	commandOutput = func(string, ...string) ([]byte, error) {
+		return []byte("agentbus development-build\n"), nil
+	}
+	t.Setenv("HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
+	if code != agentbusExitDaemonRuntime {
+		t.Fatalf("setup code=%d, want ordinary connect-error code %d; stderr=%q", code, agentbusExitDaemonRuntime, stderr.String())
+	}
+	var envelope agentbusErrorEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &envelope); err != nil {
+		t.Fatalf("connect-error JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if envelope.Code != agentbusErrorTransport || !strings.Contains(envelope.Message, "agentbus unavailable") {
+		t.Fatalf("connect-error envelope=%#v, want transport error", envelope)
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "minimum supported version") || strings.Contains(stdout.String()+stderr.String(), "mise-en-place install agentbus to upgrade") {
+		t.Fatalf("unknown-version connect error reported version remediation: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 
