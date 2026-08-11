@@ -78,13 +78,15 @@ delegate task --backend codex --origin delegate:rescue:codex --cwd "$PWD" \
 
 ## Worker sandbox boundaries
 
-The following are Agentbus v0.9.1 worker-sandbox contract rules. Route work accordingly:
+The following are Agentbus v0.10.0 worker-sandbox contract rules. These rules are unchanged since v0.9.1; the v0.10.0 label marks the current contract version rather than a sandbox-policy change. Route work accordingly:
 
 - A `--write` task runs as `workspaceWrite` with only its job `--cwd` writable. Keep task outputs there; a write worker can build and test only when `GOCACHE` and `GOMODCACHE` also point under that cwd, because the usual Go cache locations are outside the worker's writable roots.
 - Write workers have no outbound network (`networkAccess: false`). Run `go get`, proxy-dependent `go mod tidy`, toolchain downloads, and other network-bound work in the orchestrator.
 - A task without `--write` and every review worker run read-only with no network. A read-only worker cannot create a temporary or build directory, so the caller must run compile, test, and other runtime gates for review verification.
 - Approval policy is `never`, so approval requests are auto-declined. A denied worker write cannot be escalated; change the routing or stop the worker.
 - Writes in `.git` are commonly denied, including index locks. The orchestrator owns commits and other Git metadata changes.
+
+Observed behavior, not an Agentbus guarantee: the OS temporary directory is writable, so ordinary Go builds and tests work with only `GOCACHE` and `GOMODCACHE` relocated under the job cwd. A worker may nevertheless be denied deletion of a temp file; do not treat its cleanup as required or fail a task merely because temp artifacts remain.
 
 ## Review workflow and security model
 
