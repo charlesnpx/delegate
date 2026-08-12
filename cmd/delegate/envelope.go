@@ -69,6 +69,7 @@ type TerminalEnvelope struct {
 	FinalAttemptStartedAt          *time.Time                 `json:"final_attempt_started_at,omitempty"`
 	FinalAttemptEndedAt            *time.Time                 `json:"final_attempt_ended_at,omitempty"`
 	Origin                         *envelopeOrigin            `json:"origin,omitempty"`
+	retrySkipReason                reportRetrySkipReason
 }
 
 type terminalEnvelopeOptions struct {
@@ -94,6 +95,7 @@ type terminalEnvelopeOptions struct {
 	FinalAttemptEndedAt    *time.Time
 	FailureReason          string
 	FailureClass           engine.FailureClass
+	RetrySkipReason        reportRetrySkipReason
 }
 
 type launchEnvelopeOptions struct {
@@ -152,7 +154,7 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		LocalArtifactsRetained:         e.LocalArtifactsRetained,
 		Kind:                           e.Kind,
 		ContractKind:                   e.ContractKind,
-		Contract:                       contractStampEnvelopeValue(e.Contract),
+		Contract:                       contractStampEnvelopeValue(e.Contract, e.retrySkipReason),
 		ResultSHA256:                   e.ResultSHA256,
 		ResultPath:                     e.ResultPath,
 		ResultUnavailableReason:        e.ResultUnavailableReason,
@@ -175,7 +177,7 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 	})
 }
 
-func contractStampEnvelopeValue(stamp engine.ContractStamp) map[string]any {
+func contractStampEnvelopeValue(stamp engine.ContractStamp, retrySkipReason reportRetrySkipReason) map[string]any {
 	stamp = normalizeContractStamp(stamp)
 	out := map[string]any{
 		"status":    stamp.Status,
@@ -183,6 +185,9 @@ func contractStampEnvelopeValue(stamp engine.ContractStamp) map[string]any {
 		"reason":    stamp.Reason,
 		"attempts":  stamp.Attempts,
 		"retryUsed": stamp.RetryUsed,
+	}
+	if retrySkipReason != "" {
+		out["retrySkipReason"] = retrySkipReason
 	}
 	if stamp.ContractName != "" {
 		out["contractName"] = stamp.ContractName
@@ -247,6 +252,7 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 		Contract:                       stamp,
 		FailureReason:                  option.FailureReason,
 		FailureClass:                   option.FailureClass,
+		retrySkipReason:                option.RetrySkipReason,
 		BackendError:                   backendError,
 		Model:                          modelEffort.Model,
 		Effort:                         modelEffort.Effort,
