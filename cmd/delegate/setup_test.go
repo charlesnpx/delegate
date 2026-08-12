@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -46,7 +47,7 @@ func TestSetupStatePreflightRejectsRelativeAgentbusStateRoot(t *testing.T) {
 	}
 }
 
-func TestSetupReportsPendingSubmissionAndUnresolvedCleanupCounts(t *testing.T) {
+func TestSetupJSONReportsPendingSubmissionIntentsAndCounts(t *testing.T) {
 	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
 	defer restore()
 	t.Setenv("HOME", t.TempDir())
@@ -55,10 +56,13 @@ func TestSetupReportsPendingSubmissionAndUnresolvedCleanupCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, phase := range []string{submissionPhasePrepared, submissionPhaseInFlight, submissionPhaseBlocked} {
+	for index, phase := range []string{submissionPhasePrepared, submissionPhaseInFlight, submissionPhaseBlocked} {
 		requestID := "delegate-" + strings.Repeat(string(phase[0]), 32)
 		intent := testSubmissionIntent(testSubmitParams(t, requestID, phase+" prompt", nil), t.TempDir())
 		intent.Phase = phase
+		intent.CreatedAt = time.Date(2026, time.January, 1, 0, index, 0, 0, time.UTC)
+		intent.Params.TaskSpec.Backend = "backend-" + phase
+		intent.Origin = &envelopeOrigin{Skill: "delegate:" + phase}
 		if err := saveSubmissionIntent(stateDir, intent); err != nil {
 			t.Fatal(err)
 		}
@@ -120,8 +124,66 @@ func TestSetupReportsPendingSubmissionAndUnresolvedCleanupCounts(t *testing.T) {
 	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 3 {
 		t.Fatalf("pendingSubmissionIntentCount=%v, want 3", result.PendingSubmissionIntentCount)
 	}
+	if got, want := len(result.PendingSubmissionIntents), 3; got != want {
+		t.Fatalf("pendingSubmissionIntents length=%d, want %d: %#v", got, want, result.PendingSubmissionIntents)
+	}
+	for index, want := range []struct {
+		requestID string
+		phase     string
+	}{
+		{"delegate-" + strings.Repeat("p", 32), submissionPhasePrepared},
+		{"delegate-" + strings.Repeat("i", 32), submissionPhaseInFlight},
+		{"delegate-" + strings.Repeat("b", 32), submissionPhaseBlocked},
+	} {
+		got := result.PendingSubmissionIntents[index]
+		if got.RequestID != want.requestID || got.Phase != want.phase || got.Backend != "backend-"+want.phase || got.Origin == nil || got.Origin.Skill != "delegate:"+want.phase {
+			t.Fatalf("pendingSubmissionIntents[%d]=%#v, want request %q with durable context", index, got, want.requestID)
+		}
+		if got.CreatedAt.IsZero() {
+			t.Fatalf("pendingSubmissionIntents[%d].createdAt is zero", index)
+		}
+	}
 	if result.UnresolvedCleanupArtifactCount == nil || *result.UnresolvedCleanupArtifactCount != 2 {
 		t.Fatalf("unresolvedCleanupArtifactCount=%v, want 2", result.UnresolvedCleanupArtifactCount)
+	}
+}
+
+func TestSetupPendingSubmissionIntentsCap(t *testing.T) {
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < setupPendingSubmissionIntentLimit+1; index++ {
+		requestID := fmt.Sprintf("delegate-%032d", index)
+		intent := testSubmissionIntent(testSubmitParams(t, requestID, "prompt", nil), t.TempDir())
+		intent.Phase = submissionPhasePrepared
+		intent.CreatedAt = time.Date(2026, time.January, 1, 0, index, 0, 0, time.UTC)
+		if err := saveSubmissionIntent(stateDir, intent); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code=%d stderr=%q", code, stderr.String())
+	}
+	var result setupJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != setupPendingSubmissionIntentLimit+1 {
+		t.Fatalf("pendingSubmissionIntentCount=%v, want authoritative count %d", result.PendingSubmissionIntentCount, setupPendingSubmissionIntentLimit+1)
+	}
+	if got, want := len(result.PendingSubmissionIntents), setupPendingSubmissionIntentLimit; got != want {
+		t.Fatalf("returned intent summaries=%d, want cap %d", got, want)
+	}
+	if result.PendingSubmissionIntents[0].RequestID != "delegate-00000000000000000000000000000000" || result.PendingSubmissionIntents[len(result.PendingSubmissionIntents)-1].RequestID != "delegate-00000000000000000000000000000019" {
+		t.Fatalf("capped intents=%#v, want the %d oldest intents", result.PendingSubmissionIntents, setupPendingSubmissionIntentLimit)
 	}
 }
 

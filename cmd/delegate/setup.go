@@ -23,23 +23,37 @@ import (
 )
 
 type setupJSON struct {
-	Schema                            int           `json:"schema"`
-	Delegate                          string        `json:"delegate"`
-	Agentbus                          setupAgentbus `json:"agentbus"`
-	Config                            setupConfig   `json:"config"`
-	Skills                            []setupSkill  `json:"skills"`
-	StateRootWritable                 bool          `json:"stateRootWritable"`
-	AgentbusStateRoot                 string        `json:"agentbusStateRoot"`
-	AgentbusStateRootWritable         bool          `json:"agentbusStateRootWritable"`
-	AgentbusAutostartLockRoot         string        `json:"agentbusAutostartLockRoot"`
-	AgentbusAutostartLockRootWritable bool          `json:"agentbusAutostartLockRootWritable"`
-	AdmissionStrictContainment        bool          `json:"admissionStrictContainment"`
-	PendingSubmissionIntentCount      *int          `json:"pendingSubmissionIntentCount"`
-	UnresolvedCleanupArtifactCount    *int          `json:"unresolvedCleanupArtifactCount"`
-	DaemonReachable                   bool          `json:"daemonReachable"`
-	Ready                             bool          `json:"ready"`
-	Warnings                          []string      `json:"warnings,omitempty"`
+	Schema                            int                            `json:"schema"`
+	Delegate                          string                         `json:"delegate"`
+	Agentbus                          setupAgentbus                  `json:"agentbus"`
+	Config                            setupConfig                    `json:"config"`
+	Skills                            []setupSkill                   `json:"skills"`
+	StateRootWritable                 bool                           `json:"stateRootWritable"`
+	AgentbusStateRoot                 string                         `json:"agentbusStateRoot"`
+	AgentbusStateRootWritable         bool                           `json:"agentbusStateRootWritable"`
+	AgentbusAutostartLockRoot         string                         `json:"agentbusAutostartLockRoot"`
+	AgentbusAutostartLockRootWritable bool                           `json:"agentbusAutostartLockRootWritable"`
+	AdmissionStrictContainment        bool                           `json:"admissionStrictContainment"`
+	PendingSubmissionIntentCount      *int                           `json:"pendingSubmissionIntentCount"`
+	PendingSubmissionIntents          []setupPendingSubmissionIntent `json:"pendingSubmissionIntents"`
+	UnresolvedCleanupArtifactCount    *int                           `json:"unresolvedCleanupArtifactCount"`
+	DaemonReachable                   bool                           `json:"daemonReachable"`
+	Ready                             bool                           `json:"ready"`
+	Warnings                          []string                       `json:"warnings,omitempty"`
 }
+
+// setupPendingSubmissionIntent is the bounded recovery information setup
+// exposes for a durable pending submission intent. Its fields are copied from
+// the existing intent record; setup neither adds nor changes durable state.
+type setupPendingSubmissionIntent struct {
+	RequestID string          `json:"request_id"`
+	Phase     string          `json:"phase"`
+	CreatedAt time.Time       `json:"created_at"`
+	Backend   string          `json:"backend,omitempty"`
+	Origin    *envelopeOrigin `json:"origin,omitempty"`
+}
+
+const setupPendingSubmissionIntentLimit = 20
 
 type setupConfig struct {
 	Path        string                  `json:"path"`
@@ -141,7 +155,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	if versionAssessment.Warning != "" {
 		preflight.Warnings = append(preflight.Warnings, versionAssessment.Warning)
 	}
-	pendingSubmissionIntents, countWarnings := setupPendingSubmissionIntentCount(preflight.DelegateStateRoot)
+	pendingSubmissionIntentCount, pendingSubmissionIntents, countWarnings := setupPendingSubmissionIntents(preflight.DelegateStateRoot)
 	preflight.Warnings = append(preflight.Warnings, countWarnings...)
 	unresolvedCleanupArtifacts, countWarnings := setupUnresolvedCleanupArtifactCount(preflight.DelegateStateRoot)
 	preflight.Warnings = append(preflight.Warnings, countWarnings...)
@@ -190,7 +204,8 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 			AgentbusAutostartLockRoot:         preflight.AgentbusAutostartLockRoot,
 			AgentbusAutostartLockRootWritable: preflight.AgentbusAutostartLockRootWritable,
 			AdmissionStrictContainment:        hello.Capabilities["admission.strictContainment"],
-			PendingSubmissionIntentCount:      pendingSubmissionIntents,
+			PendingSubmissionIntentCount:      pendingSubmissionIntentCount,
+			PendingSubmissionIntents:          pendingSubmissionIntents,
 			UnresolvedCleanupArtifactCount:    unresolvedCleanupArtifacts,
 			DaemonReachable:                   true,
 			Ready:                             ready,
@@ -222,7 +237,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	if _, err := fmt.Fprintf(stdout, "agentbus discovery: found\nagentbus protocol: %d\ncapabilities: %s\nadmission.strictContainment: %t\n", hello.ProtocolVersion, capabilityStatus, hello.Capabilities["admission.strictContainment"]); err != nil {
 		return 0, err
 	}
-	if _, err := fmt.Fprintf(stdout, "agentbusStateRoot: %s\nagentbusStateRootWritable: %t\nagentbusAutostartLockRoot: %s\nagentbusAutostartLockRootWritable: %t\nstateRootWritable: %t\npendingSubmissionIntentCount: %s\nunresolvedCleanupArtifactCount: %s\ndaemonReachable: true\nready: %t\n", preflight.AgentbusStateRoot, preflight.AgentbusStateRootWritable, preflight.AgentbusAutostartLockRoot, preflight.AgentbusAutostartLockRootWritable, preflight.StateRootWritable, setupCountText(pendingSubmissionIntents), setupCountText(unresolvedCleanupArtifacts), ready); err != nil {
+	if _, err := fmt.Fprintf(stdout, "agentbusStateRoot: %s\nagentbusStateRootWritable: %t\nagentbusAutostartLockRoot: %s\nagentbusAutostartLockRootWritable: %t\nstateRootWritable: %t\npendingSubmissionIntentCount: %s\nunresolvedCleanupArtifactCount: %s\ndaemonReachable: true\nready: %t\n", preflight.AgentbusStateRoot, preflight.AgentbusStateRootWritable, preflight.AgentbusAutostartLockRoot, preflight.AgentbusAutostartLockRootWritable, preflight.StateRootWritable, setupCountText(pendingSubmissionIntentCount), setupCountText(unresolvedCleanupArtifacts), ready); err != nil {
 		return 0, err
 	}
 	for _, warning := range preflight.Warnings {
@@ -365,24 +380,43 @@ func setupStatePreflightWithAgentbusRoot(agentbusRoot string, agentbusErr error)
 	return result
 }
 
-// setupPendingSubmissionIntentCount returns a nil count (rendered as JSON null /
+// setupPendingSubmissionIntents returns a nil count (rendered as JSON null /
 // "uncounted") when the value could not be computed, so an orchestrator gating
-// on it cannot misread a "not counted" warning as a clean zero.
-func setupPendingSubmissionIntentCount(stateDir string) (*int, []string) {
+// on it cannot misread a "not counted" warning as a clean zero. The count is
+// authoritative; summaries are capped to keep setup preflight output bounded.
+func setupPendingSubmissionIntents(stateDir string) (*int, []setupPendingSubmissionIntent, []string) {
 	if stateDir == "" {
-		return nil, []string{"pending submission intents were not counted because delegate state root was not resolved"}
+		return nil, nil, []string{"pending submission intents were not counted because delegate state root was not resolved"}
 	}
 	intents, err := listSubmissionIntents(stateDir)
 	if err != nil {
-		return nil, []string{fmt.Sprintf("pending submission intents were not counted because %v", err)}
+		return nil, nil, []string{fmt.Sprintf("pending submission intents were not counted because %v", err)}
 	}
-	count := 0
+	pending := make([]submissionIntent, 0, len(intents))
 	for _, intent := range intents {
 		if submissionIntentPending(intent) {
-			count++
+			pending = append(pending, intent)
 		}
 	}
-	return &count, nil
+	sort.Slice(pending, func(i, j int) bool {
+		if pending[i].CreatedAt.Equal(pending[j].CreatedAt) {
+			return pending[i].RequestID < pending[j].RequestID
+		}
+		return pending[i].CreatedAt.Before(pending[j].CreatedAt)
+	})
+	count := len(pending)
+	limit := min(count, setupPendingSubmissionIntentLimit)
+	summaries := make([]setupPendingSubmissionIntent, 0, limit)
+	for _, intent := range pending[:limit] {
+		summaries = append(summaries, setupPendingSubmissionIntent{
+			RequestID: intent.RequestID,
+			Phase:     intent.Phase,
+			CreatedAt: intent.CreatedAt,
+			Backend:   intent.Params.TaskSpec.Backend,
+			Origin:    intent.Origin,
+		})
+	}
+	return &count, summaries, nil
 }
 
 // setupCountText renders a nil (uncounted) count distinctly from a real zero in

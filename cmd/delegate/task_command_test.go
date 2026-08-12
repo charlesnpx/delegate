@@ -251,8 +251,11 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	if result.AgentbusStateRoot == "" || result.AgentbusAutostartLockRoot == "" || !result.AgentbusAutostartLockRootWritable || !result.AdmissionStrictContainment || !result.Ready {
 		t.Fatalf("setup D8 fields = root:%q lock:%q lockWritable:%t strict:%t ready:%t", result.AgentbusStateRoot, result.AgentbusAutostartLockRoot, result.AgentbusAutostartLockRootWritable, result.AdmissionStrictContainment, result.Ready)
 	}
-	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 0 || result.UnresolvedCleanupArtifactCount == nil || *result.UnresolvedCleanupArtifactCount != 0 {
-		t.Fatalf("setup counts = pending:%v unresolved:%v, want zero", result.PendingSubmissionIntentCount, result.UnresolvedCleanupArtifactCount)
+	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 0 || len(result.PendingSubmissionIntents) != 0 || result.UnresolvedCleanupArtifactCount == nil || *result.UnresolvedCleanupArtifactCount != 0 {
+		t.Fatalf("setup pending=%v summaries=%#v unresolved=%v, want clean state", result.PendingSubmissionIntentCount, result.PendingSubmissionIntents, result.UnresolvedCleanupArtifactCount)
+	}
+	if result.PendingSubmissionIntents == nil {
+		t.Fatalf("pendingSubmissionIntents is null, want an empty JSON array for a clean state")
 	}
 	if len(result.Skills) != 28 {
 		t.Fatalf("skill statuses = %d, want 28: %#v", len(result.Skills), result.Skills)
