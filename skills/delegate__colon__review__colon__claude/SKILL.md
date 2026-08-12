@@ -23,7 +23,7 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
-Review commands never pass "--write" and intentionally run the backend read-only. A read-only review worker cannot create a build/temp directory, compile, or run tests, so the caller must execute runtime verification and gates.
+Review commands never pass "--write" and intentionally run the backend read-only. A read-only review worker cannot create a build/temp directory, compile, or run tests, so the caller must execute runtime verification and gates. The launch and terminal envelope's "backend_profile" reports the effective Agentbus sandbox mode as "read-only" or "workspace-write"; use it to route runtime gates.
 
 When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id, job record, contract stamps, and read-only profile.
 
@@ -49,7 +49,7 @@ Spawn the no-fork delegated review exactly through the CLI. Add "--base" or "--s
 delegate review --backend claude --origin delegate:review:claude --cwd "$PWD" --background --json
 ~~~
 
-Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "timeout", or "result_sha256" fields.
+Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "backend_profile", "timeout", or "result_sha256" fields.
 
 If submission is unresolved after Agentbus accepted or may have accepted the request, preserve the reported "request_id" and run only the exact recovery command "delegate task --recover-request <request_id> --json". Do not create a replacement request unless the user explicitly asks for a new logical review.
 

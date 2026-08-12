@@ -298,6 +298,50 @@ func TestLegacyTimeoutMetadataCannotSupplyTerminalEffectiveValue(t *testing.T) {
 	}
 }
 
+func TestMissingBackendProfileMetadataEmitsUnknown(t *testing.T) {
+	fake := &fakeAgentbusClient{
+		hello:  helloWithCapabilities(),
+		result: client.JobResult{JobID: "job_legacy_backend_profile", State: engine.StateCompleted},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID := "job_legacy_backend_profile"
+	dir, err := jobMetadataDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This is pre-fix metadata: it has no backend_profile key at all.
+	raw, err := json.Marshal(map[string]any{
+		"schema":       jobMetadataSchema,
+		"job_id":       jobID,
+		"kind":         taskKind,
+		"contractKind": contractKindShape,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, encodedStateFilename(jobID)), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"result", "--job", jobID, "--json"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("result code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatalf("result JSON=%q: %v", stdout.String(), err)
+	}
+	if want := (config.DimensionResolution{Source: "unknown"}); env.BackendProfile != want {
+		t.Fatalf("result backend_profile=%#v, want missing metadata reported as %#v", env.BackendProfile, want)
+	}
+}
+
 func TestSchemaLessTimeoutMetadataIsSanitizedWhenCleanupRewritesIt(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -1324,6 +1368,98 @@ func TestTaskReadOnlyHintStaysOnStderr(t *testing.T) {
 			}
 			if got := strings.Count(stderr.String(), readOnlyTaskHint); (got == 1) != tc.wantHint {
 				t.Fatalf("read-only hint count = %d, want present=%t; stderr=%q", got, tc.wantHint, stderr.String())
+			}
+		})
+	}
+}
+
+func TestTaskLaunchEnvelopeReportsEffectiveBackendProfile(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		flags []string
+		want  config.DimensionResolution
+	}{
+		{
+			name: "read_only_without_write",
+			want: config.DimensionResolution{Effective: backendProfileReadOnly, Source: "default"},
+		},
+		{
+			name:  "read_only_with_explicit_write_false",
+			flags: []string{"--write=false"},
+			want:  config.DimensionResolution{Effective: backendProfileReadOnly, Source: "flag"},
+		},
+		{
+			name:  "workspace_write_with_write",
+			flags: []string{"--write"},
+			want:  config.DimensionResolution{Effective: backendProfileWorkspaceWrite, Source: "flag"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+
+			args := append([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--background", "--json"}, tc.flags...)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+			}
+			var envelope LaunchEnvelope
+			if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+				t.Fatalf("launch JSON=%q: %v", stdout.String(), err)
+			}
+			if envelope.BackendProfile != tc.want {
+				t.Fatalf("launch backend_profile=%#v, want %#v", envelope.BackendProfile, tc.want)
+			}
+		})
+	}
+}
+
+func TestTaskTerminalEnvelopeReportsEffectiveBackendProfile(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		flags []string
+		want  config.DimensionResolution
+	}{
+		{
+			name: "read_only_without_write",
+			want: config.DimensionResolution{Effective: backendProfileReadOnly, Source: "default"},
+		},
+		{
+			name:  "workspace_write_with_write",
+			flags: []string{"--write"},
+			want:  config.DimensionResolution{Effective: backendProfileWorkspaceWrite, Source: "flag"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{
+				hello:        helloWithCapabilities(),
+				submitResult: client.JobSubmitResult{JobID: "job_profile", State: engine.StateQueued},
+				result:       client.JobResult{JobID: "job_profile", State: engine.StateCompleted},
+			}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+
+			args := append([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--background", "--json"}, tc.flags...)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("launch code = %d, stderr = %q", code, stderr.String())
+			}
+			var launch LaunchEnvelope
+			if err := json.Unmarshal(stdout.Bytes(), &launch); err != nil {
+				t.Fatalf("launch JSON=%q: %v", stdout.String(), err)
+			}
+			stdout.Reset()
+			stderr.Reset()
+			if code := run([]string{"result", "--job", launch.JobID, "--json"}, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("result code = %d, stderr = %q", code, stderr.String())
+			}
+			var envelope TerminalEnvelope
+			if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+				t.Fatalf("terminal JSON=%q: %v", stdout.String(), err)
+			}
+			if envelope.BackendProfile != tc.want {
+				t.Fatalf("terminal backend_profile=%#v, want %#v", envelope.BackendProfile, tc.want)
 			}
 		})
 	}

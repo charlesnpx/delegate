@@ -82,9 +82,9 @@ delegate task --backend codex --origin delegate:rescue:codex --cwd "$PWD" \
 
 The following are Agentbus v0.10.0 worker-sandbox contract rules. These rules are unchanged since v0.9.1; the v0.10.0 label marks the current contract version rather than a sandbox-policy change. Route work accordingly:
 
-- A `--write` task runs as `workspaceWrite` with only its job `--cwd` writable. Keep task outputs there; a write worker can build and test only when `GOCACHE` and `GOMODCACHE` also point under that cwd, because the usual Go cache locations are outside the worker's writable roots.
+- A `--write` task runs as `workspace-write` with only its job `--cwd` writable. Keep task outputs there; a write worker can build and test only when `GOCACHE` and `GOMODCACHE` also point under that cwd, because the usual Go cache locations are outside the worker's writable roots.
 - Write workers have no outbound network (`networkAccess: false`). Run `go get`, proxy-dependent `go mod tidy`, toolchain downloads, and other network-bound work in the orchestrator.
-- A task without `--write` and every review worker run read-only with no network. A read-only worker cannot create a temporary or build directory, so the caller must run compile, test, and other runtime gates for review verification.
+- A task without `--write` and every review worker run read-only with no network. A read-only worker cannot create a temporary or build directory, so the caller must run compile, test, and other runtime gates for review verification. Check the launch or terminal envelope's `backend_profile` before assigning those gates: its effective value is `read-only` or `workspace-write`, matching Agentbus's sandbox-mode vocabulary.
 - Approval policy is `never`, so approval requests are auto-declined. A denied worker write cannot be escalated; change the routing or stop the worker.
 - Writes in `.git` are commonly denied, including index locks. The orchestrator owns commits and other Git metadata changes.
 
@@ -135,7 +135,7 @@ Delegate resolves Agentbus state with the same rule for setup, launch, recovery,
 
 ## Envelope Reference
 
-Every envelope has `schema: 2`. `request_id` is Delegate's durable logical request identity; `deduplicated` is true when Agentbus accepted the same request earlier and returned the existing job. `result_sha256` is Agentbus's SHA-256 over the raw final assistant message bytes when a result exists. When captured, the additive `origin` block carries `skill`, `parent_client`, `parent_session_id`, `parent_agent`, and `depth`.
+Every envelope has `schema: 2`. `request_id` is Delegate's durable logical request identity; `deduplicated` is true when Agentbus accepted the same request earlier and returned the existing job. `result_sha256` is Agentbus's SHA-256 over the raw final assistant message bytes when a result exists. `backend_profile` reports the effective Agentbus sandbox mode as `read-only` or `workspace-write`, with `source: "default"` when `--write` was absent and `source: "flag"` when an explicit `--write` flag selected either value (including `--write=false`). It intentionally has no `requested` value because the profile is derived directly from `--write`, not selected from an independent profile option. Recovery persists `TaskSpec.Write`, but not whether a false value came from an omitted flag or `--write=false`; recovered read-only envelopes therefore report `{"effective":"read-only","source":"unknown"}` rather than inventing an attribution. Likewise, `delegate result` for legacy metadata with no `backend_profile` reports `{"source":"unknown"}` rather than fabricating a profile. When captured, the additive `origin` block carries `skill`, `parent_client`, `parent_session_id`, `parent_agent`, and `depth`.
 
 Launch envelopes are returned by a non-waiting task:
 
@@ -146,6 +146,10 @@ Launch envelopes are returned by a non-waiting task:
   "request_id": "delegate-0123456789abcdef0123456789abcdef",
   "status": "queued",
   "deduplicated": false,
+  "backend_profile": {
+    "effective": "read-only",
+    "source": "default"
+  },
   "timeout": {
     "effective": "daemon-resolved-duration",
     "source": "daemon"
@@ -170,6 +174,10 @@ The terminal envelope shape:
   "late_finalization": false,
   "agentbus_warnings": [],
   "local_artifacts_retained": false,
+  "backend_profile": {
+    "effective": "workspace-write",
+    "source": "flag"
+  },
   "timeout": {
     "requested": "45m0s",
     "effective": "45m0s",

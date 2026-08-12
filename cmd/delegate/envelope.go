@@ -23,16 +23,17 @@ const (
 
 // LaunchEnvelope is the schema returned when delegate has launched a job.
 type LaunchEnvelope struct {
-	Schema       int                        `json:"schema"`
-	RequestID    string                     `json:"request_id,omitempty"`
-	JobID        string                     `json:"job_id"`
-	Status       string                     `json:"status"`
-	Deduplicated bool                       `json:"deduplicated"`
-	Model        config.DimensionResolution `json:"model"`
-	Effort       config.DimensionResolution `json:"effort"`
-	Timeout      config.DimensionResolution `json:"timeout"`
-	ResultSHA256 *string                    `json:"result_sha256"`
-	Origin       *envelopeOrigin            `json:"origin,omitempty"`
+	Schema         int                        `json:"schema"`
+	RequestID      string                     `json:"request_id,omitempty"`
+	JobID          string                     `json:"job_id"`
+	Status         string                     `json:"status"`
+	Deduplicated   bool                       `json:"deduplicated"`
+	Model          config.DimensionResolution `json:"model"`
+	Effort         config.DimensionResolution `json:"effort"`
+	BackendProfile config.DimensionResolution `json:"backend_profile"`
+	Timeout        config.DimensionResolution `json:"timeout"`
+	ResultSHA256   *string                    `json:"result_sha256"`
+	Origin         *envelopeOrigin            `json:"origin,omitempty"`
 }
 
 // TerminalEnvelope is the schema returned by delegate result and task --wait.
@@ -57,6 +58,7 @@ type TerminalEnvelope struct {
 	BackendError                   string                     `json:"backend_error,omitempty"`
 	Model                          config.DimensionResolution `json:"model"`
 	Effort                         config.DimensionResolution `json:"effort"`
+	BackendProfile                 config.DimensionResolution `json:"backend_profile"`
 	Timeout                        config.DimensionResolution `json:"timeout"`
 	ModelReported                  string                     `json:"model_reported,omitempty"`
 	ModelReportedUnavailableReason string                     `json:"model_reported_unavailable_reason,omitempty"`
@@ -71,6 +73,7 @@ type TerminalEnvelope struct {
 
 type terminalEnvelopeOptions struct {
 	ModelEffort            config.ModelEffortResolution
+	BackendProfile         config.DimensionResolution
 	Timeout                config.DimensionResolution
 	ModelReported          string
 	ModelsReportedCapable  bool
@@ -94,11 +97,12 @@ type terminalEnvelopeOptions struct {
 }
 
 type launchEnvelopeOptions struct {
-	ModelEffort  config.ModelEffortResolution
-	Timeout      config.DimensionResolution
-	Origin       envelopeOrigin
-	RequestID    string
-	Deduplicated bool
+	ModelEffort    config.ModelEffortResolution
+	BackendProfile config.DimensionResolution
+	Timeout        config.DimensionResolution
+	Origin         envelopeOrigin
+	RequestID      string
+	Deduplicated   bool
 }
 
 func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
@@ -124,6 +128,7 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		BackendError                   string                     `json:"backend_error,omitempty"`
 		Model                          config.DimensionResolution `json:"model"`
 		Effort                         config.DimensionResolution `json:"effort"`
+		BackendProfile                 config.DimensionResolution `json:"backend_profile"`
 		Timeout                        config.DimensionResolution `json:"timeout"`
 		ModelReported                  string                     `json:"model_reported,omitempty"`
 		ModelReportedUnavailableReason string                     `json:"model_reported_unavailable_reason,omitempty"`
@@ -156,6 +161,7 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		BackendError:                   e.BackendError,
 		Model:                          e.Model,
 		Effort:                         e.Effort,
+		BackendProfile:                 e.BackendProfile,
 		Timeout:                        e.Timeout,
 		ModelReported:                  e.ModelReported,
 		ModelReportedUnavailableReason: e.ModelReportedUnavailableReason,
@@ -204,15 +210,16 @@ func newLaunchEnvelopeWithOrigin(jobID string, state engine.JobState, origin env
 func newLaunchEnvelopeWithOptions(jobID string, state engine.JobState, option launchEnvelopeOptions) (LaunchEnvelope, error) {
 	modelEffort := normalizedModelEffort(option.ModelEffort)
 	env := LaunchEnvelope{
-		Schema:       envelopeSchema,
-		RequestID:    option.RequestID,
-		JobID:        jobID,
-		Status:       launchStatus(state),
-		Deduplicated: option.Deduplicated,
-		Model:        modelEffort.Model,
-		Effort:       modelEffort.Effort,
-		Timeout:      normalizedTimeout(option.Timeout),
-		Origin:       envelopeOriginPointer(option.Origin),
+		Schema:         envelopeSchema,
+		RequestID:      option.RequestID,
+		JobID:          jobID,
+		Status:         launchStatus(state),
+		Deduplicated:   option.Deduplicated,
+		Model:          modelEffort.Model,
+		Effort:         modelEffort.Effort,
+		BackendProfile: normalizedBackendProfile(option.BackendProfile),
+		Timeout:        normalizedTimeout(option.Timeout),
+		Origin:         envelopeOriginPointer(option.Origin),
 	}
 	return env, nil
 }
@@ -243,6 +250,7 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 		BackendError:                   backendError,
 		Model:                          modelEffort.Model,
 		Effort:                         modelEffort.Effort,
+		BackendProfile:                 normalizedBackendProfile(option.BackendProfile),
 		Timeout:                        normalizedTimeout(option.Timeout),
 		ModelReported:                  option.ModelReported,
 		ModelReportedUnavailableReason: modelReportedUnavailableReason(option.ModelsReportedCapable, option.ModelReported),
@@ -324,6 +332,16 @@ func normalizedModelEffort(values ...config.ModelEffortResolution) config.ModelE
 }
 
 func normalizedTimeout(resolution config.DimensionResolution) config.DimensionResolution {
+	if resolution.Source == "" {
+		resolution.Source = "unknown"
+	}
+	return resolution
+}
+
+// normalizedBackendProfile preserves a missing profile as explicitly unknown.
+// Terminal envelopes can be reconstructed after a context loss, so an absent
+// local metadata record must not be mistaken for the default read-only profile.
+func normalizedBackendProfile(resolution config.DimensionResolution) config.DimensionResolution {
 	if resolution.Source == "" {
 		resolution.Source = "unknown"
 	}
