@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
@@ -43,17 +44,27 @@ type setupJSON struct {
 }
 
 // setupPendingSubmissionIntent is the bounded recovery information setup
-// exposes for a durable pending submission intent. Its fields are copied from
-// the existing intent record; setup neither adds nor changes durable state.
+// exposes for a durable pending submission intent. Setup projects only its
+// request ID, phase, creation time, and bounded backend and origin labels; it
+// neither adds nor changes durable state.
 type setupPendingSubmissionIntent struct {
-	RequestID string          `json:"request_id"`
-	Phase     string          `json:"phase"`
-	CreatedAt time.Time       `json:"created_at"`
-	Backend   string          `json:"backend,omitempty"`
-	Origin    *envelopeOrigin `json:"origin,omitempty"`
+	RequestID string                    `json:"request_id"`
+	Phase     string                    `json:"phase"`
+	CreatedAt time.Time                 `json:"created_at"`
+	Backend   string                    `json:"backend,omitempty"`
+	Origin    *setupIntentOriginSummary `json:"origin,omitempty"`
 }
 
-const setupPendingSubmissionIntentLimit = 20
+// setupIntentOriginSummary contains only the coarse origin label needed to recognize
+// a logical task in setup output.
+type setupIntentOriginSummary struct {
+	Skill string `json:"skill,omitempty"`
+}
+
+const (
+	setupPendingSubmissionIntentLimit      = 20
+	setupPendingSubmissionIntentLabelLimit = 80
+)
 
 type setupConfig struct {
 	Path        string                  `json:"path"`
@@ -352,14 +363,9 @@ func setupStatePreflightWithAgentbusRoot(agentbusRoot string, agentbusErr error)
 	delegateRoot, err := handoff.ResolveStateDir(handoff.StateConfig{})
 	if err == nil {
 		result.DelegateStateRoot = delegateRoot
-		// EnsureStateDir carries the precise cause when the directory exists but
-		// is not usable (e.g. "mode = 755, want 700"). Surface it instead of
-		// discarding it and collapsing every cause into a generic "not writable".
-		if ensureErr := handoff.EnsureStateDir(delegateRoot); ensureErr != nil {
-			result.StateRootReason = ensureErr.Error()
-			result.Warnings = append(result.Warnings, fmt.Sprintf("delegate state root is not usable: %v", ensureErr))
-		} else {
-			result.StateRootWritable = directoryWritable(delegateRoot)
+		result.StateRootWritable, result.StateRootReason = setupDelegateStateRootWritable(delegateRoot)
+		if result.StateRootReason != "" {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("delegate state root is not usable: %s", result.StateRootReason))
 		}
 	} else {
 		result.StateRootReason = err.Error()
@@ -369,14 +375,14 @@ func setupStatePreflightWithAgentbusRoot(agentbusRoot string, agentbusErr error)
 		return result
 	}
 	result.AgentbusStateRoot = agentbusRoot
-	result.AgentbusStateRootWritable = directoryWritable(agentbusRoot)
+	result.AgentbusStateRootWritable = directoryMayBeWritableByMode(agentbusRoot)
 	lockRoot, err := resolveAgentbusAutostartLockRoot()
 	if err != nil {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus autostart lock root was not checked because %v", err))
 		return result
 	}
 	result.AgentbusAutostartLockRoot = lockRoot
-	result.AgentbusAutostartLockRootWritable = directoryWritable(lockRoot)
+	result.AgentbusAutostartLockRootWritable = directoryMayBeWritableByMode(lockRoot)
 	return result
 }
 
@@ -388,7 +394,7 @@ func setupPendingSubmissionIntents(stateDir string) (*int, []setupPendingSubmiss
 	if stateDir == "" {
 		return nil, nil, []string{"pending submission intents were not counted because delegate state root was not resolved"}
 	}
-	intents, err := listSubmissionIntents(stateDir)
+	intents, err := listSetupSubmissionIntents(stateDir)
 	if err != nil {
 		return nil, nil, []string{fmt.Sprintf("pending submission intents were not counted because %v", err)}
 	}
@@ -412,8 +418,8 @@ func setupPendingSubmissionIntents(stateDir string) (*int, []setupPendingSubmiss
 			RequestID: intent.RequestID,
 			Phase:     intent.Phase,
 			CreatedAt: intent.CreatedAt,
-			Backend:   intent.Params.TaskSpec.Backend,
-			Origin:    intent.Origin,
+			Backend:   setupBoundedIntentLabel(intent.Params.TaskSpec.Backend),
+			Origin:    setupIntentOrigin(intent.Origin),
 		})
 	}
 	return &count, summaries, nil
@@ -441,7 +447,7 @@ func setupUnresolvedCleanupArtifactCount(stateDir string) (*int, []string) {
 	if stateDir == "" {
 		return nil, []string{"unresolved cleanup artifacts were not counted because delegate state root was not resolved"}
 	}
-	metas, err := listJobMetadata(stateDir)
+	metas, err := listSetupJobMetadata(stateDir)
 	if err != nil {
 		return nil, []string{fmt.Sprintf("unresolved cleanup artifacts were not counted because %v", err)}
 	}
@@ -464,19 +470,21 @@ func retainedArtifactExists(path string) bool {
 	if path == "" {
 		return false
 	}
-	_, err := os.Stat(path)
+	_, err := os.Lstat(path)
 	return err == nil || !errors.Is(err, os.ErrNotExist)
 }
 
-func listJobMetadata(stateDir string) ([]jobMetadata, error) {
-	dir, err := jobMetadataDir(stateDir)
+func listSetupJobMetadata(stateDir string) ([]jobMetadata, error) {
+	dir, err := setupJobMetadataDir(stateDir)
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
+	if err := setupReadableDirectory(dir); errors.Is(err, os.ErrNotExist) {
 		return nil, nil
+	} else if err != nil {
+		return nil, err
 	}
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -489,7 +497,7 @@ func listJobMetadata(stateDir string) ([]jobMetadata, error) {
 		if !ok {
 			continue
 		}
-		meta, found, err := loadJobMetadata(stateDir, jobID)
+		meta, found, err := loadSetupJobMetadata(dir, jobID)
 		if err != nil {
 			return nil, err
 		}
@@ -500,28 +508,220 @@ func listJobMetadata(stateDir string) ([]jobMetadata, error) {
 	return metas, nil
 }
 
-// directoryWritable proves both create and write access without leaving a
-// temporary file behind. The state directory itself is intentionally retained: a
-// successful preflight is allowed to create the directory it reports usable.
-func directoryWritable(path string) bool {
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		return false
+func setupDelegateStateRootWritable(path string) (bool, string) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if directoryMayBeWritableByMode(path) {
+			return true, ""
+		}
+		return false, fmt.Sprintf("state dir %q is absent and its nearest existing ancestor has no write and execute mode", path)
 	}
-	file, err := os.CreateTemp(path, ".delegate-setup-*")
 	if err != nil {
-		return false
+		return false, err.Error()
 	}
-	name := file.Name()
-	defer os.Remove(name)
-	if _, err := file.WriteString("setup preflight\n"); err != nil {
-		_ = file.Close()
-		return false
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Sprintf("state dir %q must not be a symlink", path)
 	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return false
+	if !info.IsDir() {
+		return false, fmt.Sprintf("state dir %q is not a directory", path)
 	}
-	return file.Close() == nil
+	if got := info.Mode().Perm(); got != 0o700 {
+		return false, fmt.Sprintf("state dir %q mode = %o, want %o", path, got, 0o700)
+	}
+	if !directoryMayBeWritableByMode(path) {
+		return false, fmt.Sprintf("state dir %q has no write and execute mode", path)
+	}
+	return true, ""
+}
+
+// directoryMayBeWritableByMode observes only directory mode bits. For a
+// missing path it observes the nearest existing ancestor's mode, which is the
+// information available without creating the path or writing a probe file.
+// It does not establish that a future create or write will succeed.
+func directoryMayBeWritableByMode(path string) bool {
+	for current := filepath.Clean(path); ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				return false
+			}
+			return modeHasWriteAndExecute(info.Mode().Perm())
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+	}
+}
+
+func modeHasWriteAndExecute(mode os.FileMode) bool {
+	return mode&0o300 == 0o300
+}
+
+func setupSubmissionIntentDir(stateDir string) (string, error) {
+	dir, err := handoff.ResolveStateDir(handoff.StateConfig{StateDir: stateDir})
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "submissions"), nil
+}
+
+func setupJobMetadataDir(stateDir string) (string, error) {
+	dir, err := handoff.ResolveStateDir(handoff.StateConfig{StateDir: stateDir})
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "jobs"), nil
+}
+
+func setupReadableDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("setup state directory %q must not be a symlink", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("setup state path %q is not a directory", path)
+	}
+	return nil
+}
+
+func listSetupSubmissionIntents(stateDir string) ([]submissionIntent, error) {
+	dir, err := setupSubmissionIntentDir(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := setupReadableDirectory(dir); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var intents []submissionIntent
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		requestID, ok := decodeStateFilename(entry.Name())
+		if !ok {
+			continue
+		}
+		intent, found, err := loadSetupSubmissionIntent(dir, requestID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			intents = append(intents, intent)
+		}
+	}
+	return intents, nil
+}
+
+func loadSetupSubmissionIntent(dir, requestID string) (submissionIntent, bool, error) {
+	if err := validateRequestID(requestID); err != nil {
+		return submissionIntent{}, false, err
+	}
+	path := filepath.Join(dir, encodedStateFilename(requestID))
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return submissionIntent{}, false, nil
+	}
+	if err != nil {
+		return submissionIntent{}, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return submissionIntent{}, false, fmt.Errorf("submission intent %q is not a regular file", requestID)
+	}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return submissionIntent{}, false, nil
+	}
+	if err != nil {
+		return submissionIntent{}, false, err
+	}
+	var intent submissionIntent
+	if err := json.Unmarshal(raw, &intent); err != nil {
+		return submissionIntent{}, false, err
+	}
+	if intent.Schema != submissionIntentSchema {
+		return submissionIntent{}, false, fmt.Errorf("submission intent %q has unsupported schema %d", requestID, intent.Schema)
+	}
+	if intent.RequestID != requestID {
+		return submissionIntent{}, false, fmt.Errorf("submission intent %q has request_id %q", requestID, intent.RequestID)
+	}
+	if intent.Params.RequestID != intent.RequestID {
+		return submissionIntent{}, false, fmt.Errorf("submission intent %q has params request_id %q", requestID, intent.Params.RequestID)
+	}
+	if intent.Params.WorkspaceKey != intent.WorkspaceKey {
+		return submissionIntent{}, false, fmt.Errorf("submission intent %q has params workspace_key %q", requestID, intent.Params.WorkspaceKey)
+	}
+	if err := validateSubmissionPhase(intent.Phase); err != nil {
+		return submissionIntent{}, false, err
+	}
+	return intent, true, nil
+}
+
+func loadSetupJobMetadata(dir, jobID string) (jobMetadata, bool, error) {
+	if err := validateDelegateJobID(jobID); err != nil {
+		return jobMetadata{}, false, err
+	}
+	path := filepath.Join(dir, encodedStateFilename(jobID))
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return jobMetadata{}, false, nil
+	}
+	if err != nil {
+		return jobMetadata{}, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return jobMetadata{}, false, fmt.Errorf("delegate job metadata %q is not a regular file", jobID)
+	}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return jobMetadata{}, false, nil
+	}
+	if err != nil {
+		return jobMetadata{}, false, err
+	}
+	var meta jobMetadata
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return jobMetadata{}, false, err
+	}
+	if meta.JobID != jobID {
+		return jobMetadata{}, false, fmt.Errorf("delegate job metadata %q has job_id %q", jobID, meta.JobID)
+	}
+	return meta, true, nil
+}
+
+func setupIntentOrigin(origin *envelopeOrigin) *setupIntentOriginSummary {
+	if origin == nil {
+		return nil
+	}
+	label := setupBoundedIntentLabel(origin.Skill)
+	if label == "" {
+		return nil
+	}
+	return &setupIntentOriginSummary{Skill: label}
+}
+
+func setupBoundedIntentLabel(value string) string {
+	value = strings.ToValidUTF8(value, "")
+	if len(value) <= setupPendingSubmissionIntentLabelLimit {
+		return value
+	}
+	end := setupPendingSubmissionIntentLabelLimit
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end]
 }
 
 func installedSkills() ([]setupSkill, error) {

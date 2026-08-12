@@ -47,6 +47,38 @@ func TestSetupStatePreflightRejectsRelativeAgentbusStateRoot(t *testing.T) {
 	}
 }
 
+func TestSetupDoesNotCreateMissingStateDirectories(t *testing.T) {
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	stateHome := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	t.Setenv("HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code=%d stderr=%q", code, stderr.String())
+	}
+	for _, path := range []string{
+		filepath.Join(stateHome, "delegate"),
+		filepath.Join(stateHome, "agentbus"),
+		filepath.Join(cacheHome, "agentbus", "start-locks"),
+	} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("setup created state path %q: %v", path, err)
+		}
+	}
+	var result setupJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 0 || result.PendingSubmissionIntents == nil || len(result.PendingSubmissionIntents) != 0 {
+		t.Fatalf("missing state pending output = count:%v intents:%#v, want zero and empty array", result.PendingSubmissionIntentCount, result.PendingSubmissionIntents)
+	}
+}
+
 func TestSetupJSONReportsPendingSubmissionIntentsAndCounts(t *testing.T) {
 	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
 	defer restore()
@@ -61,8 +93,14 @@ func TestSetupJSONReportsPendingSubmissionIntentsAndCounts(t *testing.T) {
 		intent := testSubmissionIntent(testSubmitParams(t, requestID, phase+" prompt", nil), t.TempDir())
 		intent.Phase = phase
 		intent.CreatedAt = time.Date(2026, time.January, 1, 0, index, 0, 0, time.UTC)
-		intent.Params.TaskSpec.Backend = "backend-" + phase
-		intent.Origin = &envelopeOrigin{Skill: "delegate:" + phase}
+		intent.Params.TaskSpec.Backend = strings.Repeat(string(phase[0]), setupPendingSubmissionIntentLabelLimit+1)
+		intent.Origin = &envelopeOrigin{
+			Skill:           "delegate:" + strings.Repeat(string(phase[0]), setupPendingSubmissionIntentLabelLimit+1),
+			ParentClient:    strings.Repeat("client-", 40),
+			ParentSessionID: "private-session-id",
+			ParentAgent:     "private-parent-agent",
+			Depth:           "99",
+		}
 		if err := saveSubmissionIntent(stateDir, intent); err != nil {
 			t.Fatal(err)
 		}
@@ -136,8 +174,12 @@ func TestSetupJSONReportsPendingSubmissionIntentsAndCounts(t *testing.T) {
 		{"delegate-" + strings.Repeat("b", 32), submissionPhaseBlocked},
 	} {
 		got := result.PendingSubmissionIntents[index]
-		if got.RequestID != want.requestID || got.Phase != want.phase || got.Backend != "backend-"+want.phase || got.Origin == nil || got.Origin.Skill != "delegate:"+want.phase {
+		wantLabel := strings.Repeat(string(want.phase[0]), setupPendingSubmissionIntentLabelLimit)
+		if got.RequestID != want.requestID || got.Phase != want.phase || got.Backend != wantLabel || got.Origin == nil || got.Origin.Skill != "delegate:"+wantLabel[:setupPendingSubmissionIntentLabelLimit-len("delegate:")] {
 			t.Fatalf("pendingSubmissionIntents[%d]=%#v, want request %q with durable context", index, got, want.requestID)
+		}
+		if strings.Contains(stdout.String(), "parent_session_id") || strings.Contains(stdout.String(), "parent_agent") || strings.Contains(stdout.String(), "private-session-id") || strings.Contains(stdout.String(), "private-parent-agent") || strings.Contains(stdout.String(), "client-") || strings.Contains(stdout.String(), "99") {
+			t.Fatalf("setup exposed unapproved origin fields: %s", stdout.String())
 		}
 		if got.CreatedAt.IsZero() {
 			t.Fatalf("pendingSubmissionIntents[%d].createdAt is zero", index)
