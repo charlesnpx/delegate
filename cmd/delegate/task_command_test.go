@@ -796,6 +796,8 @@ func TestTaskWaitDelegateReportValidationAndCorrection(t *testing.T) {
 		wantStatus   engine.ContractStatus
 		wantRetry    bool
 		wantAttempts int
+		wantState    engine.JobState
+		wantSkip     reportRetrySkipReason
 	}{
 		{
 			name:   "compliant_no_resubmit",
@@ -807,6 +809,7 @@ func TestTaskWaitDelegateReportValidationAndCorrection(t *testing.T) {
 			wantSubmits:  1,
 			wantStatus:   engine.ContractCompliant,
 			wantAttempts: 1,
+			wantState:    engine.StateCompleted,
 		},
 		{
 			name:   "noncompliant_one_report_only_resubmit",
@@ -820,6 +823,22 @@ func TestTaskWaitDelegateReportValidationAndCorrection(t *testing.T) {
 			wantStatus:   engine.ContractRetried,
 			wantRetry:    true,
 			wantAttempts: 2,
+			wantState:    engine.StateCompleted,
+		},
+		{
+			name:   "correction exhausted",
+			jobIDs: []string{"job_report_1", "job_report_2"},
+			results: map[string]client.JobResult{
+				"job_report_1": reportJobResult("job_report_1", badReport),
+				"job_report_2": reportJobResult("job_report_2", badReport),
+			},
+			wantJobID:    "job_report_2",
+			wantSubmits:  2,
+			wantStatus:   engine.ContractNoncompliant,
+			wantRetry:    true,
+			wantAttempts: 2,
+			wantState:    engine.StateCompletedNoncompliant,
+			wantSkip:     reportRetrySkipAttemptedAndExhausted,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -830,8 +849,8 @@ func TestTaskWaitDelegateReportValidationAndCorrection(t *testing.T) {
 
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--wait", "--json"}, nil, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+			if want := engine.ExitCodeForState(tc.wantState); code != want {
+				t.Fatalf("task code = %d, stderr = %q, want %d", code, stderr.String(), want)
 			}
 			if len(fake.submits) != tc.wantSubmits {
 				t.Fatalf("JobSubmit calls = %d, want %d", len(fake.submits), tc.wantSubmits)
@@ -849,11 +868,18 @@ func TestTaskWaitDelegateReportValidationAndCorrection(t *testing.T) {
 			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
 				t.Fatalf("terminal JSON invalid: %v; raw=%q", err, stdout.String())
 			}
-			if env.JobID != tc.wantJobID || env.Status != engine.StateCompleted {
-				t.Fatalf("terminal envelope job/status = %s/%s, want %s/%s", env.JobID, env.Status, tc.wantJobID, engine.StateCompleted)
+			if env.JobID != tc.wantJobID || env.Status != tc.wantState {
+				t.Fatalf("terminal envelope job/status = %s/%s, want %s/%s", env.JobID, env.Status, tc.wantJobID, tc.wantState)
 			}
 			if env.Contract.Status != tc.wantStatus || env.Contract.RetryUsed != tc.wantRetry || env.Contract.Attempts != tc.wantAttempts {
 				t.Fatalf("contract = %#v, want status=%s retry=%t attempts=%d", env.Contract, tc.wantStatus, tc.wantRetry, tc.wantAttempts)
+			}
+			gotSkip, found := terminalEnvelopeContractField(t, stdout.Bytes(), "retrySkipReason")
+			if tc.wantSkip == "" && found {
+				t.Fatalf("successful report correction contract unexpectedly contains retrySkipReason: %q", stdout.String())
+			}
+			if tc.wantSkip != "" && (!found || gotSkip != string(tc.wantSkip)) {
+				t.Fatalf("contract retrySkipReason=%q (found=%t), want %q", gotSkip, found, tc.wantSkip)
 			}
 
 			if tc.wantSubmits == 2 {
@@ -923,9 +949,89 @@ func TestTaskWaitCorrectionFailureFallsBackToOriginalResult(t *testing.T) {
 	if env.CleanupDisposition != cleanupDispositionVerifiedAbsent {
 		t.Fatalf("cleanup disposition = %q, want original %q", env.CleanupDisposition, cleanupDispositionVerifiedAbsent)
 	}
+	if got, found := terminalEnvelopeContractField(t, stdout.Bytes(), "retrySkipReason"); !found || got != string(reportRetrySkipAttemptedAndExhausted) {
+		t.Fatalf("contract retrySkipReason = %q (found=%t), want %q", got, found, reportRetrySkipAttemptedAndExhausted)
+	}
 	if !strings.Contains(stderr.String(), "warning: delegate-report correction job_report_2 for job_report_1 did not produce an authoritative result body; using original terminal result") {
 		t.Fatalf("stderr = %q, want correction fallback warning", stderr.String())
 	}
+}
+
+func TestTerminalEnvelopeReportsReportRetrySkipReason(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		result     client.JobResult
+		wantCode   int
+		wantReason reportRetrySkipReason
+	}{
+		{
+			name:       "disabled by no-contract flag",
+			args:       []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--no-contract", "--wait", "--json"},
+			result:     reportJobResult("job_fake", compliantReport()),
+			wantReason: reportRetrySkipDisabledByNoContractFlag,
+		},
+		{
+			name:       "no report to revalidate",
+			args:       []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--wait", "--json"},
+			result:     client.JobResult{JobID: "job_fake", State: engine.StateCompleted},
+			wantReason: reportRetrySkipNoReportToRevalidate,
+		},
+		{
+			name:       "terminal state not correctable",
+			args:       []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--wait", "--json"},
+			result:     client.JobResult{JobID: "job_fake", State: engine.StateFailed},
+			wantCode:   engine.ExitCodeForState(engine.StateFailed),
+			wantReason: reportRetrySkipTerminalState,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities(), result: tc.result}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, nil, &stdout, &stderr); code != tc.wantCode {
+				t.Fatalf("task code=%d stderr=%q stdout=%q, want %d", code, stderr.String(), stdout.String(), tc.wantCode)
+			}
+			if got, found := terminalEnvelopeContractField(t, stdout.Bytes(), "retrySkipReason"); !found || got != string(tc.wantReason) {
+				t.Fatalf("contract retrySkipReason=%q (found=%t), want %q", got, found, tc.wantReason)
+			}
+		})
+	}
+
+	t.Run("unknown without local report metadata", func(t *testing.T) {
+		fake := &fakeAgentbusClient{hello: helloWithCapabilities(), result: reportJobResult("job_unmanaged", compliantReport())}
+		restore := stubAgentbusGlobals(t, fake)
+		defer restore()
+
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"result", "--job", "job_unmanaged", "--json"}, nil, &stdout, &stderr); code != 0 {
+			t.Fatalf("result code=%d stderr=%q stdout=%q, want 0", code, stderr.String(), stdout.String())
+		}
+		if got, found := terminalEnvelopeContractField(t, stdout.Bytes(), "retrySkipReason"); !found || got != string(reportRetrySkipUnknown) {
+			t.Fatalf("contract retrySkipReason=%q (found=%t), want %q", got, found, reportRetrySkipUnknown)
+		}
+	})
+}
+
+func terminalEnvelopeContractField(t *testing.T, raw []byte, name string) (string, bool) {
+	t.Helper()
+	var wire struct {
+		Contract map[string]json.RawMessage `json:"contract"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &wire); err != nil {
+		t.Fatal(err)
+	}
+	value, found := wire.Contract[name]
+	if !found {
+		return "", false
+	}
+	var decoded string
+	if err := json.Unmarshal(value, &decoded); err != nil {
+		t.Fatalf("contract.%s: %v", name, err)
+	}
+	return decoded, true
 }
 
 func TestTaskSubmitFailurePreservesIntentAndHandoffForRecovery(t *testing.T) {

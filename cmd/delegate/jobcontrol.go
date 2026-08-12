@@ -291,14 +291,18 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
 	}
 	var correctionWarnings []string
-	terminalJob, c, hello, correctionWarnings, err = maybeCorrectDelegateReport(ctx, c, hello, "", terminalJob, cleanupWarnings)
+	var retrySkipReason reportRetrySkipReason
+	terminalJob, c, hello, retrySkipReason, correctionWarnings, err = maybeCorrectDelegateReport(ctx, c, hello, "", terminalJob, cleanupWarnings)
 	if err != nil {
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
 	}
 	if err := writeWarnings(stderr, correctionWarnings); err != nil {
 		return 0, err
 	}
-	env, err := terminalEnvelopeFromJobResultWithOptions("", terminalJob.result, terminalJob.envelopeOptions(c, terminalEnvelopeOptions{ModelsReportedCapable: hello.Capabilities["models.reported"]}))
+	env, err := terminalEnvelopeFromJobResultWithOptions("", terminalJob.result, terminalJob.envelopeOptions(c, terminalEnvelopeOptions{
+		ModelsReportedCapable: hello.Capabilities["models.reported"],
+		RetrySkipReason:       retrySkipReason,
+	}))
 	if err != nil {
 		return 0, err
 	}
