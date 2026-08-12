@@ -19,6 +19,7 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/delegate/internal/config"
 	"github.com/charlesnpx/delegate/internal/handoff"
 	"github.com/charlesnpx/delegate/internal/policy"
 )
@@ -74,6 +75,29 @@ func TestSubmissionIntentPhaseSequenceModeAndPayloadRemoval(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("intent mode=%o, want 600", got)
+	}
+}
+
+func TestTimeoutCapturingClientRetainsDaemonSubmissionResolution(t *testing.T) {
+	server := startProtocolV2FakeServer(t)
+	server.setSubmitTimeout(map[string]any{
+		"requested": int64(120 * time.Minute / time.Millisecond),
+		"effective": int64(90 * time.Minute / time.Millisecond),
+		"source":    "client",
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	c, err := newTimeoutCapturingClient(ctx, client.Options{StateRoot: server.root, DisableAutoStart: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	submitted, err := c.JobSubmit(ctx, client.JobSubmitParams{TaskSpec: client.TaskSpec{Backend: "codex", Prompt: "retain timeout"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := timeoutResolutionForSubmission(120*time.Minute, true, submitted, c), (config.DimensionResolution{Requested: "2h0m0s", Effective: "1h30m0s", Source: "flag"}); got != want {
+		t.Fatalf("submission timeout=%#v, want retained daemon resolution %#v", got, want)
 	}
 }
 
@@ -1372,6 +1396,7 @@ type protocolV2FakeServer struct {
 	closedFirstSubmitResponse      bool
 	submits                        []client.JobSubmitParams
 	accepted                       map[string]storedProtocolSubmit
+	submitTimeout                  any
 	executions                     int
 	nextJob                        int
 }
@@ -1466,11 +1491,27 @@ func (s *protocolV2FakeServer) handle(conn net.Conn) {
 				s.writeError(conn, req.ID, agentbusErrorBackendUnavailable, "replay conflict", admissionCauseReplayConflict)
 				continue
 			}
-			s.writeResult(conn, req.ID, map[string]any{"jobId": jobID, "state": string(engine.StateQueued)})
+			result := map[string]any{"jobId": jobID, "state": string(engine.StateQueued)}
+			if timeout := s.currentSubmitTimeout(); timeout != nil {
+				result["timeout"] = timeout
+			}
+			s.writeResult(conn, req.ID, result)
 		default:
 			s.writeError(conn, req.ID, "method_not_found", "method not found", "")
 		}
 	}
+}
+
+func (s *protocolV2FakeServer) setSubmitTimeout(timeout any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.submitTimeout = timeout
+}
+
+func (s *protocolV2FakeServer) currentSubmitTimeout() any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.submitTimeout
 }
 
 func (s *protocolV2FakeServer) acceptSubmit(params client.JobSubmitParams) (jobID string, conflict bool, closeWithoutResponse bool) {

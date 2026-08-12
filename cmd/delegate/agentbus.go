@@ -1,18 +1,26 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/delegate/internal/config"
 )
 
 // minimumSupportedAgentbusVersion is the oldest installed agentbus binary this
@@ -38,6 +46,274 @@ type agentbusClient interface {
 	JobStatus(context.Context, client.JobStatusParams) (client.JobStatusResult, error)
 	JobResult(context.Context, client.JobResultParams) (client.JobResult, error)
 	JobCancel(context.Context, client.JobCancelParams) (client.JobCancelResult, error)
+}
+
+// timeoutCapturingClient decodes the daemon's additive timeout field beside
+// the pinned Agentbus client's typed response. The pinned response types do
+// not retain that field, so this wrapper owns the full response decode while
+// preserving the existing typed interface for callers.
+type timeoutCapturingClient struct {
+	opts      client.Options
+	conn      net.Conn
+	reader    *bufio.Reader
+	hello     client.HelloResult
+	writeMu   sync.Mutex
+	requestMu sync.Mutex
+	mu        sync.Mutex
+	closed    bool
+	ids       uint64
+
+	submittedTimeouts map[string]config.DimensionResolution
+	resultTimeouts    map[string]config.DimensionResolution
+	statusTimeouts    map[string]config.DimensionResolution
+}
+
+func newTimeoutCapturingClient(ctx context.Context, opts client.Options) (*timeoutCapturingClient, error) {
+	if opts.StateRoot == "" {
+		stateRoot, err := engine.ResolveStateRoot()
+		if err != nil {
+			return nil, err
+		}
+		opts.StateRoot = stateRoot
+	}
+	// Connect through the pinned client first so its established autostart and
+	// connection behavior remains in effect before this client retains additive
+	// response fields from the wire.
+	typed, err := client.Connect(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	_ = typed.Close()
+	socketPath := opts.SocketPath
+	if socketPath == "" {
+		socketPath = filepath.Join(opts.StateRoot, "agentbus.sock")
+	}
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return nil, err
+	}
+	client := &timeoutCapturingClient{
+		opts:              opts,
+		conn:              conn,
+		reader:            bufio.NewReader(conn),
+		submittedTimeouts: make(map[string]config.DimensionResolution),
+		resultTimeouts:    make(map[string]config.DimensionResolution),
+		statusTimeouts:    make(map[string]config.DimensionResolution),
+	}
+	if err := client.helloRequest(ctx); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return client, nil
+}
+
+func (c *timeoutCapturingClient) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.Close()
+}
+
+func (c *timeoutCapturingClient) HelloResult() client.HelloResult { return c.hello }
+
+func (c *timeoutCapturingClient) JobSubmit(ctx context.Context, params client.JobSubmitParams) (client.JobSubmitResult, error) {
+	var response struct {
+		JobID        string          `json:"jobId"`
+		State        engine.JobState `json:"state"`
+		Deduplicated bool            `json:"deduplicated,omitempty"`
+		Timeout      json.RawMessage `json:"timeout,omitempty"`
+	}
+	if err := c.do(ctx, "job.submit", params, &response); err != nil {
+		return client.JobSubmitResult{}, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if resolution, ok := timeoutResolutionFromWire(response.Timeout); ok {
+		c.submittedTimeouts[response.JobID] = resolution
+	} else {
+		delete(c.submittedTimeouts, response.JobID)
+	}
+	return client.JobSubmitResult{JobID: response.JobID, State: response.State, Deduplicated: response.Deduplicated}, nil
+}
+
+func (c *timeoutCapturingClient) JobStatus(ctx context.Context, params client.JobStatusParams) (client.JobStatusResult, error) {
+	var response struct {
+		Jobs []struct {
+			client.JobStatus
+			Timeout json.RawMessage `json:"timeout,omitempty"`
+		} `json:"jobs"`
+	}
+	if err := c.do(ctx, "job.status", params, &response); err != nil {
+		return client.JobStatusResult{}, err
+	}
+	result := client.JobStatusResult{Jobs: make([]client.JobStatus, 0, len(response.Jobs))}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, job := range response.Jobs {
+		result.Jobs = append(result.Jobs, job.JobStatus)
+		if resolution, ok := timeoutResolutionFromWire(job.Timeout); ok {
+			c.statusTimeouts[job.JobID] = resolution
+		} else {
+			delete(c.statusTimeouts, job.JobID)
+		}
+	}
+	return result, nil
+}
+
+func (c *timeoutCapturingClient) JobResult(ctx context.Context, params client.JobResultParams) (client.JobResult, error) {
+	var response struct {
+		client.JobResult
+		Timeout json.RawMessage `json:"timeout,omitempty"`
+	}
+	if err := c.do(ctx, "job.result", params, &response); err != nil {
+		return client.JobResult{}, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if resolution, ok := timeoutResolutionFromWire(response.Timeout); ok {
+		c.resultTimeouts[response.JobID] = resolution
+	} else {
+		delete(c.resultTimeouts, response.JobID)
+	}
+	return response.JobResult, nil
+}
+
+func (c *timeoutCapturingClient) JobCancel(ctx context.Context, params client.JobCancelParams) (client.JobCancelResult, error) {
+	var response client.JobCancelResult
+	if err := c.do(ctx, "job.cancel", params, &response); err != nil {
+		return client.JobCancelResult{}, err
+	}
+	return response, nil
+}
+
+func (c *timeoutCapturingClient) submittedTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	resolution, ok := c.submittedTimeouts[jobID]
+	return resolution, ok
+}
+
+func (c *timeoutCapturingClient) resultTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	resolution, ok := c.resultTimeouts[jobID]
+	return resolution, ok
+}
+
+func (c *timeoutCapturingClient) statusTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	resolution, ok := c.statusTimeouts[jobID]
+	return resolution, ok
+}
+
+func (c *timeoutCapturingClient) helloRequest(ctx context.Context) error {
+	token, err := c.token()
+	if err != nil {
+		return err
+	}
+	var hello client.HelloResult
+	if err := c.do(ctx, "protocol.hello", map[string]any{"clientProtocolVersion": 2, "token": token}, &hello); err != nil {
+		return err
+	}
+	if hello.ProtocolVersion != 2 {
+		return &client.ProtocolVersionMismatchError{Expected: 2, Received: hello.ProtocolVersion}
+	}
+	c.hello = hello
+	return nil
+}
+
+func (c *timeoutCapturingClient) token() (string, error) {
+	if c.opts.Token != "" {
+		return c.opts.Token, nil
+	}
+	raw, err := os.ReadFile(filepath.Join(c.opts.StateRoot, "token"))
+	if err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", errors.New("agentbus token file is empty")
+	}
+	return token, nil
+}
+
+func (c *timeoutCapturingClient) do(ctx context.Context, method string, params, result any) error {
+	c.requestMu.Lock()
+	defer c.requestMu.Unlock()
+	c.mu.Lock()
+	if c.closed || c.conn == nil {
+		c.mu.Unlock()
+		return errors.New("agentbus client is closed")
+	}
+	c.ids++
+	id := strconv.FormatUint(c.ids, 10)
+	conn := c.conn
+	reader := c.reader
+	c.mu.Unlock()
+	request := struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+		Params  any             `json:"params,omitempty"`
+	}{JSONRPC: "2.0", ID: json.RawMessage(strconv.Quote(id)), Method: method, Params: params}
+	c.writeMu.Lock()
+	err := writeAgentbusWireFrame(ctx, conn, request)
+	c.writeMu.Unlock()
+	if err != nil {
+		return err
+	}
+	line, err := readAgentbusWireFrame(ctx, conn, reader)
+	if err != nil {
+		return err
+	}
+	var response struct {
+		Result json.RawMessage `json:"result"`
+		Error  json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(line), &response); err != nil {
+		return err
+	}
+	if len(response.Error) != 0 && string(response.Error) != "null" {
+		raw, err := json.Marshal(map[string]json.RawMessage{"Object": response.Error})
+		if err != nil {
+			return err
+		}
+		var rpcError client.RPCError
+		if err := json.Unmarshal(raw, &rpcError); err != nil {
+			return err
+		}
+		return &rpcError
+	}
+	return json.Unmarshal(response.Result, result)
+}
+
+func writeAgentbusWireFrame(ctx context.Context, conn net.Conn, value any) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetWriteDeadline(deadline)
+		defer conn.SetWriteDeadline(time.Time{})
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	_, err = conn.Write(append(raw, '\n'))
+	return err
+}
+
+func readAgentbusWireFrame(ctx context.Context, conn net.Conn, reader *bufio.Reader) ([]byte, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetReadDeadline(deadline)
+		defer conn.SetReadDeadline(time.Time{})
+	}
+	return reader.ReadBytes('\n')
 }
 
 func validateBackend(hello client.HelloResult, backend, model, effort string, stderr io.Writer) error {
@@ -86,7 +362,7 @@ func containsString(values []string, want string) bool {
 }
 
 var connectAgentbus = func(ctx context.Context, opts client.Options) (agentbusClient, error) {
-	return client.Connect(ctx, opts)
+	return newTimeoutCapturingClient(ctx, opts)
 }
 
 var lookPath = exec.LookPath

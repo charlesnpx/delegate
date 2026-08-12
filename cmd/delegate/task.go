@@ -388,7 +388,7 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 	opts.WorkspaceKey = intent.WorkspaceKey
 	opts.SubmissionState = submitted.State
 	opts.Deduplicated = submitted.Deduplicated
-	opts.TimeoutResolution = timeoutResolutionForSubmission(opts.Timeout, opts.TimeoutSet, submitted)
+	opts.TimeoutResolution = timeoutResolutionForSubmission(opts.Timeout, opts.TimeoutSet, submitted, c)
 	contractKind := intent.ContractKind
 	ackWarnings, acknowledged, err := acknowledgeSubmittedTask(opts, resolved, submitted, contractKind, "after submission")
 	warnings = append(warnings, ackWarnings...)
@@ -589,7 +589,7 @@ func recoverTaskSubmission(opts taskOptions, stderr io.Writer) (taskRunResult, e
 	if err != nil {
 		return taskRunResult{}, err
 	}
-	taskOpts := taskOptionsFromIntent(opts.StateDir, intent, submitted)
+	taskOpts := taskOptionsFromIntent(opts.StateDir, intent, submitted, c)
 	taskOpts.Background = opts.Background
 	taskOpts.Wait = opts.Wait
 	var warnings []string
@@ -616,7 +616,7 @@ func recoverTaskSubmission(opts taskOptions, stderr io.Writer) (taskRunResult, e
 	return submittedTaskRunResult(ctx, c, hello, taskOpts, submitted, warnings, stderr)
 }
 
-func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted client.JobSubmitResult) taskOptions {
+func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted client.JobSubmitResult, c agentbusClient) taskOptions {
 	modelEffort := config.ModelEffortResolution{Model: intent.Model, Effort: intent.Effort}
 	origin := envelopeOrigin{}
 	if intent.Origin != nil {
@@ -644,7 +644,7 @@ func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted c
 		WorkspaceKey:       intent.WorkspaceKey,
 		SubmissionState:    submitted.State,
 		Deduplicated:       submitted.Deduplicated,
-		TimeoutResolution:  timeoutResolutionForSubmission(timeout, timeoutSet, submitted),
+		TimeoutResolution:  timeoutResolutionForSubmission(timeout, timeoutSet, submitted, c),
 	}
 }
 
@@ -804,7 +804,7 @@ func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.
 		}
 		envelopeOptions := correctionEnvelopeOptions(submitted.JobID, corrected.result.JobID, terminalOptions)
 		envelopeOptions.ModelsReportedCapable = hello.Capabilities["models.reported"]
-		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, corrected.result, corrected.envelopeOptions(envelopeOptions))
+		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, corrected.result, corrected.envelopeOptions(c, envelopeOptions))
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
@@ -824,7 +824,7 @@ func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.
 		}
 		envelopeOptions := correctionEnvelopeOptions(submitted.JobID, corrected.result.JobID, terminalOptions)
 		envelopeOptions.ModelsReportedCapable = hello.Capabilities["models.reported"]
-		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, corrected.result, corrected.envelopeOptions(envelopeOptions))
+		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, corrected.result, corrected.envelopeOptions(c, envelopeOptions))
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}

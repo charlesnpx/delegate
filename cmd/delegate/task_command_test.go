@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -120,12 +121,14 @@ func TestTimeoutEnvelopeResolution(t *testing.T) {
 		name       string
 		args       []string
 		submit     client.JobSubmitResult
+		timeout    config.DimensionResolution
 		want       config.DimensionResolution
 		wantSubmit *int64
 	}{
 		{
 			name:       "explicit timeout is flag sourced",
 			args:       []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--timeout", "45s", "--background", "--json"},
+			timeout:    config.DimensionResolution{Requested: "45s", Effective: "45s", Source: "flag"},
 			want:       config.DimensionResolution{Requested: "45s", Effective: "45s", Source: "flag"},
 			wantSubmit: int64Pointer(45000),
 		},
@@ -134,9 +137,15 @@ func TestTimeoutEnvelopeResolution(t *testing.T) {
 			args: []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--background", "--json"},
 			want: config.DimensionResolution{Source: "unknown"},
 		},
+		{
+			name:       "explicit timeout stays unknown without daemon resolution",
+			args:       []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--timeout", "45s", "--background", "--json"},
+			want:       config.DimensionResolution{Requested: "45s", Source: "unknown"},
+			wantSubmit: int64Pointer(45000),
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &fakeAgentbusClient{hello: helloWithCapabilities(), submitResult: tc.submit}
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities(), submitResult: tc.submit, submittedTimeout: tc.timeout}
 			restore := stubAgentbusGlobals(t, fake)
 			defer restore()
 			var stdout, stderr bytes.Buffer
@@ -179,6 +188,27 @@ func TestTimeoutEnvelopeResolution(t *testing.T) {
 		}
 	})
 
+	t.Run("incomplete daemon resolution stays unknown in JSON", func(t *testing.T) {
+		resolution := timeoutResolutionForSubmission(0, false, map[string]any{
+			"timeout": map[string]any{"source": "daemon_default"},
+		})
+		launch, err := newLaunchEnvelopeWithOptions("job_timeout_unknown", engine.StateQueued, launchEnvelopeOptions{Timeout: resolution})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(launch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := decoded["timeout"], map[string]any{"source": "unknown"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("timeout JSON=%#v, want %#v; raw=%s", got, want, raw)
+		}
+	})
+
 	for _, command := range []string{"task", "review"} {
 		t.Run(command+" help explains zero timeout", func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -198,6 +228,31 @@ func TestMergeAcknowledgedJobMetadataUpgradesUnknownTimeout(t *testing.T) {
 	want := config.DimensionResolution{Effective: "30m0s", Source: "daemon"}
 	if merged.Timeout != want {
 		t.Fatalf("timeout=%#v, want %#v", merged.Timeout, want)
+	}
+}
+
+func TestStatusOnlyTerminalTimeoutPrecedesLaunchMetadata(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	jobID := "job_status_timeout"
+	if err := saveJobMetadata(stateDir, jobMetadata{
+		JobID:        jobID,
+		Kind:         taskKind,
+		ContractKind: contractKindShape,
+		Timeout:      config.DimensionResolution{Effective: "30m0s", Source: "daemon"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAgentbusClient{statusTimeout: config.DimensionResolution{Effective: "90m0s", Source: "daemon"}}
+	terminal := terminalJobResultFromStatus(client.JobStatus{JobID: jobID, State: engine.StateOrphaned})
+	env, err := terminalEnvelopeFromJobResultWithOptions(stateDir, terminal.result, terminal.envelopeOptions(fake, terminalEnvelopeOptions{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (config.DimensionResolution{Effective: "90m0s", Source: "daemon"}); env.Timeout != want {
+		t.Fatalf("terminal timeout=%#v, want daemon status resolution %#v", env.Timeout, want)
 	}
 }
 
@@ -1205,19 +1260,22 @@ func helloWithCapabilities() client.HelloResult {
 }
 
 type fakeAgentbusClient struct {
-	hello        client.HelloResult
-	submits      []client.JobSubmitParams
-	submitResult client.JobSubmitResult
-	submitErr    error
-	statuses     []client.JobStatusParams
-	statusErr    error
-	status       client.JobStatusResult
-	results      []client.JobResultParams
-	result       client.JobResult
-	resultErr    error
-	cancels      []client.JobCancelParams
-	cancel       client.JobCancelResult
-	cancelErr    error
+	hello            client.HelloResult
+	submits          []client.JobSubmitParams
+	submitResult     client.JobSubmitResult
+	submittedTimeout config.DimensionResolution
+	resultTimeout    config.DimensionResolution
+	statusTimeout    config.DimensionResolution
+	submitErr        error
+	statuses         []client.JobStatusParams
+	statusErr        error
+	status           client.JobStatusResult
+	results          []client.JobResultParams
+	result           client.JobResult
+	resultErr        error
+	cancels          []client.JobCancelParams
+	cancel           client.JobCancelResult
+	cancelErr        error
 }
 
 type reportCorrectionRoundTripClient struct {
@@ -1335,6 +1393,18 @@ func (f *fakeAgentbusClient) JobCancel(_ context.Context, params client.JobCance
 		return f.cancel, nil
 	}
 	return client.JobCancelResult{}, errors.New("unexpected JobCancel")
+}
+
+func (f *fakeAgentbusClient) submittedTimeoutResolution(string) (config.DimensionResolution, bool) {
+	return f.submittedTimeout, timeoutResolutionIsResolved(f.submittedTimeout)
+}
+
+func (f *fakeAgentbusClient) resultTimeoutResolution(string) (config.DimensionResolution, bool) {
+	return f.resultTimeout, timeoutResolutionIsResolved(f.resultTimeout)
+}
+
+func (f *fakeAgentbusClient) statusTimeoutResolution(string) (config.DimensionResolution, bool) {
+	return f.statusTimeout, timeoutResolutionIsResolved(f.statusTimeout)
 }
 
 func compliantReport() string {
