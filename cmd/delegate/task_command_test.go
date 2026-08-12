@@ -262,7 +262,7 @@ func TestLegacyTimeoutMetadataCannotSupplyTerminalEffectiveValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	jobID := "job_legacy_timeout"
-	if err := saveJobMetadata(stateDir, jobMetadata{
+	legacy := jobMetadata{
 		Schema:       1,
 		JobID:        jobID,
 		Kind:         taskKind,
@@ -272,7 +272,16 @@ func TestLegacyTimeoutMetadataCannotSupplyTerminalEffectiveValue(t *testing.T) {
 			Effective: "45s",
 			Source:    "flag",
 		},
-	}); err != nil {
+	}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := jobMetadataDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, encodedStateFilename(jobID)), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -286,6 +295,78 @@ func TestLegacyTimeoutMetadataCannotSupplyTerminalEffectiveValue(t *testing.T) {
 	want := config.DimensionResolution{Requested: "45s", Source: "unknown"}
 	if env.Timeout != want {
 		t.Fatalf("terminal timeout=%#v, want legacy effective value excluded as %#v", env.Timeout, want)
+	}
+}
+
+func TestSchemaLessTimeoutMetadataIsSanitizedWhenCleanupRewritesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		schemaNull bool
+	}{
+		{name: "absent schema"},
+		{name: "null schema", schemaNull: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			if err := os.Chmod(stateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			jobID := "job_schema_less_timeout"
+			inputPath := filepath.Join(stateDir, "job-input.txt")
+			if err := os.WriteFile(inputPath, []byte("prompt"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			legacy := map[string]any{
+				"job_id":         jobID,
+				"kind":           taskKind,
+				"contractKind":   contractKindShape,
+				"job_input_path": inputPath,
+				"timeout": map[string]string{
+					"requested": "45s",
+					"effective": "45s",
+					"source":    "flag",
+				},
+			}
+			if tc.schemaNull {
+				legacy["schema"] = nil
+			}
+			raw, err := json.Marshal(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir, err := jobMetadataDir(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, encodedStateFilename(jobID)), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			// Terminal cleanup changes only local artifact bookkeeping, but it must
+			// not launder the legacy requested timeout into schema-2 trust.
+			if err := cleanupJobInput(stateDir, jobID, "", engine.StateCompleted, cleanupDispositionVerifiedAbsent, newLocalCleanupWarnings(io.Discard)); err != nil {
+				t.Fatal(err)
+			}
+			meta, found, err := loadJobMetadata(stateDir, jobID)
+			if err != nil || !found {
+				t.Fatalf("rewritten metadata found=%v err=%v", found, err)
+			}
+			want := config.DimensionResolution{Requested: "45s", Source: "unknown"}
+			if meta.Schema != jobMetadataSchema || meta.Timeout != want {
+				t.Fatalf("rewritten metadata schema=%d timeout=%#v, want schema=%d timeout=%#v", meta.Schema, meta.Timeout, jobMetadataSchema, want)
+			}
+
+			env, err := terminalEnvelopeFromJobResultWithOptions(stateDir, client.JobResult{
+				JobID: jobID,
+				State: engine.StateCompleted,
+			}, terminalEnvelopeOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if env.Timeout != want {
+				t.Fatalf("terminal timeout=%#v, want sanitized fallback %#v", env.Timeout, want)
+			}
+		})
 	}
 }
 

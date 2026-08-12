@@ -174,7 +174,12 @@ func saveJobMetadataFile(stateDir string, meta jobMetadata) error {
 	if err := validateDelegateJobID(meta.JobID); err != nil {
 		return err
 	}
-	if meta.Schema == 0 {
+	if meta.Schema < jobMetadataSchema {
+		// Schema 1 and schema-less metadata predate daemon timeout capture. Do
+		// not let an unrelated local metadata rewrite promote a requested flag
+		// value into a trusted effective timeout. A same-process daemon capture
+		// reaches this boundary as schema 2 and is preserved.
+		meta.Timeout = config.DimensionResolution{Requested: meta.Timeout.Requested, Source: "unknown"}
 		meta.Schema = jobMetadataSchema
 	}
 	now := time.Now().UTC()
