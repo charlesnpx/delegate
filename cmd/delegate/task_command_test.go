@@ -298,6 +298,50 @@ func TestLegacyTimeoutMetadataCannotSupplyTerminalEffectiveValue(t *testing.T) {
 	}
 }
 
+func TestMissingBackendProfileMetadataEmitsUnknown(t *testing.T) {
+	fake := &fakeAgentbusClient{
+		hello:  helloWithCapabilities(),
+		result: client.JobResult{JobID: "job_legacy_backend_profile", State: engine.StateCompleted},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID := "job_legacy_backend_profile"
+	dir, err := jobMetadataDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This is pre-fix metadata: it has no backend_profile key at all.
+	raw, err := json.Marshal(map[string]any{
+		"schema":       jobMetadataSchema,
+		"job_id":       jobID,
+		"kind":         taskKind,
+		"contractKind": contractKindShape,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, encodedStateFilename(jobID)), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"result", "--job", jobID, "--json"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("result code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatalf("result JSON=%q: %v", stdout.String(), err)
+	}
+	if want := (config.DimensionResolution{Source: "unknown"}); env.BackendProfile != want {
+		t.Fatalf("result backend_profile=%#v, want missing metadata reported as %#v", env.BackendProfile, want)
+	}
+}
+
 func TestSchemaLessTimeoutMetadataIsSanitizedWhenCleanupRewritesIt(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -1338,6 +1382,11 @@ func TestTaskLaunchEnvelopeReportsEffectiveBackendProfile(t *testing.T) {
 		{
 			name: "read_only_without_write",
 			want: config.DimensionResolution{Effective: backendProfileReadOnly, Source: "default"},
+		},
+		{
+			name:  "read_only_with_explicit_write_false",
+			flags: []string{"--write=false"},
+			want:  config.DimensionResolution{Effective: backendProfileReadOnly, Source: "flag"},
 		},
 		{
 			name:  "workspace_write_with_write",

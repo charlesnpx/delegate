@@ -45,6 +45,7 @@ type taskOptions struct {
 	Timeout            time.Duration
 	TimeoutSet         bool
 	TimeoutResolution  config.DimensionResolution
+	BackendProfile     config.DimensionResolution
 	Write              bool
 	WriteSet           bool
 	StrictContract     bool
@@ -633,7 +634,9 @@ func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted c
 		Effort:             spec.Effort,
 		Timeout:            timeout,
 		TimeoutSet:         timeoutSet,
+		BackendProfile:     recoveredTaskBackendProfile(spec),
 		Write:              spec.Write,
+		WriteSet:           spec.Write,
 		NoContract:         intent.NoContract,
 		ReportCorrectionOf: recoveredReportCorrectionOf(intent),
 		StateDir:           stateDir,
@@ -648,6 +651,16 @@ func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted c
 		Deduplicated:       submitted.Deduplicated,
 		TimeoutResolution:  timeoutResolutionForSubmission(timeout, timeoutSet, submitted, c),
 	}
+}
+
+// recoveredTaskBackendProfile uses only the persisted TaskSpec. A true Write
+// value necessarily came from --write, while false cannot distinguish an
+// omitted --write from an explicit --write=false.
+func recoveredTaskBackendProfile(spec client.TaskSpec) config.DimensionResolution {
+	if spec.Write {
+		return config.DimensionResolution{Effective: backendProfileWorkspaceWrite, Source: "flag"}
+	}
+	return config.DimensionResolution{Effective: backendProfileReadOnly, Source: "unknown"}
 }
 
 func recoveredReportCorrectionOf(intent submissionIntent) string {
@@ -743,8 +756,14 @@ func taskModelEffort(opts taskOptions) config.ModelEffortResolution {
 // taskBackendProfile is derived directly from --write. It deliberately has no
 // requested value: absence of --write is not a separate requested profile.
 func taskBackendProfile(opts taskOptions) config.DimensionResolution {
+	if opts.BackendProfile.Source != "" {
+		return opts.BackendProfile
+	}
 	if opts.Write {
 		return config.DimensionResolution{Effective: backendProfileWorkspaceWrite, Source: "flag"}
+	}
+	if opts.WriteSet {
+		return config.DimensionResolution{Effective: backendProfileReadOnly, Source: "flag"}
 	}
 	return config.DimensionResolution{Effective: backendProfileReadOnly, Source: "default"}
 }
