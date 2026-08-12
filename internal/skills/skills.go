@@ -482,7 +482,7 @@ Superseding escape hatch: if the requester explicitly asks you to perform the ta
 - exec: "delegate", "agentbus", and the {{.Backend}} backend executable are runnable.
 - repo+state write access: the target repo and delegate/agentbus state roots are writable when the task needs writes.
 - stdin handoff: sensitive prompt text can be piped to "delegate handoff create --json".
-- backend reachability: "delegate setup --json" shows agentbus capabilities and {{.Backend}} backend availability.
+- backend reachability: "delegate setup --json --backend {{.Backend}}" shows agentbus capabilities and {{.Backend}} backend availability without unrelated backend model catalogues.
 
 "delegate task" is read-only unless it has "--write". The worker sandbox is offline, and a write turn can write only inside the job "--cwd"; use it for repo-local edits/builds/tests and point "GOCACHE" and "GOMODCACHE" under that cwd. Route module downloads, other network work, and Git commits to the caller/orchestrator.
 
@@ -541,7 +541,7 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 - exec: "delegate", "agentbus", "git", and the {{.Backend}} backend executable are runnable. Git is used by host-side delegate assembly only; it is not a review-worker preflight or input source.
 - repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate applies path/history redaction and a final content scan to every assembled inline or spilled diff payload.
 - cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
-- backend reachability: "delegate setup --json" shows agentbus capabilities and {{.Backend}} backend availability.
+- backend reachability: "delegate setup --json --backend {{.Backend}}" shows agentbus capabilities and {{.Backend}} backend availability without unrelated backend model catalogues.
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
@@ -634,7 +634,7 @@ Run:
 {{.Command}}
 ~~~
 
-Use this before launching delegated work. Confirm that "delegate" and "agentbus" are executable, agentbus reports "admission.strictContainment" plus the policy capabilities delegate requires, the intended backend is available, the repo and delegate state are writable when needed, and stdin handoff through "delegate handoff create --json" is viable.
+Use this before launching delegated work. Confirm that "delegate" and "agentbus" are executable, agentbus reports "admission.strictContainment" plus the policy capabilities delegate requires, the intended backend is available, the repo and delegate state are writable when needed, and stdin handoff through "delegate handoff create --json" is viable. Use "delegate setup --json --backend <name>" to focus the per-backend detail on one advertised backend; global readiness fields and capabilities remain complete.
 
 Report these setup fields when they are relevant: "agentbusStateRoot", "agentbusStateRootWritable", "agentbusAutostartLockRoot", "agentbusAutostartLockRootWritable", "pendingSubmissionIntentCount", "pendingSubmissionIntents", "unresolvedCleanupArtifactCount", "admissionStrictContainment", and "ready". "pendingSubmissionIntents" contains up to 20 oldest pending intents (oldest first); its request IDs can go directly to "delegate task --recover-request <request_id> --json". "pendingSubmissionIntentCount" remains the authoritative total when that array is capped. A nonzero "unresolvedCleanupArtifactCount" means Delegate retained local artifacts because Agentbus did not prove backend absence.
 

@@ -19,7 +19,7 @@ Superseding escape hatch: if the requester explicitly asks you to perform the ta
 - exec: "delegate", "agentbus", and the cursor backend executable are runnable.
 - repo+state write access: the target repo and delegate/agentbus state roots are writable when the task needs writes.
 - stdin handoff: sensitive prompt text can be piped to "delegate handoff create --json".
-- backend reachability: "delegate setup --json" shows agentbus capabilities and cursor backend availability.
+- backend reachability: "delegate setup --json --backend cursor" shows agentbus capabilities and cursor backend availability without unrelated backend model catalogues.
 
 "delegate task" is read-only unless it has "--write". The worker sandbox is offline, and a write turn can write only inside the job "--cwd"; use it for repo-local edits/builds/tests and point "GOCACHE" and "GOMODCACHE" under that cwd. Route module downloads, other network work, and Git commits to the caller/orchestrator.
 

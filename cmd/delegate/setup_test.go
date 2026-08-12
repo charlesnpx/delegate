@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,8 +17,41 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	delegateconfig "github.com/charlesnpx/delegate/internal/config"
 	"github.com/charlesnpx/delegate/internal/handoff"
 )
+
+// setupJSONBeforeBackendFilter captures the established JSON layout using raw
+// Agentbus JSON so the default-output test can compare the full line without
+// changing Agentbus' handshake-only custom marshaling behavior.
+type setupJSONBeforeBackendFilter struct {
+	Schema                               int                            `json:"schema"`
+	Delegate                             string                         `json:"delegate"`
+	Agentbus                             json.RawMessage                `json:"agentbus"`
+	Config                               setupConfigBeforeBackendFilter `json:"config"`
+	Skills                               []setupSkill                   `json:"skills"`
+	StateRootWritable                    bool                           `json:"stateRootWritable"`
+	StateRootWritability                 setupWritability               `json:"stateRootWritability,omitempty"`
+	AgentbusStateRoot                    string                         `json:"agentbusStateRoot"`
+	AgentbusStateRootWritable            bool                           `json:"agentbusStateRootWritable"`
+	AgentbusStateRootWritability         setupWritability               `json:"agentbusStateRootWritability,omitempty"`
+	AgentbusAutostartLockRoot            string                         `json:"agentbusAutostartLockRoot"`
+	AgentbusAutostartLockRootWritable    bool                           `json:"agentbusAutostartLockRootWritable"`
+	AgentbusAutostartLockRootWritability setupWritability               `json:"agentbusAutostartLockRootWritability,omitempty"`
+	AdmissionStrictContainment           bool                           `json:"admissionStrictContainment"`
+	PendingSubmissionIntentCount         *int                           `json:"pendingSubmissionIntentCount"`
+	PendingSubmissionIntents             []setupPendingSubmissionIntent `json:"pendingSubmissionIntents"`
+	UnresolvedCleanupArtifactCount       *int                           `json:"unresolvedCleanupArtifactCount"`
+	DaemonReachable                      bool                           `json:"daemonReachable"`
+	Ready                                bool                           `json:"ready"`
+	Warnings                             []string                       `json:"warnings,omitempty"`
+}
+
+type setupConfigBeforeBackendFilter struct {
+	Path        string                  `json:"path"`
+	Overridable bool                    `json:"overridable"`
+	Defaults    delegateconfig.Backends `json:"defaults"`
+}
 
 func TestSetupStatePreflightRejectsRelativeAgentbusStateRoot(t *testing.T) {
 	workspace := t.TempDir()
@@ -150,6 +185,156 @@ func TestSetupMissingDirectoryWritabilityIsUnknownAndDoesNotCreate(t *testing.T)
 	}
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("writability probe created missing path %q: %v", path, err)
+	}
+}
+
+func TestSetupBackendFilterRestrictsDetailsAndPreservesReadiness(t *testing.T) {
+	hello := helloWithCapabilities()
+	hello.Backends = []string{"codex", "claude", "cursor"}
+	hello.BackendMetadata = []client.BackendInfo{
+		{Name: "codex", Models: []string{"gpt-5.6"}, Efforts: []string{"high"}},
+		{Name: "claude", Models: []string{"claude-opus"}, Efforts: []string{"medium"}},
+		{Name: "cursor", Models: []string{"cursor-1", "cursor-2"}, Efforts: []string{"low", "high"}},
+	}
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: hello})
+	defer restore()
+	setupTestPreflightDirectories(t)
+	if err := delegateconfig.Save(delegateconfig.Config{
+		Overridable: true,
+		Backend:     delegateconfig.Backends{Codex: delegateconfig.Defaults{Model: "codex-default", Effort: "high"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var unfilteredStdout, unfilteredStderr bytes.Buffer
+	if code := run([]string{"setup", "--json"}, nil, &unfilteredStdout, &unfilteredStderr); code != 0 {
+		t.Fatalf("unfiltered setup code=%d stderr=%q", code, unfilteredStderr.String())
+	}
+	var unfiltered setupJSON
+	if err := json.Unmarshal(unfilteredStdout.Bytes(), &unfiltered); err != nil {
+		t.Fatalf("unfiltered setup JSON invalid: %v; raw=%q", err, unfilteredStdout.String())
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json", "--backend", "codex"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code=%d stderr=%q", code, stderr.String())
+	}
+	var result setupJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if got, want := result.Agentbus.Backends, []string{"codex"}; !slices.Equal(got, want) {
+		t.Fatalf("filtered backends=%#v, want %#v", got, want)
+	}
+	if got, want := result.Agentbus.BackendMetadata, []client.BackendInfo{hello.BackendMetadata[0]}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("filtered backend metadata=%#v, want %#v", got, want)
+	}
+	var raw struct {
+		Config struct {
+			Defaults map[string]json.RawMessage `json:"defaults"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(raw.Config.Defaults), 1; got != want || raw.Config.Defaults["codex"] == nil {
+		t.Fatalf("filtered config defaults=%#v, want only codex", raw.Config.Defaults)
+	}
+	if result.Schema != unfiltered.Schema || result.Delegate != unfiltered.Delegate || !reflect.DeepEqual(result.Agentbus.Capabilities, unfiltered.Agentbus.Capabilities) || !slices.Equal(result.Agentbus.Required, unfiltered.Agentbus.Required) || !slices.Equal(result.Agentbus.Missing, unfiltered.Agentbus.Missing) || result.Agentbus.CapabilitiesOK != unfiltered.Agentbus.CapabilitiesOK || result.Config.Path != unfiltered.Config.Path || result.Config.Overridable != unfiltered.Config.Overridable || !reflect.DeepEqual(result.Skills, unfiltered.Skills) || result.StateRootWritable != unfiltered.StateRootWritable || result.StateRootWritability != unfiltered.StateRootWritability || result.AgentbusStateRoot != unfiltered.AgentbusStateRoot || result.AgentbusStateRootWritable != unfiltered.AgentbusStateRootWritable || result.AgentbusStateRootWritability != unfiltered.AgentbusStateRootWritability || result.AgentbusAutostartLockRoot != unfiltered.AgentbusAutostartLockRoot || result.AgentbusAutostartLockRootWritable != unfiltered.AgentbusAutostartLockRootWritable || result.AgentbusAutostartLockRootWritability != unfiltered.AgentbusAutostartLockRootWritability || result.AdmissionStrictContainment != unfiltered.AdmissionStrictContainment || !reflect.DeepEqual(result.PendingSubmissionIntentCount, unfiltered.PendingSubmissionIntentCount) || !reflect.DeepEqual(result.PendingSubmissionIntents, unfiltered.PendingSubmissionIntents) || !reflect.DeepEqual(result.UnresolvedCleanupArtifactCount, unfiltered.UnresolvedCleanupArtifactCount) || result.DaemonReachable != unfiltered.DaemonReachable || result.Ready != unfiltered.Ready || !slices.Equal(result.Warnings, unfiltered.Warnings) {
+		t.Fatalf("backend filter changed global setup readiness: filtered=%#v unfiltered=%#v", result, unfiltered)
+	}
+}
+
+func TestSetupBackendFilterRejectsUnavailableBackend(t *testing.T) {
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json", "--backend", "missing"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("setup code=%d, want failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("setup emitted success-looking JSON for unavailable backend: %q", stdout.String())
+	}
+	if got, want := stderr.String(), `backend "missing" is not available; agentbus reports: codex, claude`; !strings.Contains(got, want) {
+		t.Fatalf("stderr=%q, want %q", got, want)
+	}
+}
+
+func TestSetupWithoutBackendIncludesAllBackendDetails(t *testing.T) {
+	hello := helloWithCapabilities()
+	hello.Backends = []string{"codex", "claude", "cursor"}
+	hello.BackendMetadata = []client.BackendInfo{
+		{Name: "codex", Models: []string{"gpt-5.6"}, Efforts: []string{"high"}},
+		{Name: "claude", Models: []string{"claude-opus"}, Efforts: []string{"medium"}},
+		{Name: "cursor", Models: []string{"cursor-1", "cursor-2"}, Efforts: []string{"low", "high"}},
+	}
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: hello})
+	defer restore()
+	setupTestPreflightDirectories(t)
+	defaults := delegateconfig.Backends{
+		Claude: delegateconfig.Defaults{Model: "claude-default", Effort: "medium"},
+		Codex:  delegateconfig.Defaults{Model: "codex-default", Effort: "high"},
+		Cursor: delegateconfig.Defaults{Model: "cursor-default", Effort: "low"},
+	}
+	if err := delegateconfig.Save(delegateconfig.Config{Overridable: true, Backend: defaults}); err != nil {
+		t.Fatal(err)
+	}
+	gotConfig, err := json.Marshal(setupConfig{Path: "/tmp/config.toml", Overridable: true, Defaults: defaults})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantConfig, err := json.Marshal(struct {
+		Path        string                  `json:"path"`
+		Overridable bool                    `json:"overridable"`
+		Defaults    delegateconfig.Backends `json:"defaults"`
+	}{Path: "/tmp/config.toml", Overridable: true, Defaults: defaults})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotConfig, wantConfig) {
+		t.Fatalf("unfiltered config JSON changed: got=%s want=%s", gotConfig, wantConfig)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code=%d stderr=%q", code, stderr.String())
+	}
+	var result setupJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if !slices.Equal(result.Agentbus.Backends, hello.Backends) || !reflect.DeepEqual(result.Agentbus.BackendMetadata, hello.BackendMetadata) {
+		t.Fatalf("unfiltered backend detail changed: backends=%#v metadata=%#v", result.Agentbus.Backends, result.Agentbus.BackendMetadata)
+	}
+	var raw struct {
+		Config struct {
+			Defaults json.RawMessage `json:"defaults"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	var reportedDefaults delegateconfig.Backends
+	if err := json.Unmarshal(raw.Config.Defaults, &reportedDefaults); err != nil {
+		t.Fatalf("unfiltered config defaults changed shape: %v; raw=%s", err, raw.Config.Defaults)
+	}
+	if !reflect.DeepEqual(reportedDefaults, defaults) {
+		t.Fatalf("unfiltered config defaults=%#v, want established full backend object %#v", reportedDefaults, defaults)
+	}
+	var before setupJSONBeforeBackendFilter
+	if err := json.Unmarshal(stdout.Bytes(), &before); err != nil {
+		t.Fatalf("unfiltered setup JSON invalid for legacy layout: %v", err)
+	}
+	wantOutput, err := json.Marshal(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bytes.TrimSpace(stdout.Bytes()); !bytes.Equal(got, wantOutput) {
+		t.Fatalf("unfiltered setup JSON changed:\n got: %s\nwant: %s", got, wantOutput)
 	}
 }
 

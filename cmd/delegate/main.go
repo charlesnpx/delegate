@@ -78,7 +78,8 @@ func printUsage(w io.Writer) {
 
 commands:
   version         print the delegate version
-  setup           verify delegate, agentbus, backends, config, and skills
+  setup [--json] [--backend <name>]
+                  verify delegate, agentbus, backends, config, and skills
   config          list/get/set/unset user model and effort defaults
   task            run one backend turn (foreground or --background)
   review          delegate a sanitized code review
