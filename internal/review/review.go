@@ -42,7 +42,7 @@ type Options struct {
 	AllowLiveRepoRead bool
 }
 
-// Base identifies the resolved comparison base and how it was selected.
+// Base identifies the resolved base tip and how it was selected.
 type Base struct {
 	Ref    string
 	Commit string
@@ -68,6 +68,7 @@ type Context struct {
 	Inline            string
 	Scope             string
 	Base              Base
+	ComparisonBase    string
 	Branch            string
 	Head              string
 	Files             []File
@@ -179,7 +180,7 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 			return Context{}, err
 		}
 	}
-	payload := renderSanitizedContext(scope, base, branch, head, changed)
+	payload := renderSanitizedContext(scope, base, diffBase, branch, head, changed)
 	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{StateDir: opts.StateDir})
 	if err != nil {
 		return Context{}, err
@@ -194,6 +195,7 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 		StateDir:          stateDir,
 		Scope:             scope,
 		Base:              base,
+		ComparisonBase:    diffBase,
 		Branch:            branch,
 		Head:              head,
 		SanitizedBytes:    len(payload),
@@ -354,7 +356,10 @@ func ComposePrompt(kind string, assembled Context) (string, error) {
 		prompt.WriteString("Resolved base: " + strconv.Quote(assembled.Base.Ref) + " (" + assembled.Base.Source + ").\n")
 	}
 	if assembled.Base.Commit != "" {
-		prompt.WriteString("Base commit: " + assembled.Base.Commit + ".\n")
+		prompt.WriteString("Resolved base tip commit: " + assembled.Base.Commit + ".\n")
+	}
+	if assembled.ComparisonBase != "" {
+		prompt.WriteString("Comparison baseline (merge base used for diff): " + assembled.ComparisonBase + ".\n")
 	}
 	if assembled.Branch != "" {
 		prompt.WriteString("Branch under review: " + strconv.Quote(assembled.Branch) + ".\n")
@@ -362,9 +367,9 @@ func ComposePrompt(kind string, assembled Context) (string, error) {
 	if assembled.Head != "" {
 		prompt.WriteString("HEAD commit: " + assembled.Head + ".\n")
 	}
-	prompt.WriteString("The identifiers actually supplied above are authoritative for this review. Report them as given rather than as unavailable, and do not infer missing identifiers. In working-tree scope, the supplied HEAD commit is the comparison baseline; a base commit applies only when supplied.\n")
-	prompt.WriteString("For the report's Scope boundary, use the supplied branch, base commit when supplied, and HEAD commit identifiers; do not infer or claim a full commit list.\n")
-	prompt.WriteString("Reading the assembled context is the first and only required step. Do not probe for already-supplied metadata or context, and do not put an unnecessary repository probe before the context read with &&. A sandbox denial of an unnecessary probe is not a reason to stop: read the assembled context and complete the review.\n")
+	prompt.WriteString("The identifiers actually supplied above are authoritative for this review. Report them as given rather than as unavailable, and do not infer missing identifiers. In branch and auto scope, the supplied comparison baseline is the merge base used for the diff; the resolved base tip identifies the base ref. In working-tree scope, the supplied HEAD commit is the comparison baseline; a base tip applies only when supplied.\n")
+	prompt.WriteString("For the report's Scope boundary, use the supplied branch, resolved base tip commit when supplied, comparison baseline when supplied, and HEAD commit identifiers; do not infer or claim a full commit list.\n")
+	prompt.WriteString("Reading the assembled context is the first and only required step. Do not probe for already-supplied metadata or context, and do not put the expressly unnecessary redundant metadata probe before the context read with &&. A sandbox denial of that expressly unnecessary probe is not a reason to stop: read the assembled context and complete the review.\n")
 	if assembled.AllowLiveRepoRead {
 		prompt.WriteString("LIVE-REPOSITORY MODE was explicitly enabled. Delegate still applies its path/history redaction and final content scan to the context it assembles; this flag makes backend file reads easier by using the live repository as its working directory. After reading the assembled context, you may inspect the current repository read-only to validate and self-collect supplemental context, but do not use it to recover or override supplied identifiers. Do not expose secret-looking file contents in the response.\n")
 	} else {
@@ -917,7 +922,7 @@ func sortChanged(files []changedFile) {
 	})
 }
 
-func renderSanitizedContext(scope string, base Base, branch, head string, files []changedFile) []byte {
+func renderSanitizedContext(scope string, base Base, comparisonBase, branch, head string, files []changedFile) []byte {
 	var out bytes.Buffer
 	out.WriteString(sanitizedContextHeader + "\n")
 	out.WriteString("scope\t" + strconv.Quote(scope) + "\n")
@@ -925,7 +930,10 @@ func renderSanitizedContext(scope string, base Base, branch, head string, files 
 		out.WriteString("base\t" + strconv.Quote(base.Ref) + "\n")
 	}
 	if base.Commit != "" {
-		out.WriteString("base_commit\t" + base.Commit + "\n")
+		out.WriteString("base_tip_commit\t" + base.Commit + "\n")
+	}
+	if comparisonBase != "" {
+		out.WriteString("comparison_baseline\t" + comparisonBase + "\n")
 	}
 	if branch != "" {
 		out.WriteString("branch\t" + strconv.Quote(branch) + "\n")

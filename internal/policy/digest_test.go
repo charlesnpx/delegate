@@ -35,15 +35,19 @@ func TestContractDigestStatesReportShape(t *testing.T) {
 	}
 }
 
-func TestContractDigestDistinguishesRequiredWorkFromOptionalProbes(t *testing.T) {
+func TestContractDigestOnlyPermitsPromptDesignatedOptionalProbes(t *testing.T) {
 	digest := DelegateContractDigest()
 	for _, want := range []string{
 		"Denial of a required operation -> stop and return BLOCKED",
 		"Never work around a required-work block with an alternate tool.",
-		"A failed or denied optional/unnecessary probe is not blocking: proceed with the required work.",
+		"Only an operation the governing task/prompt expressly calls optional or unnecessary may be skipped;",
+		"never reclassify a denied operation.",
 	} {
 		if !strings.Contains(digest, want) {
 			t.Errorf("digest missing required denial rule %q", want)
 		}
+	}
+	if strings.Contains(digest, "A failed or denied optional/unnecessary probe is not blocking") {
+		t.Fatal("digest permits workers to self-classify denied probes as optional")
 	}
 }
