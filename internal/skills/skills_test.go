@@ -129,8 +129,11 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"Scope boundary",
 				"full commit list",
 				"first and only required step",
-				"repository-inspection command",
+				"actually supplied are authoritative",
+				"base commit applies only when supplied",
+				"probe for already-supplied metadata or context",
 				"with \"&&\"",
+				"self-collect supplemental context remain permitted after that context read",
 				"--recover-request <request_id>",
 				"cleanup_disposition",
 			})

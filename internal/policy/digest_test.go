@@ -34,3 +34,16 @@ func TestContractDigestStatesReportShape(t *testing.T) {
 		}
 	}
 }
+
+func TestContractDigestDistinguishesRequiredWorkFromOptionalProbes(t *testing.T) {
+	digest := DelegateContractDigest()
+	for _, want := range []string{
+		"Denial of a required operation -> stop and return BLOCKED",
+		"Never work around a required-work block with an alternate tool.",
+		"A failed or denied optional/unnecessary probe is not blocking: proceed with the required work.",
+	} {
+		if !strings.Contains(digest, want) {
+			t.Errorf("digest missing required denial rule %q", want)
+		}
+	}
+}

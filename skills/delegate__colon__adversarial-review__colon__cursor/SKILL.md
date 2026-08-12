@@ -37,9 +37,9 @@ Do not add "--allow-live-repo-read" unless the user explicitly requests live-rep
 
 ## Review Context Discipline
 
-Delegate performs Git collection on the host before the review worker starts and its composed review prompt supplies effective scope, resolved base, base commit, branch under review, and HEAD commit. These supplied values are authoritative: the reviewer must report them as given, including in Scope boundary, rather than treating them as unavailable or inferring a full commit list.
+Delegate performs Git collection on the host before the review worker starts and its composed review prompt supplies effective scope and, as applicable, resolved base, base commit, branch under review, and HEAD commit. The identifiers actually supplied are authoritative: the reviewer must report them as given, including in Scope boundary, rather than treating them as unavailable or inferring missing identifiers or a full commit list. In working-tree scope, the supplied HEAD commit is the comparison baseline; a base commit applies only when supplied.
 
-Reading the assembled context is the first and only required step. Do not instruct the review worker to run "git" or another repository-inspection command to recover metadata or context, and do not put a repository probe before "review.patch" with "&&". A sandbox denial of an unnecessary probe must not stop the review; it should read the assembled context and complete the review.
+Reading the assembled context is the first and only required step. Do not instruct the review worker to probe for already-supplied metadata or context, and do not put an unnecessary repository probe before "review.patch" with "&&". A sandbox denial of an unnecessary probe must not stop the review; it should read the assembled context and complete the review. In live-repository mode, repository reads to validate or self-collect supplemental context remain permitted after that context read; supplied identifiers remain authoritative.
 
 ## Launch
 

@@ -821,7 +821,7 @@ func TestAllowLiveRepoReadGatesBackendCWDAndPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if live.BackendCWD != live.CanonicalCWD || !strings.Contains(livePrompt, "LIVE-REPOSITORY MODE") || !strings.Contains(livePrompt, "makes backend file reads easier") || !strings.Contains(livePrompt, "remain authoritative") {
+	if live.BackendCWD != live.CanonicalCWD || !strings.Contains(livePrompt, "LIVE-REPOSITORY MODE") || !strings.Contains(livePrompt, "makes backend file reads easier") || !strings.Contains(livePrompt, "self-collect") || !strings.Contains(livePrompt, "After reading the assembled context") {
 		t.Fatalf("live gating failed: cwd=%q prompt=%q", live.BackendCWD, livePrompt)
 	}
 }
@@ -851,11 +851,11 @@ func TestComposePromptTreatsSuppliedReviewContextAsAuthoritative(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, want := range []string{
-				"The supplied effective scope, resolved base, base commit, branch under review, and HEAD commit are authoritative for this review.",
-				"Report them as given rather than as unavailable.",
-				"For the report's Scope boundary, use the supplied branch, base commit, and HEAD commit identifiers; do not infer or claim a full commit list.",
+				"The identifiers actually supplied above are authoritative for this review.",
+				"Report them as given rather than as unavailable, and do not infer missing identifiers.",
+				"For the report's Scope boundary, use the supplied branch, base commit when supplied, and HEAD commit identifiers; do not infer or claim a full commit list.",
 				"Reading the assembled context is the first and only required step.",
-				"Do not run git or any other repository-inspection command to recover metadata or context, and do not put a repository probe before the context read with &&.",
+				"Do not probe for already-supplied metadata or context, and do not put an unnecessary repository probe before the context read with &&.",
 				"A sandbox denial of an unnecessary probe is not a reason to stop: read the assembled context and complete the review.",
 				"Branch under review: \"feature\".",
 				"HEAD commit: 2222222222222222222222222222222222222222.",
@@ -866,6 +866,34 @@ func TestComposePromptTreatsSuppliedReviewContextAsAuthoritative(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestComposePromptTreatsWorkingTreeHEADAsBaselineWithoutInventingBase(t *testing.T) {
+	assembled := Context{
+		Scope:  ScopeWorkingTree,
+		Branch: "feature",
+		Head:   "2222222222222222222222222222222222222222",
+		Inline: "context\n",
+	}
+	prompt, err := ComposePrompt(KindReview, assembled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"The identifiers actually supplied above are authoritative for this review.",
+		"In working-tree scope, the supplied HEAD commit is the comparison baseline; a base commit applies only when supplied.",
+		"base commit when supplied",
+		"HEAD commit: 2222222222222222222222222222222222222222.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("working-tree prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, unexpected := range []string{"Resolved base:", "Base commit:"} {
+		if strings.Contains(prompt, unexpected) {
+			t.Fatalf("working-tree prompt unexpectedly contains %q:\n%s", unexpected, prompt)
+		}
 	}
 }
 
