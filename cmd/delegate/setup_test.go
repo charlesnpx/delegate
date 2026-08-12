@@ -174,7 +174,7 @@ func TestSetupJSONReportsPendingSubmissionIntentsAndCounts(t *testing.T) {
 			ParentClient:    strings.Repeat("client-", 40),
 			ParentSessionID: "private-session-id",
 			ParentAgent:     "private-parent-agent",
-			Depth:           "99",
+			Depth:           "private-depth-99",
 		}
 		if err := saveSubmissionIntent(stateDir, intent); err != nil {
 			t.Fatal(err)
@@ -253,7 +253,7 @@ func TestSetupJSONReportsPendingSubmissionIntentsAndCounts(t *testing.T) {
 		if got.RequestID != want.requestID || got.Phase != want.phase || got.Backend != wantLabel || got.Origin == nil || got.Origin.Skill != "delegate:"+wantLabel[:setupPendingSubmissionIntentLabelLimit-len("delegate:")] {
 			t.Fatalf("pendingSubmissionIntents[%d]=%#v, want request %q with durable context", index, got, want.requestID)
 		}
-		if strings.Contains(stdout.String(), "parent_session_id") || strings.Contains(stdout.String(), "parent_agent") || strings.Contains(stdout.String(), "private-session-id") || strings.Contains(stdout.String(), "private-parent-agent") || strings.Contains(stdout.String(), "client-") || strings.Contains(stdout.String(), "99") {
+		if strings.Contains(stdout.String(), "parent_session_id") || strings.Contains(stdout.String(), "parent_agent") || strings.Contains(stdout.String(), "private-session-id") || strings.Contains(stdout.String(), "private-parent-agent") || strings.Contains(stdout.String(), "client-") || strings.Contains(stdout.String(), "private-depth") {
 			t.Fatalf("setup exposed unapproved origin fields: %s", stdout.String())
 		}
 		if got.CreatedAt.IsZero() {
