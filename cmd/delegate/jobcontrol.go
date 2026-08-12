@@ -450,6 +450,9 @@ func (result terminalJobResult) envelopeOptions(c agentbusClient, option termina
 	}
 	option.LateFinalization = option.LateFinalization || result.result.LateFinalization
 	if resolution, ok := timeoutResolutionForTerminal(c, result.result, result.statusJob, result.statusFound); ok {
+		if option.Timeout.Requested != "" {
+			resolution.Requested = option.Timeout.Requested
+		}
 		option.Timeout = resolution
 	}
 	if result.statusFound {
@@ -815,7 +818,7 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 	backendError := ""
 	modelEffort := config.ModelEffortResolution{}
 	backendProfile := option.BackendProfile
-	origin := envelopeOrigin{}
+	origin := option.Origin
 	if found {
 		backendError = meta.BackendError
 		modelEffort.Model = meta.Model
@@ -824,7 +827,11 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 			backendProfile = meta.BackendProfile
 		}
 		if !timeoutResolutionIsResolved(option.Timeout) {
+			requested := option.Timeout.Requested
 			option.Timeout = timeoutMetadataFallback(meta)
+			if requested != "" {
+				option.Timeout.Requested = requested
+			}
 		}
 		if meta.Origin != nil {
 			origin = *meta.Origin

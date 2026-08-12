@@ -810,6 +810,7 @@ func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.
 		ModelsReportedCapable: hello.Capabilities["models.reported"],
 		BackendProfile:        taskBackendProfile(opts),
 		Timeout:               opts.TimeoutResolution,
+		Origin:                taskEnvelopeOrigin(opts),
 		RequestID:             opts.RequestID,
 		Deduplicated:          opts.Deduplicated,
 		DeduplicatedSet:       true,
@@ -875,6 +876,12 @@ func correctionEnvelopeOptions(originalJobID, finalJobID string, options termina
 	if finalJobID == "" || finalJobID == originalJobID {
 		return options
 	}
+	// The request's timeout flag and audit origin remain meaningful for its
+	// correction. Effective timeout and profile are properties of the terminal
+	// job, however, and must be resolved from the correction's daemon response,
+	// status, or metadata rather than inherited from the original job.
+	options.Timeout = config.DimensionResolution{Requested: options.Timeout.Requested}
+	options.BackendProfile = config.DimensionResolution{}
 	options.RequestID = ""
 	options.Deduplicated = false
 	options.DeduplicatedSet = false
