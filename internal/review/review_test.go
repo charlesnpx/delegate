@@ -198,13 +198,19 @@ fi
 
 func TestAssembleAutoCombinesCommittedBranchAndWorkingTreeOverlay(t *testing.T) {
 	repo := newGitFixture(t)
-	mainHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
-	gitFixture(t, repo, "update-ref", "refs/remotes/origin/main", mainHead)
-	gitFixture(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	mergeBase := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
 	gitFixture(t, repo, "switch", "-c", "feature")
 	writeFixtureFile(t, repo, "committed.go", "package feature\n// COMMITTED_BRANCH_CHANGE\n")
 	gitFixture(t, repo, "add", "committed.go")
 	gitFixture(t, repo, "commit", "-m", "committed feature change")
+	gitFixture(t, repo, "switch", "main")
+	writeFixtureFile(t, repo, "main.go", "package main\n// BASE_TIP_ADVANCE\n")
+	gitFixture(t, repo, "add", "main.go")
+	gitFixture(t, repo, "commit", "-m", "advance base tip")
+	baseTip := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	gitFixture(t, repo, "update-ref", "refs/remotes/origin/main", baseTip)
+	gitFixture(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	gitFixture(t, repo, "switch", "feature")
 	writeFixtureFile(t, repo, "overlay.txt", "UNTRACKED_OVERLAY_CHANGE\n")
 
 	assembled, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeAuto, StateDir: filepath.Join(t.TempDir(), "state")})
@@ -212,12 +218,24 @@ func TestAssembleAutoCombinesCommittedBranchAndWorkingTreeOverlay(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer Cleanup(assembled)
-	if assembled.Scope != ScopeAuto || assembled.Base.Ref != "origin/main" {
+	if assembled.Scope != ScopeAuto || assembled.Base.Ref != "origin/main" || assembled.Base.Commit != baseTip || assembled.ComparisonBase != mergeBase {
 		t.Fatalf("scope/base = %q %#v", assembled.Scope, assembled.Base)
 	}
 	for _, want := range []string{"COMMITTED_BRANCH_CHANGE", "UNTRACKED_OVERLAY_CHANGE"} {
 		if !strings.Contains(assembled.Inline, want) {
 			t.Fatalf("automatic context missing %q: %q", want, assembled.Inline)
+		}
+	}
+	prompt, err := ComposePrompt(KindReview, assembled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Resolved base tip commit: " + baseTip + ".",
+		"Comparison baseline (merge base used for diff): " + mergeBase + ".",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("automatic review prompt missing %q: %q", want, prompt)
 		}
 	}
 }
@@ -584,12 +602,18 @@ func TestAssembleFileCountThresholdSpillsElevenFiles(t *testing.T) {
 
 func TestAssembleBranchScopeUsesResolvedBaseAndCanonicalCWD(t *testing.T) {
 	repo := newGitFixture(t)
+	mergeBase := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
 	gitFixture(t, repo, "switch", "-c", "feature")
 	writeFixtureFile(t, repo, "branch.go", "package branch\n// BRANCH_CHANGE\n")
 	writeFixtureFile(t, repo, "branch-secret.txt", "BRANCH_SECRET_NEVER\n")
 	gitFixture(t, repo, "add", "branch.go", "branch-secret.txt")
 	gitFixture(t, repo, "commit", "-m", "feature change")
-	baseCommit := gitFixtureOutput(t, repo, "rev-parse", "main")
+	gitFixture(t, repo, "switch", "main")
+	writeFixtureFile(t, repo, "main.go", "package main\n// BASE_TIP_ADVANCE\n")
+	gitFixture(t, repo, "add", "main.go")
+	gitFixture(t, repo, "commit", "-m", "advance base tip")
+	baseTip := gitFixtureOutput(t, repo, "rev-parse", "main")
+	gitFixture(t, repo, "switch", "feature")
 	head := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
 	link := filepath.Join(t.TempDir(), "repo-link")
 	if err := os.Symlink(repo, link); err != nil {
@@ -613,14 +637,15 @@ func TestAssembleBranchScopeUsesResolvedBaseAndCanonicalCWD(t *testing.T) {
 	if assembled.CanonicalCWD != canonicalRepo || assembled.RepositoryRoot != canonicalRepo {
 		t.Fatalf("canonical cwd=%q root=%q want=%q", assembled.CanonicalCWD, assembled.RepositoryRoot, canonicalRepo)
 	}
-	if assembled.Base.Source != "explicit" || assembled.Base.Ref != "main" || assembled.Scope != ScopeBranch {
+	if assembled.Base.Source != "explicit" || assembled.Base.Ref != "main" || assembled.Base.Commit != baseTip || assembled.ComparisonBase != mergeBase || assembled.Scope != ScopeBranch {
 		t.Fatalf("base/scope=%#v %q", assembled.Base, assembled.Scope)
 	}
 	if assembled.Branch != "feature" || assembled.Head != head {
 		t.Fatalf("branch/head=%q/%q, want feature/%q", assembled.Branch, assembled.Head, head)
 	}
 	for _, want := range []string{
-		"base_commit\t" + baseCommit,
+		"base_tip_commit\t" + baseTip,
+		"comparison_baseline\t" + mergeBase,
 		"branch\t\"feature\"",
 		"head\t" + head,
 	} {
@@ -636,7 +661,8 @@ func TestAssembleBranchScopeUsesResolvedBaseAndCanonicalCWD(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"Base commit: " + baseCommit + ".",
+		"Resolved base tip commit: " + baseTip + ".",
+		"Comparison baseline (merge base used for diff): " + mergeBase + ".",
 		"Branch under review: \"feature\".",
 		"HEAD commit: " + head + ".",
 	} {
@@ -644,6 +670,33 @@ func TestAssembleBranchScopeUsesResolvedBaseAndCanonicalCWD(t *testing.T) {
 			t.Fatalf("review prompt missing %q: %q", want, prompt)
 		}
 	}
+}
+
+func TestAssemblePublishesReviewIdentityForBranchWorktreeAndDetachedHEAD(t *testing.T) {
+	t.Run("checked-out branch", func(t *testing.T) {
+		repo := newGitFixture(t)
+		gitFixture(t, repo, "switch", "-c", "feature")
+
+		assertAssembledReviewIdentity(t, repo, "feature", gitFixtureOutput(t, repo, "rev-parse", "HEAD"))
+	})
+
+	t.Run("linked worktree", func(t *testing.T) {
+		repo := newGitFixture(t)
+		worktree := filepath.Join(t.TempDir(), "linked")
+		gitFixture(t, repo, "worktree", "add", "-b", "linked", worktree, "main")
+
+		assertAssembledReviewIdentity(t, worktree, "linked", gitFixtureOutput(t, worktree, "rev-parse", "HEAD"))
+	})
+
+	t.Run("detached HEAD", func(t *testing.T) {
+		repo := newGitFixture(t)
+		gitFixture(t, repo, "checkout", "--detach")
+		if got := gitFixtureOutput(t, repo, "rev-parse", "--abbrev-ref", "HEAD"); got != "HEAD" {
+			t.Fatalf("detached branch label = %q, want HEAD", got)
+		}
+
+		assertAssembledReviewIdentity(t, repo, "(detached)", gitFixtureOutput(t, repo, "rev-parse", "HEAD"))
+	})
 }
 
 func TestAssembleRedactsSecretLikeBranchMetadata(t *testing.T) {
@@ -794,7 +847,7 @@ func TestAllowLiveRepoReadGatesBackendCWDAndPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if live.BackendCWD != live.CanonicalCWD || !strings.Contains(livePrompt, "LIVE-REPOSITORY MODE") || !strings.Contains(livePrompt, "makes backend file reads easier") || !strings.Contains(livePrompt, "self-collect") {
+	if live.BackendCWD != live.CanonicalCWD || !strings.Contains(livePrompt, "LIVE-REPOSITORY MODE") || !strings.Contains(livePrompt, "makes backend file reads easier") || !strings.Contains(livePrompt, "self-collect") || !strings.Contains(livePrompt, "After reading the assembled context") {
 		t.Fatalf("live gating failed: cwd=%q prompt=%q", live.BackendCWD, livePrompt)
 	}
 }
@@ -806,6 +859,71 @@ func TestComposeAdversarialPromptIsRefuteFirst(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "refute-first") || !strings.Contains(prompt, "trying to disprove") {
 		t.Fatalf("adversarial prompt = %q", prompt)
+	}
+}
+
+func TestComposePromptTreatsSuppliedReviewContextAsAuthoritative(t *testing.T) {
+	assembled := Context{
+		Scope:          ScopeBranch,
+		Base:           Base{Ref: "origin/main", Commit: "1111111111111111111111111111111111111111", Source: "default-remote"},
+		ComparisonBase: "3333333333333333333333333333333333333333",
+		Branch:         "feature",
+		Head:           "2222222222222222222222222222222222222222",
+		ArtifactPath:   filepath.Join(t.TempDir(), artifactFilename),
+	}
+	for _, kind := range []string{KindReview, KindAdversarialReview} {
+		t.Run(kind, func(t *testing.T) {
+			prompt, err := ComposePrompt(kind, assembled)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{
+				"The identifiers actually supplied above are authoritative for this review.",
+				"Report them as given rather than as unavailable, and do not infer missing identifiers.",
+				"In branch and auto scope, the supplied comparison baseline is the merge base used for the diff; the resolved base tip identifies the base ref.",
+				"For the report's Scope boundary, use the supplied branch, resolved base tip commit when supplied, comparison baseline when supplied, and HEAD commit identifiers; do not infer or claim a full commit list.",
+				"Reading the assembled context is the first and only required step.",
+				"Do not probe for already-supplied metadata or context, and do not put the expressly unnecessary redundant metadata probe before the context read with &&.",
+				"A sandbox denial of that expressly unnecessary probe is not a reason to stop: read the assembled context and complete the review.",
+				"Resolved base tip commit: 1111111111111111111111111111111111111111.",
+				"Comparison baseline (merge base used for diff): 3333333333333333333333333333333333333333.",
+				"Branch under review: \"feature\".",
+				"HEAD commit: 2222222222222222222222222222222222222222.",
+				"\"review.patch\"",
+			} {
+				if !strings.Contains(prompt, want) {
+					t.Fatalf("review prompt missing %q:\n%s", want, prompt)
+				}
+			}
+		})
+	}
+}
+
+func TestComposePromptTreatsWorkingTreeHEADAsBaselineWithoutInventingBase(t *testing.T) {
+	assembled := Context{
+		Scope:  ScopeWorkingTree,
+		Branch: "feature",
+		Head:   "2222222222222222222222222222222222222222",
+		Inline: "context\n",
+	}
+	prompt, err := ComposePrompt(KindReview, assembled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"The identifiers actually supplied above are authoritative for this review.",
+		"In working-tree scope, the supplied HEAD commit is the comparison baseline; a base tip applies only when supplied.",
+		"resolved base tip commit when supplied",
+		"HEAD commit: 2222222222222222222222222222222222222222.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("working-tree prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, unexpected := range []string{"Resolved base:", "Resolved base tip commit:", "Comparison baseline (merge base used for diff):"} {
+		if strings.Contains(prompt, unexpected) {
+			t.Fatalf("working-tree prompt unexpectedly contains %q:\n%s", unexpected, prompt)
+		}
 	}
 }
 
@@ -978,4 +1096,24 @@ func gitFixtureOutput(t *testing.T, repo string, args ...string) string {
 		t.Fatalf("git %v: %v\n%s", args, err, raw)
 	}
 	return strings.TrimSpace(string(raw))
+}
+
+func assertAssembledReviewIdentity(t *testing.T, cwd, wantBranch, wantHead string) {
+	t.Helper()
+	assembled, err := Assemble(context.Background(), Options{
+		CWD:      cwd,
+		Scope:    ScopeWorkingTree,
+		StateDir: filepath.Join(t.TempDir(), "state"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := Cleanup(assembled); err != nil {
+			t.Errorf("Cleanup() error = %v", err)
+		}
+	})
+	if assembled.Branch != wantBranch || assembled.Head != wantHead {
+		t.Fatalf("branch/head=%q/%q, want %q/%q", assembled.Branch, assembled.Head, wantBranch, wantHead)
+	}
 }
