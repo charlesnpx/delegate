@@ -47,35 +47,109 @@ func TestSetupStatePreflightRejectsRelativeAgentbusStateRoot(t *testing.T) {
 	}
 }
 
-func TestSetupDoesNotCreateMissingStateDirectories(t *testing.T) {
-	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
-	defer restore()
+func TestSetupPendingSubmissionIntentsDoesNotCreateMissingStateDirectory(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "delegate")
+
+	count, intents, warnings := setupPendingSubmissionIntents(stateDir)
+	if count == nil || *count != 0 || intents == nil || len(intents) != 0 || len(warnings) != 0 {
+		t.Fatalf("missing state pending output = count:%v intents:%#v warnings:%#v, want zero, empty array, and no warnings", count, intents, warnings)
+	}
+	if _, err := os.Lstat(stateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("intent enumeration created state path %q: %v", stateDir, err)
+	}
+}
+
+func TestSetupExistingDirectoryWritabilityProbesAndCleansUp(t *testing.T) {
+	dir := t.TempDir()
+
+	result := setupExistingDirectoryWritability(dir)
+	if result.Status != setupWritabilityWritable || result.Reason != "" {
+		t.Fatalf("existing directory writability = %#v, want writable", result)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("effective writability probe left files behind: %#v", entries)
+	}
+}
+
+func TestSetupPreflightEffectivelyProbesExistingRoots(t *testing.T) {
 	stateHome := t.TempDir()
 	cacheHome := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateHome)
 	t.Setenv("XDG_CACHE_HOME", cacheHome)
-	t.Setenv("HOME", t.TempDir())
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("setup code=%d stderr=%q", code, stderr.String())
-	}
-	for _, path := range []string{
+	t.Setenv("AGENTBUS_STATE_ROOT", "")
+	paths := []string{
 		filepath.Join(stateHome, "delegate"),
 		filepath.Join(stateHome, "agentbus"),
 		filepath.Join(cacheHome, "agentbus", "start-locks"),
-	} {
-		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("setup created state path %q: %v", path, err)
+	}
+	for _, path := range paths {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
 		}
 	}
-	var result setupJSON
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
-		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+
+	result := setupStatePreflight()
+	for _, check := range []struct {
+		name   string
+		status setupWritability
+	}{
+		{"delegate state root", result.StateRootWritability},
+		{"agentbus state root", result.AgentbusStateRootWritability},
+		{"agentbus autostart lock root", result.AgentbusAutostartLockRootWritability},
+	} {
+		if check.status != setupWritabilityWritable {
+			t.Fatalf("%s writability=%q, want writable", check.name, check.status)
+		}
 	}
-	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 0 || result.PendingSubmissionIntents == nil || len(result.PendingSubmissionIntents) != 0 {
-		t.Fatalf("missing state pending output = count:%v intents:%#v, want zero and empty array", result.PendingSubmissionIntentCount, result.PendingSubmissionIntents)
+	for _, path := range paths {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("preflight probe left files in %q: %#v", path, entries)
+		}
+	}
+}
+
+func TestSetupPreflightReportsMissingRootsAsUnknownWithoutCreatingThem(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AGENTBUS_STATE_ROOT", "")
+
+	result := setupStatePreflight()
+	for _, check := range []struct {
+		name   string
+		path   string
+		status setupWritability
+	}{
+		{"delegate state root", result.DelegateStateRoot, result.StateRootWritability},
+		{"agentbus state root", result.AgentbusStateRoot, result.AgentbusStateRootWritability},
+		{"agentbus autostart lock root", result.AgentbusAutostartLockRoot, result.AgentbusAutostartLockRootWritability},
+	} {
+		if check.status != setupWritabilityUnknown {
+			t.Fatalf("%s writability=%q, want unknown for missing path", check.name, check.status)
+		}
+		if _, err := os.Lstat(check.path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("preflight created %s %q: %v", check.name, check.path, err)
+		}
+	}
+}
+
+func TestSetupMissingDirectoryWritabilityIsUnknownAndDoesNotCreate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing")
+
+	result := setupExistingDirectoryWritability(path)
+	if result.Status != setupWritabilityUnknown || !strings.Contains(result.Reason, "may be creatable") {
+		t.Fatalf("missing directory writability = %#v, want potentially-creatable unknown", result)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("writability probe created missing path %q: %v", path, err)
 	}
 }
 
@@ -84,6 +158,7 @@ func TestSetupJSONReportsPendingSubmissionIntentsAndCounts(t *testing.T) {
 	defer restore()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setupTestPreflightDirectories(t)
 	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
 	if err != nil {
 		t.Fatal(err)
@@ -195,6 +270,7 @@ func TestSetupPendingSubmissionIntentsCap(t *testing.T) {
 	defer restore()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setupTestPreflightDirectories(t)
 	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
 	if err != nil {
 		t.Fatal(err)
@@ -288,6 +364,7 @@ func TestSetupAgentbusVersionReadiness(t *testing.T) {
 				return []byte(tc.output), nil
 			}
 			t.Setenv("HOME", t.TempDir())
+			setupTestPreflightDirectories(t)
 
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
@@ -503,6 +580,9 @@ func TestSetupReadyRequiresWritableAgentbusStateRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("AGENTBUS_STATE_ROOT", stateRoot)
+	if err := os.MkdirAll(filepath.Join(os.Getenv("HOME"), "Library", "Caches", "agentbus", "start-locks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
@@ -540,6 +620,9 @@ func TestSetupReadyRequiresWritableDelegateStateRoot(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", xdgState)
 	delegateRoot := filepath.Join(xdgState, "delegate")
 	if err := os.MkdirAll(delegateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(os.Getenv("HOME"), "Library", "Caches", "agentbus", "start-locks"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(delegateRoot, 0o500); err != nil {
