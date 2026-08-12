@@ -635,10 +635,14 @@ func setupExistingDirectoryWritability(path string) setupWritabilityResult {
 		return file.Close()
 	}
 	cleanup := func() error {
-		if err := closeFile(); err != nil {
-			return err
+		// Always attempt the exact-path removal, even when close fails:
+		// returning early on a close error would leave the probe file behind.
+		closeErr := closeFile()
+		removeErr := os.Remove(name)
+		if closeErr != nil {
+			return closeErr
 		}
-		return os.Remove(name)
+		return removeErr
 	}
 
 	if _, err := file.WriteString("setup preflight\n"); err != nil {
