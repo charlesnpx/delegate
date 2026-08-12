@@ -30,6 +30,7 @@ type LaunchEnvelope struct {
 	Deduplicated bool                       `json:"deduplicated"`
 	Model        config.DimensionResolution `json:"model"`
 	Effort       config.DimensionResolution `json:"effort"`
+	Timeout      config.DimensionResolution `json:"timeout"`
 	ResultSHA256 *string                    `json:"result_sha256"`
 	Origin       *envelopeOrigin            `json:"origin,omitempty"`
 }
@@ -56,6 +57,7 @@ type TerminalEnvelope struct {
 	BackendError                   string                     `json:"backend_error,omitempty"`
 	Model                          config.DimensionResolution `json:"model"`
 	Effort                         config.DimensionResolution `json:"effort"`
+	Timeout                        config.DimensionResolution `json:"timeout"`
 	ModelReported                  string                     `json:"model_reported,omitempty"`
 	ModelReportedUnavailableReason string                     `json:"model_reported_unavailable_reason,omitempty"`
 	SubmittedAt                    *time.Time                 `json:"submitted_at,omitempty"`
@@ -69,6 +71,7 @@ type TerminalEnvelope struct {
 
 type terminalEnvelopeOptions struct {
 	ModelEffort            config.ModelEffortResolution
+	Timeout                config.DimensionResolution
 	ModelReported          string
 	ModelsReportedCapable  bool
 	Origin                 envelopeOrigin
@@ -92,6 +95,7 @@ type terminalEnvelopeOptions struct {
 
 type launchEnvelopeOptions struct {
 	ModelEffort  config.ModelEffortResolution
+	Timeout      config.DimensionResolution
 	Origin       envelopeOrigin
 	RequestID    string
 	Deduplicated bool
@@ -120,6 +124,7 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		BackendError                   string                     `json:"backend_error,omitempty"`
 		Model                          config.DimensionResolution `json:"model"`
 		Effort                         config.DimensionResolution `json:"effort"`
+		Timeout                        config.DimensionResolution `json:"timeout"`
 		ModelReported                  string                     `json:"model_reported,omitempty"`
 		ModelReportedUnavailableReason string                     `json:"model_reported_unavailable_reason,omitempty"`
 		SubmittedAt                    *time.Time                 `json:"submitted_at,omitempty"`
@@ -151,6 +156,7 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		BackendError:                   e.BackendError,
 		Model:                          e.Model,
 		Effort:                         e.Effort,
+		Timeout:                        e.Timeout,
 		ModelReported:                  e.ModelReported,
 		ModelReportedUnavailableReason: e.ModelReportedUnavailableReason,
 		SubmittedAt:                    e.SubmittedAt,
@@ -205,6 +211,7 @@ func newLaunchEnvelopeWithOptions(jobID string, state engine.JobState, option la
 		Deduplicated: option.Deduplicated,
 		Model:        modelEffort.Model,
 		Effort:       modelEffort.Effort,
+		Timeout:      normalizedTimeout(option.Timeout),
 		Origin:       envelopeOriginPointer(option.Origin),
 	}
 	return env, nil
@@ -236,6 +243,7 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 		BackendError:                   backendError,
 		Model:                          modelEffort.Model,
 		Effort:                         modelEffort.Effort,
+		Timeout:                        normalizedTimeout(option.Timeout),
 		ModelReported:                  option.ModelReported,
 		ModelReportedUnavailableReason: modelReportedUnavailableReason(option.ModelsReportedCapable, option.ModelReported),
 		SubmittedAt:                    option.SubmittedAt,
@@ -313,6 +321,13 @@ func normalizedModelEffort(values ...config.ModelEffortResolution) config.ModelE
 		resolved.Effort.Source = "default"
 	}
 	return resolved
+}
+
+func normalizedTimeout(resolution config.DimensionResolution) config.DimensionResolution {
+	if resolution.Source == "" {
+		resolution.Source = "unknown"
+	}
+	return resolution
 }
 
 func modelReportedUnavailableReason(capable bool, modelReported string) string {

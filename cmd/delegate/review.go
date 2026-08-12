@@ -134,7 +134,7 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute repository working directory")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
-	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout")
+	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout; 0 leaves the deadline to the daemon default; envelope.timeout is authoritative")
 	fs.BoolVar(&opts.StrictContract, "strict-contract", false, "compatibility flag; delegate-report corrective retry is enabled by default")
 	fs.StringVar(&opts.Origin, "origin", "", "originating skill")
 	fs.Var(&opts.ParentClient, "parent-client", "explicit parent client for audit linkage")

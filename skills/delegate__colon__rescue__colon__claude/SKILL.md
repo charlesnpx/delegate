@@ -23,7 +23,7 @@ Superseding escape hatch: if the requester explicitly asks you to perform the ta
 
 "delegate task" is read-only unless it has "--write". The worker sandbox is offline, and a write turn can write only inside the job "--cwd"; use it for repo-local edits/builds/tests and point "GOCACHE" and "GOMODCACHE" under that cwd. Route module downloads, other network work, and Git commits to the caller/orchestrator.
 
-The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
+The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted. The "--timeout" flag is optional; omit it or pass "--timeout 0" to leave the deadline to the daemon default, then use the launch envelope's "timeout" field as the authoritative effective value.
 
 When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id, job record, contract stamps, and read-only profile.
 
@@ -45,7 +45,7 @@ Each handoff prompt file is single-use: after the task consumes it, create a new
 
 When the caller has a machine-readable output schema, pass it with "--output-schema-file" instead of placing it in prompt prose. Violations return as "<json-pointer>: <message>", and one corrective retry runs automatically.
 
-Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", or "result_sha256" fields.
+Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "timeout", or "result_sha256" fields.
 
 If submission is unresolved after Agentbus accepted or may have accepted the request, preserve the reported "request_id" and run only the exact recovery command "delegate task --recover-request <request_id> --json". Do not create a replacement request unless the user explicitly asks for a new logical task.
 
@@ -53,6 +53,6 @@ Launch with "--background" so the host agent loop stays free. To await the job, 
 
 ## Result Discipline
 
-When the delegated run returns, preserve the helper's verdict, summary, findings, and next steps structure. For review-style output, present findings first and keep them ordered by severity. Preserve file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Terminal envelopes may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing. After presenting review findings, do not auto-fix; ask the user which issues to address.
+When the delegated run returns, preserve the helper's verdict, summary, findings, and next steps structure. For review-style output, present findings first and keep them ordered by severity. Preserve file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Terminal envelopes carry the same "timeout" resolution as launch envelopes and may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing. After presenting review findings, do not auto-fix; ask the user which issues to address.
 
 Use delegate-report discipline in your own handoff: score criteria, label evidence as observed/inferred/assumed, separate changed from verified, state scope boundaries, and report divergences instead of hiding them.

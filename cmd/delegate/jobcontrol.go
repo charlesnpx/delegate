@@ -298,7 +298,7 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 	if err := writeWarnings(stderr, correctionWarnings); err != nil {
 		return 0, err
 	}
-	env, err := terminalEnvelopeFromJobResultWithOptions("", terminalJob.result, terminalJob.envelopeOptions(terminalEnvelopeOptions{ModelsReportedCapable: hello.Capabilities["models.reported"]}))
+	env, err := terminalEnvelopeFromJobResultWithOptions("", terminalJob.result, terminalJob.envelopeOptions(c, terminalEnvelopeOptions{ModelsReportedCapable: hello.Capabilities["models.reported"]}))
 	if err != nil {
 		return 0, err
 	}
@@ -342,7 +342,7 @@ func runCancel(args []string, stdout, stderr io.Writer) (int, error) {
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
 	}
 	if result.terminal != nil {
-		env, err := terminalEnvelopeFromJobResultWithOptions("", result.terminal.result, result.terminal.envelopeOptions(terminalEnvelopeOptions{ModelsReportedCapable: hello.Capabilities["models.reported"]}))
+		env, err := terminalEnvelopeFromJobResultWithOptions("", result.terminal.result, result.terminal.envelopeOptions(c, terminalEnvelopeOptions{ModelsReportedCapable: hello.Capabilities["models.reported"]}))
 		if err != nil {
 			return 0, err
 		}
@@ -416,15 +416,38 @@ func terminalJobResultFromResultAndStatus(result client.JobResult, statusJob cli
 	return terminalJobResult{result: result, statusJob: statusJob, statusFound: statusFound}
 }
 
+func timeoutResolutionForTerminal(c agentbusClient, result client.JobResult, statusJob client.JobStatus, statusFound bool) (config.DimensionResolution, bool) {
+	if provider, supported := c.(daemonTimeoutResolutionProvider); supported {
+		if resolution, ok := provider.resultTimeoutResolution(result.JobID); ok {
+			return resolution, true
+		}
+		if statusFound {
+			if resolution, ok := provider.statusTimeoutResolution(statusJob.JobID); ok {
+				return resolution, true
+			}
+		}
+	}
+	if resolution, ok := daemonTimeoutResolution(result); ok {
+		return resolution, true
+	}
+	if statusFound {
+		return daemonTimeoutResolution(statusJob)
+	}
+	return config.DimensionResolution{}, false
+}
+
 func terminalJobResultFromStatus(job client.JobStatus) terminalJobResult {
 	return terminalJobResultFromResultAndStatus(terminalJobResultEnvelopeInputFromStatus(job), job, true)
 }
 
-func (result terminalJobResult) envelopeOptions(option terminalEnvelopeOptions) terminalEnvelopeOptions {
+func (result terminalJobResult) envelopeOptions(c agentbusClient, option terminalEnvelopeOptions) terminalEnvelopeOptions {
 	if option.CleanupDisposition == "" {
 		option.CleanupDisposition = result.result.CleanupDisposition
 	}
 	option.LateFinalization = option.LateFinalization || result.result.LateFinalization
+	if resolution, ok := timeoutResolutionForTerminal(c, result.result, result.statusJob, result.statusFound); ok {
+		option.Timeout = resolution
+	}
 	if result.statusFound {
 		if option.CleanupDisposition == "" {
 			option.CleanupDisposition = result.statusJob.CleanupDisposition
@@ -792,6 +815,9 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 		backendError = meta.BackendError
 		modelEffort.Model = meta.Model
 		modelEffort.Effort = meta.Effort
+		if !timeoutResolutionIsResolved(option.Timeout) {
+			option.Timeout = timeoutMetadataFallback(meta)
+		}
 		if meta.Origin != nil {
 			origin = *meta.Origin
 		}
@@ -835,6 +861,17 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 	}
 	state := terminalStateForLocalShapeVerdict(result.State, stamp, shapeStampAuthoritative)
 	return newTerminalEnvelope(result.JobID, state, kind, contractKind, stamp, resultSHA256, backendError, option)
+}
+
+// timeoutMetadataFallback returns a daemon-captured timeout only from
+// metadata written after timeout capture was introduced. Earlier metadata
+// cannot distinguish a requested flag value from the daemon's effective
+// resolution, but its requested value remains useful to report.
+func timeoutMetadataFallback(meta jobMetadata) config.DimensionResolution {
+	if meta.Schema >= jobMetadataSchema {
+		return meta.Timeout
+	}
+	return config.DimensionResolution{Requested: meta.Timeout.Requested, Source: "unknown"}
 }
 
 func localArtifactsRetainedFromMetadata(meta jobMetadata, state engine.JobState, _ string) bool {
