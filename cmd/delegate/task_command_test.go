@@ -957,6 +957,95 @@ func TestTaskWaitCorrectionFailureFallsBackToOriginalResult(t *testing.T) {
 	}
 }
 
+func TestResultDirectFailedReportCorrectionReportsExhaustion(t *testing.T) {
+	correctionID := "job_report_correction"
+	badReport := malformedDelegateReport()
+	fake := &reportCorrectionRoundTripClient{
+		hello: helloWithCapabilities(),
+		resultsByJobID: map[string]client.JobResult{
+			correctionID: reportJobResult(correctionID, badReport),
+		},
+	}
+	restore := stubAgentbusClientGlobals(t, fake)
+	defer restore()
+
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveJobMetadata(stateDir, jobMetadata{
+		JobID:              correctionID,
+		Backend:            "codex",
+		ContractKind:       contractKindShape,
+		ReportCorrectionOf: "job_report_original",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"result", "--job", correctionID, "--json"}, nil, &stdout, &stderr)
+	if want := engine.ExitCodeForState(engine.StateCompletedNoncompliant); code != want {
+		t.Fatalf("result code=%d stderr=%q stdout=%q, want %d", code, stderr.String(), stdout.String(), want)
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if env.Status != engine.StateCompletedNoncompliant || env.Contract.Status != engine.ContractNoncompliant || !env.Contract.RetryUsed || env.Contract.Attempts != 2 {
+		t.Fatalf("direct correction envelope = %#v, want noncompliant with two attempts and retry used", env)
+	}
+	if got, found := terminalEnvelopeContractField(t, stdout.Bytes(), "retrySkipReason"); !found || got != string(reportRetrySkipAttemptedAndExhausted) {
+		t.Fatalf("contract retrySkipReason=%q (found=%t), want %q", got, found, reportRetrySkipAttemptedAndExhausted)
+	}
+}
+
+func TestResultCorrectionObservationDeadlineReportsUnknown(t *testing.T) {
+	originalID := "job_report_original"
+	correctionID := "job_report_correction"
+	badReport := malformedDelegateReport()
+	fake := &reportCorrectionRoundTripClient{
+		hello: helloWithCapabilities(),
+		resultsByJobID: map[string]client.JobResult{
+			originalID:   reportJobResult(originalID, badReport),
+			correctionID: {JobID: correctionID, SessionID: "session_" + correctionID, State: engine.StateRunning},
+		},
+	}
+	restore := stubAgentbusClientGlobals(t, fake)
+	defer restore()
+
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveJobMetadata(stateDir, jobMetadata{
+		JobID:                 originalID,
+		Backend:               "codex",
+		ContractKind:          contractKindShape,
+		ReportCorrectionJobID: correctionID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"result", "--job", originalID, "--wait", "--wait-timeout", "50ms", "--json"}, nil, &stdout, &stderr)
+	if want := engine.ExitCodeForState(engine.StateCompletedNoncompliant); code != want {
+		t.Fatalf("result code=%d stderr=%q stdout=%q, want %d", code, stderr.String(), stdout.String(), want)
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if env.JobID != originalID || env.Status != engine.StateCompletedNoncompliant {
+		t.Fatalf("observation-deadline envelope job/status=%s/%s, want %s/completed_noncompliant", env.JobID, env.Status, originalID)
+	}
+	if got, found := terminalEnvelopeContractField(t, stdout.Bytes(), "retrySkipReason"); !found || got != string(reportRetrySkipUnknown) {
+		t.Fatalf("contract retrySkipReason=%q (found=%t), want %q", got, found, reportRetrySkipUnknown)
+	}
+	if !strings.Contains(stderr.String(), "could not complete") || !strings.Contains(stderr.String(), "context deadline exceeded") {
+		t.Fatalf("stderr=%q, want correction observation-deadline warning", stderr.String())
+	}
+}
+
 func TestTerminalEnvelopeReportsReportRetrySkipReason(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

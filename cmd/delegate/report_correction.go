@@ -57,13 +57,18 @@ func maybeCorrectDelegateReport(ctx context.Context, c agentbusClient, hello cli
 	if err != nil {
 		return terminalJob, c, hello, reportRetrySkipUnknown, nil, err
 	}
-	if validation.Compliant || meta.ReportCorrectionOf != "" {
+	if validation.Compliant {
 		return terminalJob, c, hello, "", nil, nil
+	}
+	// A correction job is the one permitted retry. Once its own report is
+	// observed noncompliant, no further correction is eligible.
+	if meta.ReportCorrectionOf != "" {
+		return terminalJob, c, hello, reportRetrySkipAttemptedAndExhausted, nil, nil
 	}
 	if meta.ReportCorrectionJobID != "" {
 		corrected, err := waitForTerminalJobResult(ctx, c, stateDir, meta.ReportCorrectionJobID, cleanupWarnings)
 		if err != nil {
-			return terminalJob, c, hello, reportRetrySkipAttemptedAndExhausted, []string{reportCorrectionFallbackWarning(meta.JobID, meta.ReportCorrectionJobID, err)}, nil
+			return terminalJob, c, hello, reportRetrySkipUnknown, []string{reportCorrectionFallbackWarning(meta.JobID, meta.ReportCorrectionJobID, err)}, nil
 		}
 		if !reportCorrectionResultUsable(corrected.result) {
 			return terminalJob, c, hello, reportRetrySkipAttemptedAndExhausted, []string{reportCorrectionFallbackWarning(meta.JobID, corrected.result.JobID, nil)}, nil
