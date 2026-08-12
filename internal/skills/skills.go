@@ -16,7 +16,7 @@ import (
 
 const (
 	// Version is the content version for the generated skill prose.
-	Version = "v0.8.1"
+	Version = "v0.8.2"
 
 	TargetClaude = "claude"
 	TargetCodex  = "codex"

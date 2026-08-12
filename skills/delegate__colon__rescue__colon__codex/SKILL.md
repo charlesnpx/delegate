@@ -1,7 +1,7 @@
 ---
 name: delegate:rescue:codex
 description: Delegate a rescue task to codex through delegate and return the launch envelope verbatim.
-version: v0.8.1
+version: v0.8.2
 ---
 
 # delegate:rescue:codex
