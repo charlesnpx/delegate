@@ -1001,6 +1001,68 @@ func TestTaskWaitCorrectionFailureFallsBackToOriginalResult(t *testing.T) {
 	}
 }
 
+func TestTaskWaitCorrectionResolvesTerminalFieldsFromCorrectionJob(t *testing.T) {
+	goodReport := compliantReport()
+	badReport := malformedDelegateReport()
+	fake := &reportCorrectionRoundTripClient{
+		hello:  helloWithCapabilities(),
+		jobIDs: []string{"job_report_1", "job_report_2"},
+		resultsByJobID: map[string]client.JobResult{
+			"job_report_1": reportJobResult("job_report_1", badReport),
+			"job_report_2": reportJobResult("job_report_2", goodReport),
+		},
+		submittedTimeoutByJobID: map[string]config.DimensionResolution{
+			"job_report_1": {Effective: "45s", Source: "flag"},
+		},
+		resultTimeoutByJobID: map[string]config.DimensionResolution{
+			"job_report_2": {Effective: "30m0s", Source: "daemon"},
+		},
+	}
+	restore := stubAgentbusClientGlobals(t, fake)
+	defer restore()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("AI_AGENT", "")
+	t.Setenv("DELEGATE_DEPTH", "")
+
+	// Keep the original metadata required to discover the malformed report, but
+	// model loss of the correction's local metadata. The selected correction job
+	// still has a daemon timeout result, while its profile must be honestly
+	// unknown rather than inherited from the original --write request.
+	originalSave := saveDelegateJobMetadata
+	saveDelegateJobMetadata = func(stateDir string, meta jobMetadata) error {
+		if meta.ReportCorrectionOf != "" {
+			return nil
+		}
+		return originalSave(stateDir, meta)
+	}
+	defer func() { saveDelegateJobMetadata = originalSave }()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it",
+		"--write", "--timeout", "45s", "--origin", "delegate:test",
+		"--parent-client", "test-client", "--parent-session", "test-session", "--wait", "--json",
+	}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("task code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if env.JobID != "job_report_2" {
+		t.Fatalf("terminal job_id=%q, want correction job", env.JobID)
+	}
+	if want := (config.DimensionResolution{Requested: "45s", Effective: "30m0s", Source: "daemon"}); env.Timeout != want {
+		t.Fatalf("terminal timeout=%#v, want correction daemon resolution %#v", env.Timeout, want)
+	}
+	if want := (config.DimensionResolution{Source: "unknown"}); env.BackendProfile != want {
+		t.Fatalf("terminal backend_profile=%#v, want correction metadata loss reported as %#v", env.BackendProfile, want)
+	}
+	if env.Origin == nil || env.Origin.Skill != "delegate:test" || env.Origin.ParentClient != "test-client" || env.Origin.ParentSessionID != "test-session" {
+		t.Fatalf("terminal origin=%#v, want request-scoped origin linkage preserved", env.Origin)
+	}
+}
+
 func TestResultDirectFailedReportCorrectionReportsExhaustion(t *testing.T) {
 	correctionID := "job_report_correction"
 	badReport := malformedDelegateReport()
@@ -1757,12 +1819,15 @@ type fakeAgentbusClient struct {
 }
 
 type reportCorrectionRoundTripClient struct {
-	hello          client.HelloResult
-	jobIDs         []string
-	resultsByJobID map[string]client.JobResult
-	submits        []client.JobSubmitParams
-	statuses       []client.JobStatusParams
-	results        []client.JobResultParams
+	hello                   client.HelloResult
+	jobIDs                  []string
+	resultsByJobID          map[string]client.JobResult
+	submittedTimeoutByJobID map[string]config.DimensionResolution
+	resultTimeoutByJobID    map[string]config.DimensionResolution
+	statusTimeoutByJobID    map[string]config.DimensionResolution
+	submits                 []client.JobSubmitParams
+	statuses                []client.JobStatusParams
+	results                 []client.JobResultParams
 }
 
 func (f *reportCorrectionRoundTripClient) Close() error { return nil }
@@ -1803,6 +1868,21 @@ func (f *reportCorrectionRoundTripClient) JobResult(_ context.Context, params cl
 
 func (f *reportCorrectionRoundTripClient) JobCancel(context.Context, client.JobCancelParams) (client.JobCancelResult, error) {
 	return client.JobCancelResult{}, errors.New("unexpected JobCancel")
+}
+
+func (f *reportCorrectionRoundTripClient) submittedTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
+	resolution, ok := f.submittedTimeoutByJobID[jobID]
+	return resolution, ok && timeoutResolutionIsResolved(resolution)
+}
+
+func (f *reportCorrectionRoundTripClient) resultTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
+	resolution, ok := f.resultTimeoutByJobID[jobID]
+	return resolution, ok && timeoutResolutionIsResolved(resolution)
+}
+
+func (f *reportCorrectionRoundTripClient) statusTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
+	resolution, ok := f.statusTimeoutByJobID[jobID]
+	return resolution, ok && timeoutResolutionIsResolved(resolution)
 }
 
 func (f *fakeAgentbusClient) Close() error { return nil }
