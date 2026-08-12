@@ -17,6 +17,7 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/delegate/internal/config"
 	"github.com/charlesnpx/delegate/internal/handoff"
 	"github.com/charlesnpx/delegate/internal/policy"
 )
@@ -112,6 +113,110 @@ func TestEnvelopeSchema2SubmissionFieldsRoundTrip(t *testing.T) {
 	if decodedTerminal.Schema != 2 || decodedTerminal.RequestID != requestID || !decodedTerminal.Deduplicated {
 		t.Fatalf("terminal round trip = %#v", decodedTerminal)
 	}
+}
+
+func TestTimeoutEnvelopeResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		submit     client.JobSubmitResult
+		want       config.DimensionResolution
+		wantSubmit *int64
+	}{
+		{
+			name:       "explicit timeout is flag sourced",
+			args:       []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--timeout", "45s", "--background", "--json"},
+			want:       config.DimensionResolution{Requested: "45s", Effective: "45s", Source: "flag"},
+			wantSubmit: int64Pointer(45000),
+		},
+		{
+			name: "omitted timeout stays unknown without daemon resolution",
+			args: []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--background", "--json"},
+			want: config.DimensionResolution{Source: "unknown"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities(), submitResult: tc.submit}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			var envelope LaunchEnvelope
+			if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+				t.Fatalf("launch JSON=%q: %v", stdout.String(), err)
+			}
+			if envelope.Timeout != tc.want {
+				t.Fatalf("timeout envelope=%#v, want %#v", envelope.Timeout, tc.want)
+			}
+			if len(fake.submits) != 1 {
+				t.Fatalf("submits=%d, want 1", len(fake.submits))
+			}
+			if got := fake.submits[0].TaskSpec.TimeoutMs; !equalInt64Pointers(got, tc.wantSubmit) {
+				t.Fatalf("submitted timeout=%v, want %v", got, tc.wantSubmit)
+			}
+		})
+	}
+
+	t.Run("omitted timeout uses daemon resolution", func(t *testing.T) {
+		resolution := timeoutResolutionForSubmission(0, false, timeoutResponse{Timeout: timeoutResponseValue{Effective: 1800000, Source: "daemon_default"}})
+		want := config.DimensionResolution{Effective: "30m0s", Source: "daemon"}
+		if resolution != want {
+			t.Fatalf("launch timeout=%#v, want %#v", resolution, want)
+		}
+	})
+
+	t.Run("daemon response resolves terminal envelope", func(t *testing.T) {
+		resolution := timeoutResolutionForSubmission(0, false, timeoutResponse{Timeout: timeoutResponseValue{Effective: 1800000, Source: "daemon_default"}})
+		terminal, err := newTerminalEnvelope("job_timeout", engine.StateTimedOut, taskKind, contractKindShape, engine.ContractStamp{}, "", "", terminalEnvelopeOptions{Timeout: resolution})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := config.DimensionResolution{Effective: "30m0s", Source: "daemon"}
+		if terminal.Timeout != want {
+			t.Fatalf("terminal timeout=%#v, want %#v", terminal.Timeout, want)
+		}
+	})
+
+	for _, command := range []string{"task", "review"} {
+		t.Run(command+" help explains zero timeout", func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			_ = run([]string{command, "--help"}, nil, &stdout, &stderr)
+			if !strings.Contains(stderr.String(), "0 leaves the deadline to the daemon default; envelope.timeout is authoritative") {
+				t.Fatalf("help=%q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestMergeAcknowledgedJobMetadataUpgradesUnknownTimeout(t *testing.T) {
+	merged := mergeAcknowledgedJobMetadata(
+		jobMetadata{Timeout: config.DimensionResolution{Source: "unknown"}},
+		jobMetadata{Timeout: config.DimensionResolution{Effective: "30m0s", Source: "daemon"}},
+	)
+	want := config.DimensionResolution{Effective: "30m0s", Source: "daemon"}
+	if merged.Timeout != want {
+		t.Fatalf("timeout=%#v, want %#v", merged.Timeout, want)
+	}
+}
+
+type timeoutResponse struct {
+	Timeout timeoutResponseValue `json:"timeout"`
+}
+
+type timeoutResponseValue struct {
+	Effective int64  `json:"effective"`
+	Source    string `json:"source"`
+}
+
+func int64Pointer(value int64) *int64 { return &value }
+
+func equalInt64Pointers(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }
 
 func TestJSONSchemaTerminalEnvelopePreservesContractStamp(t *testing.T) {

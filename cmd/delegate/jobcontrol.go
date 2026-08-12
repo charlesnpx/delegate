@@ -416,6 +416,16 @@ func terminalJobResultFromResultAndStatus(result client.JobResult, statusJob cli
 	return terminalJobResult{result: result, statusJob: statusJob, statusFound: statusFound}
 }
 
+func timeoutResolutionForTerminal(result client.JobResult, statusJob client.JobStatus, statusFound bool) (config.DimensionResolution, bool) {
+	if resolution, ok := daemonTimeoutResolution(result); ok {
+		return resolution, true
+	}
+	if statusFound {
+		return daemonTimeoutResolution(statusJob)
+	}
+	return config.DimensionResolution{}, false
+}
+
 func terminalJobResultFromStatus(job client.JobStatus) terminalJobResult {
 	return terminalJobResultFromResultAndStatus(terminalJobResultEnvelopeInputFromStatus(job), job, true)
 }
@@ -426,6 +436,9 @@ func (result terminalJobResult) envelopeOptions(option terminalEnvelopeOptions) 
 	}
 	option.LateFinalization = option.LateFinalization || result.result.LateFinalization
 	if result.statusFound {
+		if resolution, ok := timeoutResolutionForTerminal(result.result, result.statusJob, true); ok {
+			option.Timeout = resolution
+		}
 		if option.CleanupDisposition == "" {
 			option.CleanupDisposition = result.statusJob.CleanupDisposition
 		}
@@ -792,6 +805,7 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 		backendError = meta.BackendError
 		modelEffort.Model = meta.Model
 		modelEffort.Effort = meta.Effort
+		option.Timeout = meta.Timeout
 		if meta.Origin != nil {
 			origin = *meta.Origin
 		}
@@ -802,6 +816,9 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 			option.Deduplicated = meta.Deduplicated
 			option.DeduplicatedSet = true
 		}
+	}
+	if resolution, ok := daemonTimeoutResolution(result); ok {
+		option.Timeout = resolution
 	}
 	if result.Result == nil && backendError != "" && !(found && meta.NoContract) {
 		stamp = skippedDelegateContractStamp(engine.SkipBackendError)

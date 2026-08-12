@@ -44,6 +44,7 @@ type taskOptions struct {
 	EffortSet          bool
 	Timeout            time.Duration
 	TimeoutSet         bool
+	TimeoutResolution  config.DimensionResolution
 	Write              bool
 	WriteSet           bool
 	StrictContract     bool
@@ -191,7 +192,7 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute working directory")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
-	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout")
+	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout; 0 leaves the deadline to the daemon default; envelope.timeout is authoritative")
 	fs.BoolVar(&opts.Write, "write", false, "allow backend writes")
 	fs.BoolVar(&opts.StrictContract, "strict-contract", false, "compatibility flag; delegate-report corrective retry is enabled by default")
 	fs.BoolVar(&opts.NoContract, "no-contract", false, "disable contract enforcement (cannot be used with --output-schema*)")
@@ -387,6 +388,7 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 	opts.WorkspaceKey = intent.WorkspaceKey
 	opts.SubmissionState = submitted.State
 	opts.Deduplicated = submitted.Deduplicated
+	opts.TimeoutResolution = timeoutResolutionForSubmission(opts.Timeout, opts.TimeoutSet, submitted)
 	contractKind := intent.ContractKind
 	ackWarnings, acknowledged, err := acknowledgeSubmittedTask(opts, resolved, submitted, contractKind, "after submission")
 	warnings = append(warnings, ackWarnings...)
@@ -621,11 +623,14 @@ func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted c
 		origin = *intent.Origin
 	}
 	spec := intent.Params.TaskSpec
+	timeout, timeoutSet := timeoutFromMillis(spec.TimeoutMs)
 	return taskOptions{
 		Backend:            spec.Backend,
 		CWD:                spec.CWD,
 		Model:              spec.Model,
 		Effort:             spec.Effort,
+		Timeout:            timeout,
+		TimeoutSet:         timeoutSet,
 		Write:              spec.Write,
 		NoContract:         intent.NoContract,
 		ReportCorrectionOf: recoveredReportCorrectionOf(intent),
@@ -639,6 +644,7 @@ func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted c
 		WorkspaceKey:       intent.WorkspaceKey,
 		SubmissionState:    submitted.State,
 		Deduplicated:       submitted.Deduplicated,
+		TimeoutResolution:  timeoutResolutionForSubmission(timeout, timeoutSet, submitted),
 	}
 }
 
@@ -722,6 +728,7 @@ func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contra
 		Deduplicated:       opts.Deduplicated,
 		Model:              modelEffort.Model,
 		Effort:             modelEffort.Effort,
+		Timeout:            normalizedTimeout(opts.TimeoutResolution),
 		Origin:             envelopeOriginPointer(taskEnvelopeOrigin(opts)),
 	}
 }
@@ -770,6 +777,7 @@ func acknowledgeSubmittedTask(opts taskOptions, resolved handoff.ResolvedPrompt,
 func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.HelloResult, opts taskOptions, submitted client.JobSubmitResult, warnings []string, stderr io.Writer) (taskRunResult, error) {
 	terminalOptions := terminalEnvelopeOptions{
 		ModelsReportedCapable: hello.Capabilities["models.reported"],
+		Timeout:               opts.TimeoutResolution,
 		RequestID:             opts.RequestID,
 		Deduplicated:          opts.Deduplicated,
 		DeduplicatedSet:       true,
@@ -851,6 +859,7 @@ func writeWarnings(stderr io.Writer, warnings []string) error {
 func newLaunchEnvelopeForTask(jobID string, state engine.JobState, opts taskOptions) (LaunchEnvelope, error) {
 	return newLaunchEnvelopeWithOptions(jobID, state, launchEnvelopeOptions{
 		ModelEffort:  taskModelEffort(opts),
+		Timeout:      opts.TimeoutResolution,
 		Origin:       taskEnvelopeOrigin(opts),
 		RequestID:    opts.RequestID,
 		Deduplicated: opts.Deduplicated,
@@ -936,6 +945,9 @@ func mergeAcknowledgedJobMetadata(existing, next jobMetadata) jobMetadata {
 	if dimensionResolutionEmpty(merged.Effort) {
 		merged.Effort = next.Effort
 	}
+	if dimensionResolutionEmpty(merged.Timeout) || merged.Timeout.Source == "unknown" {
+		merged.Timeout = next.Timeout
+	}
 	if merged.Origin == nil {
 		merged.Origin = next.Origin
 	}
@@ -979,18 +991,28 @@ func effectiveTaskKind(opts taskOptions) string {
 }
 
 func timeoutMillis(timeout time.Duration, set bool) *int64 {
-	if !set {
+	if !set || timeout == 0 {
 		return nil
-	}
-	if timeout == 0 {
-		var zero int64
-		return &zero
 	}
 	ms := timeout.Milliseconds()
 	if ms == 0 {
 		ms = 1
 	}
 	return &ms
+}
+
+func timeoutFromMillis(timeout *int64) (time.Duration, bool) {
+	if timeout == nil {
+		return 0, false
+	}
+	return time.Duration(*timeout) * time.Millisecond, true
+}
+
+func requestedTimeoutValue(timeout time.Duration, set bool) string {
+	if !set {
+		return ""
+	}
+	return timeout.String()
 }
 
 func contractKindForPolicy(turnPolicy *engine.TurnPolicy, noContract bool) string {

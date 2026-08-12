@@ -976,7 +976,7 @@ func TestTimeoutFiveWayAndReviewCommands(t *testing.T) {
 		wantErr     string
 	}{
 		{name: "omitted", args: []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout"}, wantNil: true, wantCode0: true},
-		{name: "explicit_zero", args: []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--timeout", "0"}, wantTimeout: 0, wantCode0: true},
+		{name: "explicit_zero", args: []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--timeout", "0"}, wantNil: true, wantCode0: true},
 		{name: "positive", args: []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--timeout", "1500ms"}, wantTimeout: 1500, wantCode0: true},
 		{name: "negative", args: []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--timeout", "-1s"}, wantErr: "--timeout must be non-negative"},
 		{name: "oversized", args: []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--timeout", "4h1ns"}, wantErr: "--timeout must be at most 4h0m0s"},
@@ -1022,7 +1022,7 @@ func TestTimeoutFiveWayAndReviewCommands(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("%s code=%d stderr=%q", command, code, stderr.String())
 			}
-			if len(fake.submits) != 1 || fake.submits[0].TaskSpec.TimeoutMs == nil || *fake.submits[0].TaskSpec.TimeoutMs != 0 {
+			if len(fake.submits) != 1 || fake.submits[0].TaskSpec.TimeoutMs != nil {
 				t.Fatalf("%s timeout submit=%#v", command, fake.submits)
 			}
 		})
