@@ -816,7 +816,7 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 		modelEffort.Model = meta.Model
 		modelEffort.Effort = meta.Effort
 		if !timeoutResolutionIsResolved(option.Timeout) {
-			option.Timeout = meta.Timeout
+			option.Timeout = timeoutMetadataFallback(meta)
 		}
 		if meta.Origin != nil {
 			origin = *meta.Origin
@@ -861,6 +861,17 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 	}
 	state := terminalStateForLocalShapeVerdict(result.State, stamp, shapeStampAuthoritative)
 	return newTerminalEnvelope(result.JobID, state, kind, contractKind, stamp, resultSHA256, backendError, option)
+}
+
+// timeoutMetadataFallback returns a daemon-captured timeout only from
+// metadata written after timeout capture was introduced. Earlier metadata
+// cannot distinguish a requested flag value from the daemon's effective
+// resolution, but its requested value remains useful to report.
+func timeoutMetadataFallback(meta jobMetadata) config.DimensionResolution {
+	if meta.Schema >= jobMetadataSchema {
+		return meta.Timeout
+	}
+	return config.DimensionResolution{Requested: meta.Timeout.Requested, Source: "unknown"}
 }
 
 func localArtifactsRetainedFromMetadata(meta jobMetadata, state engine.JobState, _ string) bool {

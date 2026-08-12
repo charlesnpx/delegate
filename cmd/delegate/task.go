@@ -900,6 +900,7 @@ func validateAcknowledgedJobMetadata(meta jobMetadata, opts taskOptions, jobID s
 
 func mergeAcknowledgedJobMetadata(existing, next jobMetadata) jobMetadata {
 	merged := existing
+	legacyTimeout := merged.Schema < jobMetadataSchema
 	if merged.Schema == 0 || merged.Schema < next.Schema {
 		merged.Schema = next.Schema
 	}
@@ -945,7 +946,7 @@ func mergeAcknowledgedJobMetadata(existing, next jobMetadata) jobMetadata {
 	if dimensionResolutionEmpty(merged.Effort) {
 		merged.Effort = next.Effort
 	}
-	if dimensionResolutionEmpty(merged.Timeout) || merged.Timeout.Source == "unknown" {
+	if legacyTimeout || dimensionResolutionEmpty(merged.Timeout) || merged.Timeout.Source == "unknown" {
 		merged.Timeout = next.Timeout
 	}
 	if merged.Origin == nil {

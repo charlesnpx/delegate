@@ -256,6 +256,39 @@ func TestStatusOnlyTerminalTimeoutPrecedesLaunchMetadata(t *testing.T) {
 	}
 }
 
+func TestLegacyTimeoutMetadataCannotSupplyTerminalEffectiveValue(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	jobID := "job_legacy_timeout"
+	if err := saveJobMetadata(stateDir, jobMetadata{
+		Schema:       1,
+		JobID:        jobID,
+		Kind:         taskKind,
+		ContractKind: contractKindShape,
+		Timeout: config.DimensionResolution{
+			Requested: "45s",
+			Effective: "45s",
+			Source:    "flag",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	env, err := terminalEnvelopeFromJobResultWithOptions(stateDir, client.JobResult{
+		JobID: jobID,
+		State: engine.StateCompleted,
+	}, terminalEnvelopeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := config.DimensionResolution{Requested: "45s", Source: "unknown"}
+	if env.Timeout != want {
+		t.Fatalf("terminal timeout=%#v, want legacy effective value excluded as %#v", env.Timeout, want)
+	}
+}
+
 type timeoutResponse struct {
 	Timeout timeoutResponseValue `json:"timeout"`
 }

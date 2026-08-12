@@ -21,7 +21,10 @@ const (
 	backendDiagnosticMaxBytes  = 2 * 1024
 	backendDiagnosticReadBytes = 64 * 1024
 	backendDiagnosticTruncated = "\n[truncated]"
-	jobMetadataSchema          = 1
+	// jobMetadataSchema 2 marks timeout resolutions captured from the daemon's
+	// wire response. Schema 1 metadata predates that capture and may have
+	// recorded a requested --timeout as its effective value.
+	jobMetadataSchema = 2
 
 	cleanupDispositionNoExecutionPossible = "no_execution_possible"
 	cleanupDispositionVerifiedAbsent      = "verified_absent"

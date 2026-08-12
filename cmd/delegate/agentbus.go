@@ -68,6 +68,20 @@ type timeoutCapturingClient struct {
 	statusTimeouts    map[string]config.DimensionResolution
 }
 
+var (
+	connectPinnedAgentbus = func(ctx context.Context, opts client.Options) error {
+		typed, err := client.Connect(ctx, opts)
+		if err != nil {
+			return err
+		}
+		return typed.Close()
+	}
+	dialAgentbusWire = func(ctx context.Context, network, address string) (net.Conn, error) {
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, network, address)
+	}
+)
+
 func newTimeoutCapturingClient(ctx context.Context, opts client.Options) (*timeoutCapturingClient, error) {
 	if opts.StateRoot == "" {
 		stateRoot, err := engine.ResolveStateRoot()
@@ -76,36 +90,16 @@ func newTimeoutCapturingClient(ctx context.Context, opts client.Options) (*timeo
 		}
 		opts.StateRoot = stateRoot
 	}
-	// Connect through the pinned client first so its established autostart and
-	// connection behavior remains in effect before this client retains additive
-	// response fields from the wire.
-	typed, err := client.Connect(ctx, opts)
-	if err != nil {
-		return nil, err
-	}
-	_ = typed.Close()
-	socketPath := opts.SocketPath
-	if socketPath == "" {
-		socketPath = filepath.Join(opts.StateRoot, "agentbus.sock")
-	}
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "unix", socketPath)
-	if err != nil {
-		return nil, err
-	}
-	client := &timeoutCapturingClient{
+	c := &timeoutCapturingClient{
 		opts:              opts,
-		conn:              conn,
-		reader:            bufio.NewReader(conn),
 		submittedTimeouts: make(map[string]config.DimensionResolution),
 		resultTimeouts:    make(map[string]config.DimensionResolution),
 		statusTimeouts:    make(map[string]config.DimensionResolution),
 	}
-	if err := client.helloRequest(ctx); err != nil {
-		_ = conn.Close()
+	if err := c.reconnect(ctx); err != nil {
 		return nil, err
 	}
-	return client, nil
+	return c, nil
 }
 
 func (c *timeoutCapturingClient) Close() error {
@@ -115,10 +109,13 @@ func (c *timeoutCapturingClient) Close() error {
 		return nil
 	}
 	c.closed = true
-	if c.conn == nil {
+	conn := c.conn
+	c.conn = nil
+	c.reader = nil
+	if conn == nil {
 		return nil
 	}
-	return c.conn.Close()
+	return conn.Close()
 }
 
 func (c *timeoutCapturingClient) HelloResult() client.HelloResult { return c.hello }
@@ -214,20 +211,90 @@ func (c *timeoutCapturingClient) statusTimeoutResolution(jobID string) (config.D
 	return resolution, ok
 }
 
-func (c *timeoutCapturingClient) helloRequest(ctx context.Context) error {
-	token, err := c.token()
+// reconnect preserves the pinned client's reconnect lifecycle: it uses the
+// pinned client to retain its autostart behavior, then opens a fresh wire
+// connection that can capture additive response fields.
+func (c *timeoutCapturingClient) reconnect(ctx context.Context) error {
+	if err := connectPinnedAgentbus(ctx, c.opts); err != nil {
+		return err
+	}
+	return c.connect(ctx)
+}
+
+func (c *timeoutCapturingClient) ensureConnected(ctx context.Context) error {
+	c.mu.Lock()
+	connected := !c.closed && c.conn != nil && c.reader != nil
+	c.mu.Unlock()
+	if connected {
+		return nil
+	}
+	return c.reconnect(ctx)
+}
+
+func (c *timeoutCapturingClient) connect(ctx context.Context) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return errors.New("agentbus client is closed")
+	}
+	c.mu.Unlock()
+	socketPath := c.opts.SocketPath
+	if socketPath == "" {
+		socketPath = filepath.Join(c.opts.StateRoot, "agentbus.sock")
+	}
+	conn, err := dialAgentbusWire(ctx, "unix", socketPath)
 	if err != nil {
 		return err
 	}
-	var hello client.HelloResult
-	if err := c.do(ctx, "protocol.hello", map[string]any{"clientProtocolVersion": 2, "token": token}, &hello); err != nil {
+	reader := bufio.NewReader(conn)
+	hello, err := c.helloOnConnection(ctx, conn, reader)
+	if err != nil {
+		_ = conn.Close()
 		return err
 	}
-	if hello.ProtocolVersion != 2 {
-		return &client.ProtocolVersionMismatchError{Expected: 2, Received: hello.ProtocolVersion}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		_ = conn.Close()
+		return errors.New("agentbus client is closed")
 	}
+	old := c.conn
+	c.conn = conn
+	c.reader = reader
 	c.hello = hello
+	c.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
 	return nil
+}
+
+func (c *timeoutCapturingClient) helloOnConnection(ctx context.Context, conn net.Conn, reader *bufio.Reader) (client.HelloResult, error) {
+	token, err := c.token()
+	if err != nil {
+		return client.HelloResult{}, err
+	}
+	var hello client.HelloResult
+	request := struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+		Params  any             `json:"params,omitempty"`
+	}{JSONRPC: "2.0", ID: json.RawMessage(`"hello"`), Method: "protocol.hello", Params: map[string]any{"clientProtocolVersion": 2, "token": token}}
+	if err := writeAgentbusWireFrame(ctx, conn, request); err != nil {
+		return client.HelloResult{}, err
+	}
+	line, err := readAgentbusWireFrame(ctx, conn, reader)
+	if err != nil {
+		return client.HelloResult{}, err
+	}
+	if err := decodeAgentbusWireResponse(line, &hello); err != nil {
+		return client.HelloResult{}, err
+	}
+	if hello.ProtocolVersion != 2 {
+		return client.HelloResult{}, &client.ProtocolVersionMismatchError{Expected: 2, Received: hello.ProtocolVersion}
+	}
+	return hello, nil
 }
 
 func (c *timeoutCapturingClient) token() (string, error) {
@@ -248,8 +315,11 @@ func (c *timeoutCapturingClient) token() (string, error) {
 func (c *timeoutCapturingClient) do(ctx context.Context, method string, params, result any) error {
 	c.requestMu.Lock()
 	defer c.requestMu.Unlock()
+	if err := c.ensureConnected(ctx); err != nil {
+		return err
+	}
 	c.mu.Lock()
-	if c.closed || c.conn == nil {
+	if c.closed || c.conn == nil || c.reader == nil {
 		c.mu.Unlock()
 		return errors.New("agentbus client is closed")
 	}
@@ -268,12 +338,30 @@ func (c *timeoutCapturingClient) do(ctx context.Context, method string, params, 
 	err := writeAgentbusWireFrame(ctx, conn, request)
 	c.writeMu.Unlock()
 	if err != nil {
+		c.connectionFailed(conn)
 		return err
 	}
 	line, err := readAgentbusWireFrame(ctx, conn, reader)
 	if err != nil {
+		c.connectionFailed(conn)
 		return err
 	}
+	return decodeAgentbusWireResponse(line, result)
+}
+
+func (c *timeoutCapturingClient) connectionFailed(conn net.Conn) {
+	c.mu.Lock()
+	if c.conn != conn {
+		c.mu.Unlock()
+		return
+	}
+	c.conn = nil
+	c.reader = nil
+	c.mu.Unlock()
+	_ = conn.Close()
+}
+
+func decodeAgentbusWireResponse(line []byte, result any) error {
 	var response struct {
 		Result json.RawMessage `json:"result"`
 		Error  json.RawMessage `json:"error"`
