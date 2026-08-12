@@ -85,9 +85,11 @@ type taskRunResult struct {
 }
 
 const (
-	delegateRequestIDTag = "delegate.request_id"
-	agentbusMaxTimeout   = 4 * time.Hour
-	readOnlyTaskHint     = "notice: task will run with a read-only backend profile; pass --write for edits or builds."
+	delegateRequestIDTag         = "delegate.request_id"
+	agentbusMaxTimeout           = 4 * time.Hour
+	readOnlyTaskHint             = "notice: task will run with a read-only backend profile; pass --write for edits or builds."
+	backendProfileReadOnly       = "read-only"
+	backendProfileWorkspaceWrite = "workspace-write"
 )
 
 func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
@@ -728,6 +730,7 @@ func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contra
 		Deduplicated:       opts.Deduplicated,
 		Model:              modelEffort.Model,
 		Effort:             modelEffort.Effort,
+		BackendProfile:     taskBackendProfile(opts),
 		Timeout:            normalizedTimeout(opts.TimeoutResolution),
 		Origin:             envelopeOriginPointer(taskEnvelopeOrigin(opts)),
 	}
@@ -735,6 +738,15 @@ func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contra
 
 func taskModelEffort(opts taskOptions) config.ModelEffortResolution {
 	return opts.ModelEffort
+}
+
+// taskBackendProfile is derived directly from --write. It deliberately has no
+// requested value: absence of --write is not a separate requested profile.
+func taskBackendProfile(opts taskOptions) config.DimensionResolution {
+	if opts.Write {
+		return config.DimensionResolution{Effective: backendProfileWorkspaceWrite, Source: "flag"}
+	}
+	return config.DimensionResolution{Effective: backendProfileReadOnly, Source: "default"}
 }
 
 func persistLaunchedJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) (string, error) {
@@ -777,6 +789,7 @@ func acknowledgeSubmittedTask(opts taskOptions, resolved handoff.ResolvedPrompt,
 func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.HelloResult, opts taskOptions, submitted client.JobSubmitResult, warnings []string, stderr io.Writer) (taskRunResult, error) {
 	terminalOptions := terminalEnvelopeOptions{
 		ModelsReportedCapable: hello.Capabilities["models.reported"],
+		BackendProfile:        taskBackendProfile(opts),
 		Timeout:               opts.TimeoutResolution,
 		RequestID:             opts.RequestID,
 		Deduplicated:          opts.Deduplicated,
@@ -858,11 +871,12 @@ func writeWarnings(stderr io.Writer, warnings []string) error {
 
 func newLaunchEnvelopeForTask(jobID string, state engine.JobState, opts taskOptions) (LaunchEnvelope, error) {
 	return newLaunchEnvelopeWithOptions(jobID, state, launchEnvelopeOptions{
-		ModelEffort:  taskModelEffort(opts),
-		Timeout:      opts.TimeoutResolution,
-		Origin:       taskEnvelopeOrigin(opts),
-		RequestID:    opts.RequestID,
-		Deduplicated: opts.Deduplicated,
+		ModelEffort:    taskModelEffort(opts),
+		BackendProfile: taskBackendProfile(opts),
+		Timeout:        opts.TimeoutResolution,
+		Origin:         taskEnvelopeOrigin(opts),
+		RequestID:      opts.RequestID,
+		Deduplicated:   opts.Deduplicated,
 	})
 }
 
@@ -945,6 +959,9 @@ func mergeAcknowledgedJobMetadata(existing, next jobMetadata) jobMetadata {
 	}
 	if dimensionResolutionEmpty(merged.Effort) {
 		merged.Effort = next.Effort
+	}
+	if dimensionResolutionEmpty(merged.BackendProfile) {
+		merged.BackendProfile = next.BackendProfile
 	}
 	if legacyTimeout || dimensionResolutionEmpty(merged.Timeout) || merged.Timeout.Source == "unknown" {
 		merged.Timeout = next.Timeout

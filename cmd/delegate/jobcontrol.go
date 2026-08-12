@@ -810,11 +810,15 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 	}
 	backendError := ""
 	modelEffort := config.ModelEffortResolution{}
+	backendProfile := option.BackendProfile
 	origin := envelopeOrigin{}
 	if found {
 		backendError = meta.BackendError
 		modelEffort.Model = meta.Model
 		modelEffort.Effort = meta.Effort
+		if !dimensionResolutionEmpty(meta.BackendProfile) {
+			backendProfile = meta.BackendProfile
+		}
 		if !timeoutResolutionIsResolved(option.Timeout) {
 			option.Timeout = timeoutMetadataFallback(meta)
 		}
@@ -833,6 +837,7 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 		stamp = skippedDelegateContractStamp(engine.SkipBackendError)
 	}
 	option.ModelEffort = modelEffort
+	option.BackendProfile = backendProfile
 	option.ModelReported = result.ModelReported
 	option.Origin = origin
 	option.CleanupDisposition = cleanupDisposition
