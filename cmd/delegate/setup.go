@@ -73,6 +73,36 @@ type setupConfig struct {
 	Path        string                  `json:"path"`
 	Overridable bool                    `json:"overridable"`
 	Defaults    delegateconfig.Backends `json:"defaults"`
+
+	// backend limits only the per-backend configuration defaults in a filtered
+	// setup report. It is deliberately not serialized itself: the selected
+	// backend is evident from agentbus.backends.
+	backend string
+}
+
+// MarshalJSON keeps the unfiltered setup JSON byte-for-byte compatible while
+// allowing --backend to omit configuration defaults for other backends.
+func (config setupConfig) MarshalJSON() ([]byte, error) {
+	if config.backend == "" {
+		return json.Marshal(struct {
+			Path        string                  `json:"path"`
+			Overridable bool                    `json:"overridable"`
+			Defaults    delegateconfig.Backends `json:"defaults"`
+		}{
+			Path:        config.Path,
+			Overridable: config.Overridable,
+			Defaults:    config.Defaults,
+		})
+	}
+	return json.Marshal(struct {
+		Path        string                             `json:"path"`
+		Overridable bool                               `json:"overridable"`
+		Defaults    map[string]delegateconfig.Defaults `json:"defaults"`
+	}{
+		Path:        config.Path,
+		Overridable: config.Overridable,
+		Defaults:    setupConfigDefaultsForBackend(config.Defaults, config.backend),
+	})
 }
 
 type setupAgentbus struct {
@@ -132,12 +162,20 @@ type setupSkill struct {
 func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	fs := flag.NewFlagSet("delegate setup", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	backend := fs.String("backend", "", "limit per-backend detail to this available backend")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	if err := fs.Parse(args); err != nil {
 		return 0, err
 	}
 	if fs.NArg() != 0 {
 		return 0, fmt.Errorf("delegate setup does not accept positional arguments")
+	}
+	backendSet := false
+	fs.Visit(func(f *flag.Flag) {
+		backendSet = backendSet || f.Name == "backend"
+	})
+	if backendSet && *backend == "" {
+		return 0, errors.New("delegate setup --backend requires a non-empty backend name")
 	}
 	path, err := agentbusBinary()
 	if err != nil {
@@ -162,6 +200,10 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	}
 	defer c.Close()
 	hello := c.HelloResult()
+	outputHello, err := setupHelloForBackend(hello, *backend)
+	if err != nil {
+		return 0, err
+	}
 	requiredCapabilities := setupRequiredCapabilities()
 	missingCapabilities := missingCapabilities(hello, requiredCapabilities)
 	capabilitiesOK := len(missingCapabilities) == 0
@@ -198,8 +240,8 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 				MinimumSupportedVersion: minimumSupportedAgentbusVersion,
 				VersionStatus:           versionAssessment.Status,
 				ProtocolVersion:         hello.ProtocolVersion,
-				Backends:                hello.Backends,
-				BackendMetadata:         hello.BackendMetadata,
+				Backends:                outputHello.Backends,
+				BackendMetadata:         outputHello.BackendMetadata,
 				Capabilities:            hello.Capabilities,
 				Required:                requiredCapabilities,
 				Missing:                 missingCapabilities,
@@ -210,6 +252,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 				Path:        configPath,
 				Overridable: cfg.Overridable,
 				Defaults:    cfg.Backend,
+				backend:     *backend,
 			},
 			Skills:                               skills,
 			StateRootWritable:                    preflight.StateRootWritable,
@@ -262,13 +305,20 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 			return 0, err
 		}
 	}
-	if _, err := fmt.Fprintf(stdout, "agentbus models.reported: %t\nconfig file: %s\nconfig overridable: %t\nconfig backend claude: model=%s effort=%s\nconfig backend codex: model=%s effort=%s\nconfig backend cursor: model=%s effort=%s\n", hello.Capabilities["models.reported"], configPath, cfg.Overridable, cfg.Backend.Claude.Model, cfg.Backend.Claude.Effort, cfg.Backend.Codex.Model, cfg.Backend.Codex.Effort, cfg.Backend.Cursor.Model, cfg.Backend.Cursor.Effort); err != nil {
-		return 0, err
+	if *backend == "" {
+		if _, err := fmt.Fprintf(stdout, "agentbus models.reported: %t\nconfig file: %s\nconfig overridable: %t\nconfig backend claude: model=%s effort=%s\nconfig backend codex: model=%s effort=%s\nconfig backend cursor: model=%s effort=%s\n", hello.Capabilities["models.reported"], configPath, cfg.Overridable, cfg.Backend.Claude.Model, cfg.Backend.Claude.Effort, cfg.Backend.Codex.Model, cfg.Backend.Codex.Effort, cfg.Backend.Cursor.Model, cfg.Backend.Cursor.Effort); err != nil {
+			return 0, err
+		}
+	} else {
+		defaults := setupConfigDefaultsForBackend(cfg.Backend, *backend)[*backend]
+		if _, err := fmt.Fprintf(stdout, "agentbus models.reported: %t\nconfig file: %s\nconfig overridable: %t\nconfig backend %s: model=%s effort=%s\n", hello.Capabilities["models.reported"], configPath, cfg.Overridable, *backend, defaults.Model, defaults.Effort); err != nil {
+			return 0, err
+		}
 	}
-	for _, backend := range hello.Backends {
-		line := "backend " + backend
-		for _, meta := range hello.BackendMetadata {
-			if meta.Name == backend {
+	for _, reportedBackend := range outputHello.Backends {
+		line := "backend " + reportedBackend
+		for _, meta := range outputHello.BackendMetadata {
+			if meta.Name == reportedBackend {
 				line += fmt.Sprintf(": models=%s efforts=%s", strings.Join(meta.Models, ","), strings.Join(meta.Efforts, ","))
 			}
 		}
@@ -285,6 +335,51 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 		return 1, readinessErr
 	}
 	return 0, nil
+}
+
+// setupHelloForBackend filters only backend-scoped discovery data after the
+// complete Agentbus handshake. Setup still uses the unfiltered hello result
+// for its capability and readiness checks.
+func setupHelloForBackend(hello client.HelloResult, backend string) (client.HelloResult, error) {
+	if backend == "" {
+		return hello, nil
+	}
+	available := false
+	for _, name := range hello.Backends {
+		if name == backend {
+			available = true
+			break
+		}
+	}
+	if !available {
+		availableNames := strings.Join(hello.Backends, ", ")
+		if availableNames == "" {
+			availableNames = "none"
+		}
+		return client.HelloResult{}, fmt.Errorf("backend %q is not available; agentbus reports: %s", backend, availableNames)
+	}
+	filtered := hello
+	filtered.Backends = []string{backend}
+	filtered.BackendMetadata = nil
+	for _, metadata := range hello.BackendMetadata {
+		if metadata.Name == backend {
+			filtered.BackendMetadata = append(filtered.BackendMetadata, metadata)
+		}
+	}
+	return filtered, nil
+}
+
+func setupConfigDefaultsForBackend(defaults delegateconfig.Backends, backend string) map[string]delegateconfig.Defaults {
+	filtered := map[string]delegateconfig.Defaults{}
+	switch backend {
+	case "claude":
+		filtered[backend] = defaults.Claude
+	case "codex":
+		filtered[backend] = defaults.Codex
+	case "cursor":
+		filtered[backend] = defaults.Cursor
+	}
+	return filtered
 }
 
 func setupTooOldAgentbusResult(jsonOut bool, stdout io.Writer, path, version string, versionAssessment agentbusVersionAssessment) (int, error) {

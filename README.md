@@ -32,7 +32,7 @@ On a live Codex install, delegate minimally updates `${CODEX_HOME:-~/.codex}/con
 
 ```text
 delegate version [--json]
-delegate setup [--json]
+delegate setup [--json] [--backend <name>]
 delegate install-skills [--plan|--install|--uninstall] [--target claude|codex|all] [--json] [--install-root <abs>]
 
 delegate handoff create --json
@@ -213,6 +213,8 @@ Agentbus reports terminal outcome and cleanup proof separately. Delegate removes
 - `pendingSubmissionIntentCount` for the total prepared, in-flight, and blocked local submission intents, plus `pendingSubmissionIntents`: up to 20 oldest pending intents (oldest first), each with its `request_id`, phase, creation time, backend, and recorded origin when available. The count remains authoritative when the array is capped; recover a listed request with `delegate task --recover-request <request_id> --json`;
 - `unresolvedCleanupArtifactCount` for retained terminal local artifacts whose cleanup is not proven safe;
 - `stateRootWritable`, `daemonReachable`, `ready`, and managed skill statuses.
+
+Pass `--backend <name>` to limit `agentbus.backends`, backend metadata (including model lists), and per-backend config defaults to one advertised backend. Setup still completes the full Agentbus handshake and reports all global readiness fields and capabilities. An unavailable backend name is an error; omitting the flag preserves the existing JSON exactly.
 
 Missing `admission.strictContainment` makes setup not ready and returns nonzero.
 
