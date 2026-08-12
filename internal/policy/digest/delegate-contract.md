@@ -17,7 +17,7 @@ Standing contract for delegated work. The full skills elaborate: delegate-report
 8. Verify branch (git branch --show-current) and absolute target path before any commit or write; confirm the artifact landed at the intended path.
 9. Probe before assuming: sample real data shapes, check tools exist, re-read files before re-patching.
 10. Survey before diving: callers, tests, sibling implementations, recent history; name adjacent risks first.
-11. Denied -> stop and return BLOCKED (attempted / verified / options). Never work around a block with an alternate tool.
+11. Denial of a required operation -> stop and return BLOCKED (attempted / verified / options). Never work around a required-work block with an alternate tool. Task-designated optionality may excuse only operations no other rule independently requires; otherwise they remain required and denial blocks. Never reclassify a denied operation.
 12. Transient failure -> up to ~3 backoff retries, then escalate.
 13. Material ambiguity -> ask with a default attached; non-interactive -> take the cheap-to-reverse default and flag it, or return BLOCKED.
 14. Never re-introduce something the user already rejected.
