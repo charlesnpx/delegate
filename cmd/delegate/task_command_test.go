@@ -191,6 +191,7 @@ func TestSetupOutputIncludesReadinessFields(t *testing.T) {
 	defer restore()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
+	setupTestPreflightDirectories(t)
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"setup"}, nil, &stdout, &stderr)
@@ -218,6 +219,7 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "codex-home"))
+	setupTestPreflightDirectories(t)
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
@@ -251,8 +253,11 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	if result.AgentbusStateRoot == "" || result.AgentbusAutostartLockRoot == "" || !result.AgentbusAutostartLockRootWritable || !result.AdmissionStrictContainment || !result.Ready {
 		t.Fatalf("setup D8 fields = root:%q lock:%q lockWritable:%t strict:%t ready:%t", result.AgentbusStateRoot, result.AgentbusAutostartLockRoot, result.AgentbusAutostartLockRootWritable, result.AdmissionStrictContainment, result.Ready)
 	}
-	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 0 || result.UnresolvedCleanupArtifactCount == nil || *result.UnresolvedCleanupArtifactCount != 0 {
-		t.Fatalf("setup counts = pending:%v unresolved:%v, want zero", result.PendingSubmissionIntentCount, result.UnresolvedCleanupArtifactCount)
+	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 0 || len(result.PendingSubmissionIntents) != 0 || result.UnresolvedCleanupArtifactCount == nil || *result.UnresolvedCleanupArtifactCount != 0 {
+		t.Fatalf("setup pending=%v summaries=%#v unresolved=%v, want clean state", result.PendingSubmissionIntentCount, result.PendingSubmissionIntents, result.UnresolvedCleanupArtifactCount)
+	}
+	if result.PendingSubmissionIntents == nil {
+		t.Fatalf("pendingSubmissionIntents is null, want an empty JSON array for a clean state")
 	}
 	if len(result.Skills) != 28 {
 		t.Fatalf("skill statuses = %d, want 28: %#v", len(result.Skills), result.Skills)
@@ -1057,7 +1062,11 @@ func stubAgentbusGlobals(t *testing.T, fake *fakeAgentbusClient) func() {
 func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	stateHome := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	t.Setenv("AGENTBUS_STATE_ROOT", "")
 	oldConnect := connectAgentbus
 	oldLookPath := lookPath
 	oldCommandOutput := commandOutput
@@ -1074,6 +1083,30 @@ func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 		connectAgentbus = oldConnect
 		lookPath = oldLookPath
 		commandOutput = oldCommandOutput
+	}
+}
+
+// setupTestPreflightDirectories models the pre-existing autostart behavior of
+// a successful agentbus connection: setup connects before evaluating the
+// preflight fields, so the daemon has already created its state and lock roots.
+// Missing-path behavior is covered separately without a daemon.
+func setupTestPreflightDirectories(t *testing.T) {
+	t.Helper()
+	for _, resolve := range []func() (string, error){
+		resolveAgentbusStateRoot,
+		func() (string, error) { return handoff.ResolveStateDir(handoff.StateConfig{}) },
+		resolveAgentbusAutostartLockRoot,
+	} {
+		path, err := resolve()
+		if err != nil {
+			continue
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatalf("create fake-agentbus preflight directory %q: %v", path, err)
+		}
 	}
 }
 

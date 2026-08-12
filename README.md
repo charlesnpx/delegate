@@ -199,7 +199,7 @@ Agentbus reports terminal outcome and cleanup proof separately. Delegate removes
 - the full capability map, required delegate capabilities, missing capabilities, `capabilitiesOK`, and explicit `admissionStrictContainment`;
 - resolved `agentbusStateRoot` plus `agentbusStateRootWritable`;
 - resolved `agentbusAutostartLockRoot` (`<UserCacheDir>/agentbus/start-locks`) plus `agentbusAutostartLockRootWritable`;
-- `pendingSubmissionIntentCount` for prepared, in-flight, and blocked local submission intents;
+- `pendingSubmissionIntentCount` for the total prepared, in-flight, and blocked local submission intents, plus `pendingSubmissionIntents`: up to 20 oldest pending intents (oldest first), each with its `request_id`, phase, creation time, backend, and recorded origin when available. The count remains authoritative when the array is capped; recover a listed request with `delegate task --recover-request <request_id> --json`;
 - `unresolvedCleanupArtifactCount` for retained terminal local artifacts whose cleanup is not proven safe;
 - `stateRootWritable`, `daemonReachable`, `ready`, and managed skill statuses.
 

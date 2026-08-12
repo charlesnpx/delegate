@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
@@ -23,23 +24,50 @@ import (
 )
 
 type setupJSON struct {
-	Schema                            int           `json:"schema"`
-	Delegate                          string        `json:"delegate"`
-	Agentbus                          setupAgentbus `json:"agentbus"`
-	Config                            setupConfig   `json:"config"`
-	Skills                            []setupSkill  `json:"skills"`
-	StateRootWritable                 bool          `json:"stateRootWritable"`
-	AgentbusStateRoot                 string        `json:"agentbusStateRoot"`
-	AgentbusStateRootWritable         bool          `json:"agentbusStateRootWritable"`
-	AgentbusAutostartLockRoot         string        `json:"agentbusAutostartLockRoot"`
-	AgentbusAutostartLockRootWritable bool          `json:"agentbusAutostartLockRootWritable"`
-	AdmissionStrictContainment        bool          `json:"admissionStrictContainment"`
-	PendingSubmissionIntentCount      *int          `json:"pendingSubmissionIntentCount"`
-	UnresolvedCleanupArtifactCount    *int          `json:"unresolvedCleanupArtifactCount"`
-	DaemonReachable                   bool          `json:"daemonReachable"`
-	Ready                             bool          `json:"ready"`
-	Warnings                          []string      `json:"warnings,omitempty"`
+	Schema                               int                            `json:"schema"`
+	Delegate                             string                         `json:"delegate"`
+	Agentbus                             setupAgentbus                  `json:"agentbus"`
+	Config                               setupConfig                    `json:"config"`
+	Skills                               []setupSkill                   `json:"skills"`
+	StateRootWritable                    bool                           `json:"stateRootWritable"`
+	StateRootWritability                 setupWritability               `json:"stateRootWritability,omitempty"`
+	AgentbusStateRoot                    string                         `json:"agentbusStateRoot"`
+	AgentbusStateRootWritable            bool                           `json:"agentbusStateRootWritable"`
+	AgentbusStateRootWritability         setupWritability               `json:"agentbusStateRootWritability,omitempty"`
+	AgentbusAutostartLockRoot            string                         `json:"agentbusAutostartLockRoot"`
+	AgentbusAutostartLockRootWritable    bool                           `json:"agentbusAutostartLockRootWritable"`
+	AgentbusAutostartLockRootWritability setupWritability               `json:"agentbusAutostartLockRootWritability,omitempty"`
+	AdmissionStrictContainment           bool                           `json:"admissionStrictContainment"`
+	PendingSubmissionIntentCount         *int                           `json:"pendingSubmissionIntentCount"`
+	PendingSubmissionIntents             []setupPendingSubmissionIntent `json:"pendingSubmissionIntents"`
+	UnresolvedCleanupArtifactCount       *int                           `json:"unresolvedCleanupArtifactCount"`
+	DaemonReachable                      bool                           `json:"daemonReachable"`
+	Ready                                bool                           `json:"ready"`
+	Warnings                             []string                       `json:"warnings,omitempty"`
 }
+
+// setupPendingSubmissionIntent is the bounded recovery information setup
+// exposes for a durable pending submission intent. Setup projects only its
+// request ID, phase, creation time, and bounded backend and origin labels; it
+// neither adds nor changes durable state.
+type setupPendingSubmissionIntent struct {
+	RequestID string                    `json:"request_id"`
+	Phase     string                    `json:"phase"`
+	CreatedAt time.Time                 `json:"created_at"`
+	Backend   string                    `json:"backend,omitempty"`
+	Origin    *setupIntentOriginSummary `json:"origin,omitempty"`
+}
+
+// setupIntentOriginSummary contains only the coarse origin label needed to recognize
+// a logical task in setup output.
+type setupIntentOriginSummary struct {
+	Skill string `json:"skill,omitempty"`
+}
+
+const (
+	setupPendingSubmissionIntentLimit      = 20
+	setupPendingSubmissionIntentLabelLimit = 80
+)
 
 type setupConfig struct {
 	Path        string                  `json:"path"`
@@ -141,7 +169,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	if versionAssessment.Warning != "" {
 		preflight.Warnings = append(preflight.Warnings, versionAssessment.Warning)
 	}
-	pendingSubmissionIntents, countWarnings := setupPendingSubmissionIntentCount(preflight.DelegateStateRoot)
+	pendingSubmissionIntentCount, pendingSubmissionIntents, countWarnings := setupPendingSubmissionIntents(preflight.DelegateStateRoot)
 	preflight.Warnings = append(preflight.Warnings, countWarnings...)
 	unresolvedCleanupArtifacts, countWarnings := setupUnresolvedCleanupArtifactCount(preflight.DelegateStateRoot)
 	preflight.Warnings = append(preflight.Warnings, countWarnings...)
@@ -183,18 +211,22 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 				Overridable: cfg.Overridable,
 				Defaults:    cfg.Backend,
 			},
-			Skills:                            skills,
-			StateRootWritable:                 preflight.StateRootWritable,
-			AgentbusStateRoot:                 preflight.AgentbusStateRoot,
-			AgentbusStateRootWritable:         preflight.AgentbusStateRootWritable,
-			AgentbusAutostartLockRoot:         preflight.AgentbusAutostartLockRoot,
-			AgentbusAutostartLockRootWritable: preflight.AgentbusAutostartLockRootWritable,
-			AdmissionStrictContainment:        hello.Capabilities["admission.strictContainment"],
-			PendingSubmissionIntentCount:      pendingSubmissionIntents,
-			UnresolvedCleanupArtifactCount:    unresolvedCleanupArtifacts,
-			DaemonReachable:                   true,
-			Ready:                             ready,
-			Warnings:                          preflight.Warnings,
+			Skills:                               skills,
+			StateRootWritable:                    preflight.StateRootWritable,
+			StateRootWritability:                 preflight.StateRootWritability,
+			AgentbusStateRoot:                    preflight.AgentbusStateRoot,
+			AgentbusStateRootWritable:            preflight.AgentbusStateRootWritable,
+			AgentbusStateRootWritability:         preflight.AgentbusStateRootWritability,
+			AgentbusAutostartLockRoot:            preflight.AgentbusAutostartLockRoot,
+			AgentbusAutostartLockRootWritable:    preflight.AgentbusAutostartLockRootWritable,
+			AgentbusAutostartLockRootWritability: preflight.AgentbusAutostartLockRootWritability,
+			AdmissionStrictContainment:           hello.Capabilities["admission.strictContainment"],
+			PendingSubmissionIntentCount:         pendingSubmissionIntentCount,
+			PendingSubmissionIntents:             pendingSubmissionIntents,
+			UnresolvedCleanupArtifactCount:       unresolvedCleanupArtifacts,
+			DaemonReachable:                      true,
+			Ready:                                ready,
+			Warnings:                             preflight.Warnings,
 		})
 		if err != nil {
 			return 0, err
@@ -222,7 +254,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	if _, err := fmt.Fprintf(stdout, "agentbus discovery: found\nagentbus protocol: %d\ncapabilities: %s\nadmission.strictContainment: %t\n", hello.ProtocolVersion, capabilityStatus, hello.Capabilities["admission.strictContainment"]); err != nil {
 		return 0, err
 	}
-	if _, err := fmt.Fprintf(stdout, "agentbusStateRoot: %s\nagentbusStateRootWritable: %t\nagentbusAutostartLockRoot: %s\nagentbusAutostartLockRootWritable: %t\nstateRootWritable: %t\npendingSubmissionIntentCount: %s\nunresolvedCleanupArtifactCount: %s\ndaemonReachable: true\nready: %t\n", preflight.AgentbusStateRoot, preflight.AgentbusStateRootWritable, preflight.AgentbusAutostartLockRoot, preflight.AgentbusAutostartLockRootWritable, preflight.StateRootWritable, setupCountText(pendingSubmissionIntents), setupCountText(unresolvedCleanupArtifacts), ready); err != nil {
+	if _, err := fmt.Fprintf(stdout, "agentbusStateRoot: %s\nagentbusStateRootWritable: %t\nagentbusStateRootWritability: %s\nagentbusAutostartLockRoot: %s\nagentbusAutostartLockRootWritable: %t\nagentbusAutostartLockRootWritability: %s\nstateRootWritable: %t\nstateRootWritability: %s\npendingSubmissionIntentCount: %s\nunresolvedCleanupArtifactCount: %s\ndaemonReachable: true\nready: %t\n", preflight.AgentbusStateRoot, preflight.AgentbusStateRootWritable, preflight.AgentbusStateRootWritability, preflight.AgentbusAutostartLockRoot, preflight.AgentbusAutostartLockRootWritable, preflight.AgentbusAutostartLockRootWritability, preflight.StateRootWritable, preflight.StateRootWritability, setupCountText(pendingSubmissionIntentCount), setupCountText(unresolvedCleanupArtifacts), ready); err != nil {
 		return 0, err
 	}
 	for _, warning := range preflight.Warnings {
@@ -284,20 +316,29 @@ func setupReadinessError(hello client.HelloResult, version string, missingCapabi
 		errs = append(errs, capabilityMissingError(hello, version, missingCapabilities[0]))
 	}
 	if !preflight.AgentbusStateRootWritable {
-		errs = append(errs, setupWritableReadinessError("agentbus state root", preflight.AgentbusStateRoot))
+		errs = append(errs, setupWritableReadinessError("agentbus state root", preflight.AgentbusStateRoot, preflight.AgentbusStateRootWritability, preflight.AgentbusStateRootReason))
 	}
 	if !preflight.AgentbusAutostartLockRootWritable {
-		errs = append(errs, setupWritableReadinessError("agentbus autostart lock root", preflight.AgentbusAutostartLockRoot))
+		errs = append(errs, setupWritableReadinessError("agentbus autostart lock root", preflight.AgentbusAutostartLockRoot, preflight.AgentbusAutostartLockRootWritability, preflight.AgentbusAutostartLockRootReason))
 	}
 	if !preflight.StateRootWritable {
-		errs = append(errs, setupStateRootReadinessError(preflight.DelegateStateRoot, preflight.StateRootReason))
+		errs = append(errs, setupStateRootReadinessError(preflight.DelegateStateRoot, preflight.StateRootWritability, preflight.StateRootReason))
 	}
 	return errors.Join(errs...)
 }
 
-func setupWritableReadinessError(name, path string) error {
+func setupWritableReadinessError(name, path string, writability setupWritability, reason string) error {
+	if writability == setupWritabilityUnknown {
+		if reason == "" {
+			reason = "the path was not probed"
+		}
+		return fmt.Errorf("%s writability is unknown: %s", name, reason)
+	}
 	if path == "" {
 		return fmt.Errorf("%s writable check failed", name)
+	}
+	if reason != "" {
+		return fmt.Errorf("%s is not writable: %s", name, reason)
 	}
 	return fmt.Errorf("%s is not writable: %s", name, path)
 }
@@ -305,9 +346,15 @@ func setupWritableReadinessError(name, path string) error {
 // setupStateRootReadinessError reports the precise reason the delegate state
 // root is unusable rather than the generic "not writable" — a mode mismatch is
 // the common case and needs a different fix (chmod), not a permissions grant.
-func setupStateRootReadinessError(path, reason string) error {
+func setupStateRootReadinessError(path string, writability setupWritability, reason string) error {
+	if writability == setupWritabilityUnknown {
+		if reason == "" {
+			reason = "the path was not probed"
+		}
+		return fmt.Errorf("delegate state root writability is unknown: %s", reason)
+	}
 	if reason == "" {
-		return setupWritableReadinessError("delegate state root", path)
+		return setupWritableReadinessError("delegate state root", path, writability, reason)
 	}
 	msg := fmt.Sprintf("delegate state root is not usable: %s", reason)
 	if path != "" && strings.Contains(reason, "want 700") {
@@ -317,14 +364,19 @@ func setupStateRootReadinessError(path, reason string) error {
 }
 
 type setupStatePreflightResult struct {
-	StateRootWritable                 bool
-	StateRootReason                   string
-	DelegateStateRoot                 string
-	AgentbusStateRoot                 string
-	AgentbusStateRootWritable         bool
-	AgentbusAutostartLockRoot         string
-	AgentbusAutostartLockRootWritable bool
-	Warnings                          []string
+	StateRootWritable                    bool
+	StateRootWritability                 setupWritability
+	StateRootReason                      string
+	DelegateStateRoot                    string
+	AgentbusStateRoot                    string
+	AgentbusStateRootWritable            bool
+	AgentbusStateRootWritability         setupWritability
+	AgentbusStateRootReason              string
+	AgentbusAutostartLockRoot            string
+	AgentbusAutostartLockRootWritable    bool
+	AgentbusAutostartLockRootWritability setupWritability
+	AgentbusAutostartLockRootReason      string
+	Warnings                             []string
 }
 
 func setupStatePreflight() setupStatePreflightResult {
@@ -333,56 +385,119 @@ func setupStatePreflight() setupStatePreflightResult {
 }
 
 func setupStatePreflightWithAgentbusRoot(agentbusRoot string, agentbusErr error) setupStatePreflightResult {
-	result := setupStatePreflightResult{}
+	result := setupStatePreflightResult{
+		StateRootWritability:                 setupWritabilityUnknown,
+		AgentbusStateRootWritability:         setupWritabilityUnknown,
+		AgentbusAutostartLockRootWritability: setupWritabilityUnknown,
+	}
 	delegateRoot, err := handoff.ResolveStateDir(handoff.StateConfig{})
 	if err == nil {
 		result.DelegateStateRoot = delegateRoot
-		// EnsureStateDir carries the precise cause when the directory exists but
-		// is not usable (e.g. "mode = 755, want 700"). Surface it instead of
-		// discarding it and collapsing every cause into a generic "not writable".
-		if ensureErr := handoff.EnsureStateDir(delegateRoot); ensureErr != nil {
-			result.StateRootReason = ensureErr.Error()
-			result.Warnings = append(result.Warnings, fmt.Sprintf("delegate state root is not usable: %v", ensureErr))
-		} else {
-			result.StateRootWritable = directoryWritable(delegateRoot)
+		stateRoot := setupDelegateStateRootWritability(delegateRoot)
+		result.StateRootWritable = stateRoot.Writable()
+		result.StateRootWritability = stateRoot.Status
+		result.StateRootReason = stateRoot.Reason
+		if result.StateRootReason != "" {
+			result.Warnings = append(result.Warnings, setupWritabilityWarning("delegate state root", stateRoot))
 		}
 	} else {
 		result.StateRootReason = err.Error()
 	}
 	if agentbusErr != nil {
+		result.AgentbusStateRootReason = agentbusErr.Error()
+		result.AgentbusAutostartLockRootReason = "agentbus state root was not resolved"
 		result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus state root was not checked because %v", agentbusErr))
 		return result
 	}
 	result.AgentbusStateRoot = agentbusRoot
-	result.AgentbusStateRootWritable = directoryWritable(agentbusRoot)
+	agentbusStateRoot := setupExistingDirectoryWritability(agentbusRoot)
+	result.AgentbusStateRootWritable = agentbusStateRoot.Writable()
+	result.AgentbusStateRootWritability = agentbusStateRoot.Status
+	result.AgentbusStateRootReason = agentbusStateRoot.Reason
+	if agentbusStateRoot.Reason != "" {
+		result.Warnings = append(result.Warnings, setupWritabilityWarning("agentbus state root", agentbusStateRoot))
+	}
 	lockRoot, err := resolveAgentbusAutostartLockRoot()
 	if err != nil {
+		result.AgentbusAutostartLockRootReason = err.Error()
 		result.Warnings = append(result.Warnings, fmt.Sprintf("agentbus autostart lock root was not checked because %v", err))
 		return result
 	}
 	result.AgentbusAutostartLockRoot = lockRoot
-	result.AgentbusAutostartLockRootWritable = directoryWritable(lockRoot)
+	lockRootWritability := setupExistingDirectoryWritability(lockRoot)
+	result.AgentbusAutostartLockRootWritable = lockRootWritability.Writable()
+	result.AgentbusAutostartLockRootWritability = lockRootWritability.Status
+	result.AgentbusAutostartLockRootReason = lockRootWritability.Reason
+	if lockRootWritability.Reason != "" {
+		result.Warnings = append(result.Warnings, setupWritabilityWarning("agentbus autostart lock root", lockRootWritability))
+	}
 	return result
 }
 
-// setupPendingSubmissionIntentCount returns a nil count (rendered as JSON null /
+// setupWritability distinguishes a verified effective probe from an observed
+// failure and a path that setup deliberately did not create or probe. The
+// boolean compatibility fields report true only for the verified state.
+type setupWritability string
+
+const (
+	setupWritabilityWritable   setupWritability = "writable"
+	setupWritabilityUnwritable setupWritability = "unwritable"
+	setupWritabilityUnknown    setupWritability = "unknown"
+)
+
+type setupWritabilityResult struct {
+	Status setupWritability
+	Reason string
+}
+
+func (result setupWritabilityResult) Writable() bool {
+	return result.Status == setupWritabilityWritable
+}
+
+func setupWritabilityWarning(name string, result setupWritabilityResult) string {
+	if result.Status == setupWritabilityUnknown {
+		return fmt.Sprintf("%s writability is unknown: %s", name, result.Reason)
+	}
+	return fmt.Sprintf("%s is not writable: %s", name, result.Reason)
+}
+
+// setupPendingSubmissionIntents returns a nil count (rendered as JSON null /
 // "uncounted") when the value could not be computed, so an orchestrator gating
-// on it cannot misread a "not counted" warning as a clean zero.
-func setupPendingSubmissionIntentCount(stateDir string) (*int, []string) {
+// on it cannot misread a "not counted" warning as a clean zero. The count is
+// authoritative; summaries are capped to keep setup preflight output bounded.
+func setupPendingSubmissionIntents(stateDir string) (*int, []setupPendingSubmissionIntent, []string) {
 	if stateDir == "" {
-		return nil, []string{"pending submission intents were not counted because delegate state root was not resolved"}
+		return nil, nil, []string{"pending submission intents were not counted because delegate state root was not resolved"}
 	}
-	intents, err := listSubmissionIntents(stateDir)
+	intents, err := listSetupSubmissionIntents(stateDir)
 	if err != nil {
-		return nil, []string{fmt.Sprintf("pending submission intents were not counted because %v", err)}
+		return nil, nil, []string{fmt.Sprintf("pending submission intents were not counted because %v", err)}
 	}
-	count := 0
+	pending := make([]submissionIntent, 0, len(intents))
 	for _, intent := range intents {
 		if submissionIntentPending(intent) {
-			count++
+			pending = append(pending, intent)
 		}
 	}
-	return &count, nil
+	sort.Slice(pending, func(i, j int) bool {
+		if pending[i].CreatedAt.Equal(pending[j].CreatedAt) {
+			return pending[i].RequestID < pending[j].RequestID
+		}
+		return pending[i].CreatedAt.Before(pending[j].CreatedAt)
+	})
+	count := len(pending)
+	limit := min(count, setupPendingSubmissionIntentLimit)
+	summaries := make([]setupPendingSubmissionIntent, 0, limit)
+	for _, intent := range pending[:limit] {
+		summaries = append(summaries, setupPendingSubmissionIntent{
+			RequestID: intent.RequestID,
+			Phase:     intent.Phase,
+			CreatedAt: intent.CreatedAt,
+			Backend:   setupBoundedIntentLabel(intent.Params.TaskSpec.Backend),
+			Origin:    setupIntentOrigin(intent.Origin),
+		})
+	}
+	return &count, summaries, nil
 }
 
 // setupCountText renders a nil (uncounted) count distinctly from a real zero in
@@ -407,7 +522,7 @@ func setupUnresolvedCleanupArtifactCount(stateDir string) (*int, []string) {
 	if stateDir == "" {
 		return nil, []string{"unresolved cleanup artifacts were not counted because delegate state root was not resolved"}
 	}
-	metas, err := listJobMetadata(stateDir)
+	metas, err := listSetupJobMetadata(stateDir)
 	if err != nil {
 		return nil, []string{fmt.Sprintf("unresolved cleanup artifacts were not counted because %v", err)}
 	}
@@ -430,19 +545,21 @@ func retainedArtifactExists(path string) bool {
 	if path == "" {
 		return false
 	}
-	_, err := os.Stat(path)
+	_, err := os.Lstat(path)
 	return err == nil || !errors.Is(err, os.ErrNotExist)
 }
 
-func listJobMetadata(stateDir string) ([]jobMetadata, error) {
-	dir, err := jobMetadataDir(stateDir)
+func listSetupJobMetadata(stateDir string) ([]jobMetadata, error) {
+	dir, err := setupJobMetadataDir(stateDir)
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
+	if err := setupReadableDirectory(dir); errors.Is(err, os.ErrNotExist) {
 		return nil, nil
+	} else if err != nil {
+		return nil, err
 	}
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -455,7 +572,7 @@ func listJobMetadata(stateDir string) ([]jobMetadata, error) {
 		if !ok {
 			continue
 		}
-		meta, found, err := loadJobMetadata(stateDir, jobID)
+		meta, found, err := loadSetupJobMetadata(dir, jobID)
 		if err != nil {
 			return nil, err
 		}
@@ -466,28 +583,253 @@ func listJobMetadata(stateDir string) ([]jobMetadata, error) {
 	return metas, nil
 }
 
-// directoryWritable proves both create and write access without leaving a
-// temporary file behind. The state directory itself is intentionally retained: a
-// successful preflight is allowed to create the directory it reports usable.
-func directoryWritable(path string) bool {
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		return false
+func setupDelegateStateRootWritability(path string) setupWritabilityResult {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return setupMissingDirectoryWritability(path)
 	}
+	if err != nil {
+		return setupWritabilityResult{Status: setupWritabilityUnknown, Reason: err.Error()}
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return setupWritabilityResult{Status: setupWritabilityUnwritable, Reason: fmt.Sprintf("state dir %q must not be a symlink", path)}
+	}
+	if !info.IsDir() {
+		return setupWritabilityResult{Status: setupWritabilityUnwritable, Reason: fmt.Sprintf("state dir %q is not a directory", path)}
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		return setupWritabilityResult{Status: setupWritabilityUnwritable, Reason: fmt.Sprintf("state dir %q mode = %o, want %o", path, got, 0o700)}
+	}
+	return setupExistingDirectoryWritability(path)
+}
+
+// setupExistingDirectoryWritability performs an effective write probe inside
+// an existing directory. It never creates the directory being checked. The
+// probe file is removed before this function returns.
+func setupExistingDirectoryWritability(path string) setupWritabilityResult {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return setupMissingDirectoryWritability(path)
+	}
+	if err != nil {
+		return setupWritabilityResult{Status: setupWritabilityUnknown, Reason: err.Error()}
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return setupWritabilityResult{Status: setupWritabilityUnwritable, Reason: fmt.Sprintf("directory %q must not be a symlink", path)}
+	}
+	if !info.IsDir() {
+		return setupWritabilityResult{Status: setupWritabilityUnwritable, Reason: fmt.Sprintf("path %q is not a directory", path)}
+	}
+
 	file, err := os.CreateTemp(path, ".delegate-setup-*")
 	if err != nil {
-		return false
+		return setupWritabilityResult{Status: setupWritabilityUnwritable, Reason: err.Error()}
 	}
 	name := file.Name()
-	defer os.Remove(name)
+	closed := false
+	closeFile := func() error {
+		if closed {
+			return nil
+		}
+		closed = true
+		return file.Close()
+	}
+	cleanup := func() error {
+		// Always attempt the exact-path removal, even when close fails:
+		// returning early on a close error would leave the probe file behind.
+		closeErr := closeFile()
+		removeErr := os.Remove(name)
+		if closeErr != nil {
+			return closeErr
+		}
+		return removeErr
+	}
+
 	if _, err := file.WriteString("setup preflight\n"); err != nil {
-		_ = file.Close()
-		return false
+		_ = cleanup()
+		return setupWritabilityResult{Status: setupWritabilityUnwritable, Reason: err.Error()}
 	}
 	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return false
+		_ = cleanup()
+		return setupWritabilityResult{Status: setupWritabilityUnwritable, Reason: err.Error()}
 	}
-	return file.Close() == nil
+	if err := cleanup(); err != nil {
+		return setupWritabilityResult{Status: setupWritabilityUnwritable, Reason: err.Error()}
+	}
+	return setupWritabilityResult{Status: setupWritabilityWritable}
+}
+
+// setupMissingDirectoryWritability deliberately does not inspect an ancestor
+// or predict whether the missing directory can be created. Creating it merely
+// to answer setup would change state, so it remains an explicit unknown.
+func setupMissingDirectoryWritability(path string) setupWritabilityResult {
+	return setupWritabilityResult{
+		Status: setupWritabilityUnknown,
+		Reason: fmt.Sprintf("path %q does not exist and may be creatable, but setup did not create or probe it", path),
+	}
+}
+
+func setupSubmissionIntentDir(stateDir string) (string, error) {
+	dir, err := handoff.ResolveStateDir(handoff.StateConfig{StateDir: stateDir})
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "submissions"), nil
+}
+
+func setupJobMetadataDir(stateDir string) (string, error) {
+	dir, err := handoff.ResolveStateDir(handoff.StateConfig{StateDir: stateDir})
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "jobs"), nil
+}
+
+func setupReadableDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("setup state directory %q must not be a symlink", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("setup state path %q is not a directory", path)
+	}
+	return nil
+}
+
+func listSetupSubmissionIntents(stateDir string) ([]submissionIntent, error) {
+	dir, err := setupSubmissionIntentDir(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := setupReadableDirectory(dir); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var intents []submissionIntent
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		requestID, ok := decodeStateFilename(entry.Name())
+		if !ok {
+			continue
+		}
+		intent, found, err := loadSetupSubmissionIntent(dir, requestID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			intents = append(intents, intent)
+		}
+	}
+	return intents, nil
+}
+
+func loadSetupSubmissionIntent(dir, requestID string) (submissionIntent, bool, error) {
+	if err := validateRequestID(requestID); err != nil {
+		return submissionIntent{}, false, err
+	}
+	path := filepath.Join(dir, encodedStateFilename(requestID))
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return submissionIntent{}, false, nil
+	}
+	if err != nil {
+		return submissionIntent{}, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return submissionIntent{}, false, fmt.Errorf("submission intent %q is not a regular file", requestID)
+	}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return submissionIntent{}, false, nil
+	}
+	if err != nil {
+		return submissionIntent{}, false, err
+	}
+	var intent submissionIntent
+	if err := json.Unmarshal(raw, &intent); err != nil {
+		return submissionIntent{}, false, err
+	}
+	if intent.Schema != submissionIntentSchema {
+		return submissionIntent{}, false, fmt.Errorf("submission intent %q has unsupported schema %d", requestID, intent.Schema)
+	}
+	if intent.RequestID != requestID {
+		return submissionIntent{}, false, fmt.Errorf("submission intent %q has request_id %q", requestID, intent.RequestID)
+	}
+	if intent.Params.RequestID != intent.RequestID {
+		return submissionIntent{}, false, fmt.Errorf("submission intent %q has params request_id %q", requestID, intent.Params.RequestID)
+	}
+	if intent.Params.WorkspaceKey != intent.WorkspaceKey {
+		return submissionIntent{}, false, fmt.Errorf("submission intent %q has params workspace_key %q", requestID, intent.Params.WorkspaceKey)
+	}
+	if err := validateSubmissionPhase(intent.Phase); err != nil {
+		return submissionIntent{}, false, err
+	}
+	return intent, true, nil
+}
+
+func loadSetupJobMetadata(dir, jobID string) (jobMetadata, bool, error) {
+	if err := validateDelegateJobID(jobID); err != nil {
+		return jobMetadata{}, false, err
+	}
+	path := filepath.Join(dir, encodedStateFilename(jobID))
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return jobMetadata{}, false, nil
+	}
+	if err != nil {
+		return jobMetadata{}, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return jobMetadata{}, false, fmt.Errorf("delegate job metadata %q is not a regular file", jobID)
+	}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return jobMetadata{}, false, nil
+	}
+	if err != nil {
+		return jobMetadata{}, false, err
+	}
+	var meta jobMetadata
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return jobMetadata{}, false, err
+	}
+	if meta.JobID != jobID {
+		return jobMetadata{}, false, fmt.Errorf("delegate job metadata %q has job_id %q", jobID, meta.JobID)
+	}
+	return meta, true, nil
+}
+
+func setupIntentOrigin(origin *envelopeOrigin) *setupIntentOriginSummary {
+	if origin == nil {
+		return nil
+	}
+	label := setupBoundedIntentLabel(origin.Skill)
+	if label == "" {
+		return nil
+	}
+	return &setupIntentOriginSummary{Skill: label}
+}
+
+func setupBoundedIntentLabel(value string) string {
+	value = strings.ToValidUTF8(value, "")
+	if len(value) <= setupPendingSubmissionIntentLabelLimit {
+		return value
+	}
+	end := setupPendingSubmissionIntentLabelLimit
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end]
 }
 
 func installedSkills() ([]setupSkill, error) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -46,19 +47,135 @@ func TestSetupStatePreflightRejectsRelativeAgentbusStateRoot(t *testing.T) {
 	}
 }
 
-func TestSetupReportsPendingSubmissionAndUnresolvedCleanupCounts(t *testing.T) {
+func TestSetupPendingSubmissionIntentsDoesNotCreateMissingStateDirectory(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "delegate")
+
+	count, intents, warnings := setupPendingSubmissionIntents(stateDir)
+	if count == nil || *count != 0 || intents == nil || len(intents) != 0 || len(warnings) != 0 {
+		t.Fatalf("missing state pending output = count:%v intents:%#v warnings:%#v, want zero, empty array, and no warnings", count, intents, warnings)
+	}
+	if _, err := os.Lstat(stateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("intent enumeration created state path %q: %v", stateDir, err)
+	}
+}
+
+func TestSetupExistingDirectoryWritabilityProbesAndCleansUp(t *testing.T) {
+	dir := t.TempDir()
+
+	result := setupExistingDirectoryWritability(dir)
+	if result.Status != setupWritabilityWritable || result.Reason != "" {
+		t.Fatalf("existing directory writability = %#v, want writable", result)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("effective writability probe left files behind: %#v", entries)
+	}
+}
+
+func TestSetupPreflightEffectivelyProbesExistingRoots(t *testing.T) {
+	stateHome := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	t.Setenv("AGENTBUS_STATE_ROOT", "")
+	paths := []string{
+		filepath.Join(stateHome, "delegate"),
+		filepath.Join(stateHome, "agentbus"),
+		filepath.Join(cacheHome, "agentbus", "start-locks"),
+	}
+	for _, path := range paths {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result := setupStatePreflight()
+	for _, check := range []struct {
+		name   string
+		status setupWritability
+	}{
+		{"delegate state root", result.StateRootWritability},
+		{"agentbus state root", result.AgentbusStateRootWritability},
+		{"agentbus autostart lock root", result.AgentbusAutostartLockRootWritability},
+	} {
+		if check.status != setupWritabilityWritable {
+			t.Fatalf("%s writability=%q, want writable", check.name, check.status)
+		}
+	}
+	for _, path := range paths {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("preflight probe left files in %q: %#v", path, entries)
+		}
+	}
+}
+
+func TestSetupPreflightReportsMissingRootsAsUnknownWithoutCreatingThem(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AGENTBUS_STATE_ROOT", "")
+
+	result := setupStatePreflight()
+	for _, check := range []struct {
+		name   string
+		path   string
+		status setupWritability
+	}{
+		{"delegate state root", result.DelegateStateRoot, result.StateRootWritability},
+		{"agentbus state root", result.AgentbusStateRoot, result.AgentbusStateRootWritability},
+		{"agentbus autostart lock root", result.AgentbusAutostartLockRoot, result.AgentbusAutostartLockRootWritability},
+	} {
+		if check.status != setupWritabilityUnknown {
+			t.Fatalf("%s writability=%q, want unknown for missing path", check.name, check.status)
+		}
+		if _, err := os.Lstat(check.path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("preflight created %s %q: %v", check.name, check.path, err)
+		}
+	}
+}
+
+func TestSetupMissingDirectoryWritabilityIsUnknownAndDoesNotCreate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing")
+
+	result := setupExistingDirectoryWritability(path)
+	if result.Status != setupWritabilityUnknown || !strings.Contains(result.Reason, "may be creatable") {
+		t.Fatalf("missing directory writability = %#v, want potentially-creatable unknown", result)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("writability probe created missing path %q: %v", path, err)
+	}
+}
+
+func TestSetupJSONReportsPendingSubmissionIntentsAndCounts(t *testing.T) {
 	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
 	defer restore()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setupTestPreflightDirectories(t)
 	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, phase := range []string{submissionPhasePrepared, submissionPhaseInFlight, submissionPhaseBlocked} {
+	for index, phase := range []string{submissionPhasePrepared, submissionPhaseInFlight, submissionPhaseBlocked} {
 		requestID := "delegate-" + strings.Repeat(string(phase[0]), 32)
 		intent := testSubmissionIntent(testSubmitParams(t, requestID, phase+" prompt", nil), t.TempDir())
 		intent.Phase = phase
+		intent.CreatedAt = time.Date(2026, time.January, 1, 0, index, 0, 0, time.UTC)
+		intent.Params.TaskSpec.Backend = strings.Repeat(string(phase[0]), setupPendingSubmissionIntentLabelLimit+1)
+		intent.Origin = &envelopeOrigin{
+			Skill:           "delegate:" + strings.Repeat(string(phase[0]), setupPendingSubmissionIntentLabelLimit+1),
+			ParentClient:    strings.Repeat("client-", 40),
+			ParentSessionID: "private-session-id",
+			ParentAgent:     "private-parent-agent",
+			Depth:           "private-depth-99",
+		}
 		if err := saveSubmissionIntent(stateDir, intent); err != nil {
 			t.Fatal(err)
 		}
@@ -120,8 +237,71 @@ func TestSetupReportsPendingSubmissionAndUnresolvedCleanupCounts(t *testing.T) {
 	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 3 {
 		t.Fatalf("pendingSubmissionIntentCount=%v, want 3", result.PendingSubmissionIntentCount)
 	}
+	if got, want := len(result.PendingSubmissionIntents), 3; got != want {
+		t.Fatalf("pendingSubmissionIntents length=%d, want %d: %#v", got, want, result.PendingSubmissionIntents)
+	}
+	for index, want := range []struct {
+		requestID string
+		phase     string
+	}{
+		{"delegate-" + strings.Repeat("p", 32), submissionPhasePrepared},
+		{"delegate-" + strings.Repeat("i", 32), submissionPhaseInFlight},
+		{"delegate-" + strings.Repeat("b", 32), submissionPhaseBlocked},
+	} {
+		got := result.PendingSubmissionIntents[index]
+		wantLabel := strings.Repeat(string(want.phase[0]), setupPendingSubmissionIntentLabelLimit)
+		if got.RequestID != want.requestID || got.Phase != want.phase || got.Backend != wantLabel || got.Origin == nil || got.Origin.Skill != "delegate:"+wantLabel[:setupPendingSubmissionIntentLabelLimit-len("delegate:")] {
+			t.Fatalf("pendingSubmissionIntents[%d]=%#v, want request %q with durable context", index, got, want.requestID)
+		}
+		if strings.Contains(stdout.String(), "parent_session_id") || strings.Contains(stdout.String(), "parent_agent") || strings.Contains(stdout.String(), "private-session-id") || strings.Contains(stdout.String(), "private-parent-agent") || strings.Contains(stdout.String(), "client-") || strings.Contains(stdout.String(), "private-depth") {
+			t.Fatalf("setup exposed unapproved origin fields: %s", stdout.String())
+		}
+		if got.CreatedAt.IsZero() {
+			t.Fatalf("pendingSubmissionIntents[%d].createdAt is zero", index)
+		}
+	}
 	if result.UnresolvedCleanupArtifactCount == nil || *result.UnresolvedCleanupArtifactCount != 2 {
 		t.Fatalf("unresolvedCleanupArtifactCount=%v, want 2", result.UnresolvedCleanupArtifactCount)
+	}
+}
+
+func TestSetupPendingSubmissionIntentsCap(t *testing.T) {
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setupTestPreflightDirectories(t)
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < setupPendingSubmissionIntentLimit+1; index++ {
+		requestID := fmt.Sprintf("delegate-%032d", index)
+		intent := testSubmissionIntent(testSubmitParams(t, requestID, "prompt", nil), t.TempDir())
+		intent.Phase = submissionPhasePrepared
+		intent.CreatedAt = time.Date(2026, time.January, 1, 0, index, 0, 0, time.UTC)
+		if err := saveSubmissionIntent(stateDir, intent); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code=%d stderr=%q", code, stderr.String())
+	}
+	var result setupJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != setupPendingSubmissionIntentLimit+1 {
+		t.Fatalf("pendingSubmissionIntentCount=%v, want authoritative count %d", result.PendingSubmissionIntentCount, setupPendingSubmissionIntentLimit+1)
+	}
+	if got, want := len(result.PendingSubmissionIntents), setupPendingSubmissionIntentLimit; got != want {
+		t.Fatalf("returned intent summaries=%d, want cap %d", got, want)
+	}
+	if result.PendingSubmissionIntents[0].RequestID != "delegate-00000000000000000000000000000000" || result.PendingSubmissionIntents[len(result.PendingSubmissionIntents)-1].RequestID != "delegate-00000000000000000000000000000019" {
+		t.Fatalf("capped intents=%#v, want the %d oldest intents", result.PendingSubmissionIntents, setupPendingSubmissionIntentLimit)
 	}
 }
 
@@ -184,6 +364,7 @@ func TestSetupAgentbusVersionReadiness(t *testing.T) {
 				return []byte(tc.output), nil
 			}
 			t.Setenv("HOME", t.TempDir())
+			setupTestPreflightDirectories(t)
 
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
@@ -399,6 +580,9 @@ func TestSetupReadyRequiresWritableAgentbusStateRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("AGENTBUS_STATE_ROOT", stateRoot)
+	if err := os.MkdirAll(filepath.Join(os.Getenv("HOME"), "Library", "Caches", "agentbus", "start-locks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
@@ -436,6 +620,9 @@ func TestSetupReadyRequiresWritableDelegateStateRoot(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", xdgState)
 	delegateRoot := filepath.Join(xdgState, "delegate")
 	if err := os.MkdirAll(delegateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(os.Getenv("HOME"), "Library", "Caches", "agentbus", "start-locks"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(delegateRoot, 0o500); err != nil {

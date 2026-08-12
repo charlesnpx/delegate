@@ -166,6 +166,7 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"admission.strictContainment",
 				"agentbusAutostartLockRoot",
 				"pendingSubmissionIntentCount",
+				"pendingSubmissionIntents",
 				"unresolvedCleanupArtifactCount",
 			})
 		case KindConfig:
