@@ -1729,11 +1729,7 @@ func stubAgentbusGlobals(t *testing.T, fake *fakeAgentbusClient) func() {
 func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	stateHome := t.TempDir()
-	cacheHome := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", stateHome)
-	t.Setenv("XDG_CACHE_HOME", cacheHome)
-	t.Setenv("AGENTBUS_STATE_ROOT", "")
+	setupTestPreflightEnvironment(t)
 	oldConnect := connectAgentbus
 	oldLookPath := lookPath
 	oldCommandOutput := commandOutput
@@ -1753,12 +1749,42 @@ func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 	}
 }
 
+// setupTestPreflightEnvironment pins every environment input that setup's
+// state and lock-root resolution can consume. The lock root differs by OS:
+// os.UserCacheDir uses HOME/Library/Caches on Darwin and XDG_CACHE_HOME on
+// Unix, so both HOME and XDG_CACHE_HOME must be isolated.
+func setupTestPreflightEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("AGENTBUS_STATE_ROOT", "")
+}
+
 // setupTestPreflightDirectories models the pre-existing autostart behavior of
 // a successful agentbus connection: setup connects before evaluating the
 // preflight fields, so the daemon has already created its state and lock roots.
 // Missing-path behavior is covered separately without a daemon.
 func setupTestPreflightDirectories(t *testing.T) {
 	t.Helper()
+	for _, path := range setupTestPreflightPaths(t) {
+		if _, err := os.Lstat(path); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("inspect fake-agentbus preflight path %q: %v", path, err)
+		}
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatalf("create fake-agentbus preflight directory %q: %v", path, err)
+		}
+	}
+}
+
+// setupTestPreflightPaths resolves the same directories production setup will
+// probe. Tests must use these resolved paths rather than hard-coding one OS's
+// cache layout.
+func setupTestPreflightPaths(t *testing.T) []string {
+	t.Helper()
+	paths := make([]string, 0, 3)
 	for _, resolve := range []func() (string, error){
 		resolveAgentbusStateRoot,
 		func() (string, error) { return handoff.ResolveStateDir(handoff.StateConfig{}) },
@@ -1766,15 +1792,11 @@ func setupTestPreflightDirectories(t *testing.T) {
 	} {
 		path, err := resolve()
 		if err != nil {
-			continue
+			t.Fatalf("resolve fake-agentbus preflight path: %v", err)
 		}
-		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err := os.MkdirAll(path, 0o700); err != nil {
-			t.Fatalf("create fake-agentbus preflight directory %q: %v", path, err)
-		}
+		paths = append(paths, path)
 	}
+	return paths
 }
 
 func agentbusVersionFixtureOutput(version string) string {
