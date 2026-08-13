@@ -1,7 +1,7 @@
 ---
 name: delegate:setup
 description: Verify delegate, agentbus, and backend availability.
-version: v0.8.2
+version: v0.9.0
 ---
 
 # delegate:setup

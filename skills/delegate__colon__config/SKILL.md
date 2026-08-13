@@ -1,7 +1,7 @@
 ---
 name: delegate:config
 description: View and change delegate user model and effort defaults.
-version: v0.8.2
+version: v0.9.0
 ---
 
 # delegate:config

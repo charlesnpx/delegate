@@ -1,7 +1,7 @@
 ---
 name: delegate:review:cursor
 description: Delegate a code review to cursor through sanitized delegate review context and return the launch envelope verbatim.
-version: v0.8.2
+version: v0.9.0
 ---
 
 # delegate:review:cursor
