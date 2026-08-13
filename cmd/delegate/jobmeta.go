@@ -129,7 +129,7 @@ func warnLocalCleanupFailure(warnings *localCleanupWarnings, jobID, artifact str
 }
 
 func captureBackendError(stateDir string, job client.JobStatus) error {
-	if !engine.IsTerminal(job.State) || job.LogPaths.Stderr == "" {
+	if !engine.IsTerminal(job.State) || job.LogPaths == nil || job.LogPaths.Stderr == "" {
 		return nil
 	}
 	file, err := os.Open(job.LogPaths.Stderr)

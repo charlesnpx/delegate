@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/charlesnpx/agentbus v0.10.0
+	github.com/charlesnpx/agentbus v0.12.0
 )
 
 require (

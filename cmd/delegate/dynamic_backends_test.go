@@ -79,7 +79,7 @@ func TestCaptureBackendErrorPersistsAndSurfacesStderr(t *testing.T) {
 	if err := saveJobMetadata(stateDir, jobMetadata{JobID: "job_backend_error", Kind: reviewKind, ContractKind: contractKindShape}); err != nil {
 		t.Fatal(err)
 	}
-	if err := captureBackendError(stateDir, client.JobStatus{JobID: "job_backend_error", State: engine.StateFailed, LogPaths: engine.LogPaths{Stderr: stderrPath}}); err != nil {
+	if err := captureBackendError(stateDir, client.JobStatus{JobID: "job_backend_error", State: engine.StateFailed, LogPaths: &engine.LogPaths{Stderr: stderrPath}}); err != nil {
 		t.Fatal(err)
 	}
 	env, err := terminalEnvelopeFromJobResult(stateDir, client.JobResult{
@@ -128,7 +128,7 @@ func TestCaptureBackendErrorSanitizesPromptSecretsAndBoundsDiagnostic(t *testing
 	if err := saveJobMetadata(stateDir, jobMetadata{JobID: "job_sanitized", Kind: taskKind, ContractKind: contractKindShape, JobInputPath: promptPath}); err != nil {
 		t.Fatal(err)
 	}
-	job := client.JobStatus{JobID: "job_sanitized", State: engine.StateFailed, LogPaths: engine.LogPaths{Stderr: stderrPath}}
+	job := client.JobStatus{JobID: "job_sanitized", State: engine.StateFailed, LogPaths: &engine.LogPaths{Stderr: stderrPath}}
 	if err := captureBackendError(stateDir, job); err != nil {
 		t.Fatal(err)
 	}
