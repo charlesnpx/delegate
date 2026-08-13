@@ -11,12 +11,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/delegate/internal/config"
 	"github.com/charlesnpx/delegate/internal/handoff"
 	"github.com/charlesnpx/delegate/internal/policy"
 )
@@ -114,6 +116,322 @@ func TestEnvelopeSchema2SubmissionFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTimeoutEnvelopeResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		submit     client.JobSubmitResult
+		timeout    config.DimensionResolution
+		want       config.DimensionResolution
+		wantSubmit *int64
+	}{
+		{
+			name:       "explicit timeout is flag sourced",
+			args:       []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--timeout", "45s", "--background", "--json"},
+			timeout:    config.DimensionResolution{Requested: "45s", Effective: "45s", Source: "flag"},
+			want:       config.DimensionResolution{Requested: "45s", Effective: "45s", Source: "flag"},
+			wantSubmit: int64Pointer(45000),
+		},
+		{
+			name: "omitted timeout stays unknown without daemon resolution",
+			args: []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--background", "--json"},
+			want: config.DimensionResolution{Source: "unknown"},
+		},
+		{
+			name:       "explicit timeout stays unknown without daemon resolution",
+			args:       []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--timeout", "45s", "--background", "--json"},
+			want:       config.DimensionResolution{Requested: "45s", Source: "unknown"},
+			wantSubmit: int64Pointer(45000),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities(), submitResult: tc.submit, submittedTimeout: tc.timeout}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			var envelope LaunchEnvelope
+			if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+				t.Fatalf("launch JSON=%q: %v", stdout.String(), err)
+			}
+			if envelope.Timeout != tc.want {
+				t.Fatalf("timeout envelope=%#v, want %#v", envelope.Timeout, tc.want)
+			}
+			if len(fake.submits) != 1 {
+				t.Fatalf("submits=%d, want 1", len(fake.submits))
+			}
+			if got := fake.submits[0].TaskSpec.TimeoutMs; !equalInt64Pointers(got, tc.wantSubmit) {
+				t.Fatalf("submitted timeout=%v, want %v", got, tc.wantSubmit)
+			}
+		})
+	}
+
+	t.Run("omitted timeout uses daemon resolution", func(t *testing.T) {
+		resolution := timeoutResolutionForSubmission(0, false, timeoutResponse{Timeout: timeoutResponseValue{Effective: 1800000, Source: "daemon_default"}})
+		want := config.DimensionResolution{Effective: "30m0s", Source: "daemon"}
+		if resolution != want {
+			t.Fatalf("launch timeout=%#v, want %#v", resolution, want)
+		}
+	})
+
+	t.Run("daemon response resolves terminal envelope", func(t *testing.T) {
+		resolution := timeoutResolutionForSubmission(0, false, timeoutResponse{Timeout: timeoutResponseValue{Effective: 1800000, Source: "daemon_default"}})
+		terminal, err := newTerminalEnvelope("job_timeout", engine.StateTimedOut, taskKind, contractKindShape, engine.ContractStamp{}, "", "", terminalEnvelopeOptions{Timeout: resolution})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := config.DimensionResolution{Effective: "30m0s", Source: "daemon"}
+		if terminal.Timeout != want {
+			t.Fatalf("terminal timeout=%#v, want %#v", terminal.Timeout, want)
+		}
+	})
+
+	t.Run("incomplete daemon resolution stays unknown in JSON", func(t *testing.T) {
+		resolution := timeoutResolutionForSubmission(0, false, map[string]any{
+			"timeout": map[string]any{"source": "daemon_default"},
+		})
+		launch, err := newLaunchEnvelopeWithOptions("job_timeout_unknown", engine.StateQueued, launchEnvelopeOptions{Timeout: resolution})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(launch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := decoded["timeout"], map[string]any{"source": "unknown"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("timeout JSON=%#v, want %#v; raw=%s", got, want, raw)
+		}
+	})
+
+	for _, command := range []string{"task", "review"} {
+		t.Run(command+" help explains zero timeout", func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			_ = run([]string{command, "--help"}, nil, &stdout, &stderr)
+			if !strings.Contains(stderr.String(), "0 leaves the deadline to the daemon default; envelope.timeout is authoritative") {
+				t.Fatalf("help=%q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestMergeAcknowledgedJobMetadataUpgradesUnknownTimeout(t *testing.T) {
+	merged := mergeAcknowledgedJobMetadata(
+		jobMetadata{Timeout: config.DimensionResolution{Source: "unknown"}},
+		jobMetadata{Timeout: config.DimensionResolution{Effective: "30m0s", Source: "daemon"}},
+	)
+	want := config.DimensionResolution{Effective: "30m0s", Source: "daemon"}
+	if merged.Timeout != want {
+		t.Fatalf("timeout=%#v, want %#v", merged.Timeout, want)
+	}
+}
+
+func TestStatusOnlyTerminalTimeoutPrecedesLaunchMetadata(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	jobID := "job_status_timeout"
+	if err := saveJobMetadata(stateDir, jobMetadata{
+		JobID:        jobID,
+		Kind:         taskKind,
+		ContractKind: contractKindShape,
+		Timeout:      config.DimensionResolution{Effective: "30m0s", Source: "daemon"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAgentbusClient{statusTimeout: config.DimensionResolution{Effective: "90m0s", Source: "daemon"}}
+	terminal := terminalJobResultFromStatus(client.JobStatus{JobID: jobID, State: engine.StateOrphaned})
+	env, err := terminalEnvelopeFromJobResultWithOptions(stateDir, terminal.result, terminal.envelopeOptions(fake, terminalEnvelopeOptions{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (config.DimensionResolution{Effective: "90m0s", Source: "daemon"}); env.Timeout != want {
+		t.Fatalf("terminal timeout=%#v, want daemon status resolution %#v", env.Timeout, want)
+	}
+}
+
+func TestLegacyTimeoutMetadataCannotSupplyTerminalEffectiveValue(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	jobID := "job_legacy_timeout"
+	legacy := jobMetadata{
+		Schema:       1,
+		JobID:        jobID,
+		Kind:         taskKind,
+		ContractKind: contractKindShape,
+		Timeout: config.DimensionResolution{
+			Requested: "45s",
+			Effective: "45s",
+			Source:    "flag",
+		},
+	}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := jobMetadataDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, encodedStateFilename(jobID)), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env, err := terminalEnvelopeFromJobResultWithOptions(stateDir, client.JobResult{
+		JobID: jobID,
+		State: engine.StateCompleted,
+	}, terminalEnvelopeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := config.DimensionResolution{Requested: "45s", Source: "unknown"}
+	if env.Timeout != want {
+		t.Fatalf("terminal timeout=%#v, want legacy effective value excluded as %#v", env.Timeout, want)
+	}
+}
+
+func TestMissingBackendProfileMetadataEmitsUnknown(t *testing.T) {
+	fake := &fakeAgentbusClient{
+		hello:  helloWithCapabilities(),
+		result: client.JobResult{JobID: "job_legacy_backend_profile", State: engine.StateCompleted},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID := "job_legacy_backend_profile"
+	dir, err := jobMetadataDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This is pre-fix metadata: it has no backend_profile key at all.
+	raw, err := json.Marshal(map[string]any{
+		"schema":       jobMetadataSchema,
+		"job_id":       jobID,
+		"kind":         taskKind,
+		"contractKind": contractKindShape,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, encodedStateFilename(jobID)), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"result", "--job", jobID, "--json"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("result code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatalf("result JSON=%q: %v", stdout.String(), err)
+	}
+	if want := (config.DimensionResolution{Source: "unknown"}); env.BackendProfile != want {
+		t.Fatalf("result backend_profile=%#v, want missing metadata reported as %#v", env.BackendProfile, want)
+	}
+}
+
+func TestSchemaLessTimeoutMetadataIsSanitizedWhenCleanupRewritesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		schemaNull bool
+	}{
+		{name: "absent schema"},
+		{name: "null schema", schemaNull: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			if err := os.Chmod(stateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			jobID := "job_schema_less_timeout"
+			inputPath := filepath.Join(stateDir, "job-input.txt")
+			if err := os.WriteFile(inputPath, []byte("prompt"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			legacy := map[string]any{
+				"job_id":         jobID,
+				"kind":           taskKind,
+				"contractKind":   contractKindShape,
+				"job_input_path": inputPath,
+				"timeout": map[string]string{
+					"requested": "45s",
+					"effective": "45s",
+					"source":    "flag",
+				},
+			}
+			if tc.schemaNull {
+				legacy["schema"] = nil
+			}
+			raw, err := json.Marshal(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir, err := jobMetadataDir(stateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, encodedStateFilename(jobID)), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			// Terminal cleanup changes only local artifact bookkeeping, but it must
+			// not launder the legacy requested timeout into schema-2 trust.
+			if err := cleanupJobInput(stateDir, jobID, "", engine.StateCompleted, cleanupDispositionVerifiedAbsent, newLocalCleanupWarnings(io.Discard)); err != nil {
+				t.Fatal(err)
+			}
+			meta, found, err := loadJobMetadata(stateDir, jobID)
+			if err != nil || !found {
+				t.Fatalf("rewritten metadata found=%v err=%v", found, err)
+			}
+			want := config.DimensionResolution{Requested: "45s", Source: "unknown"}
+			if meta.Schema != jobMetadataSchema || meta.Timeout != want {
+				t.Fatalf("rewritten metadata schema=%d timeout=%#v, want schema=%d timeout=%#v", meta.Schema, meta.Timeout, jobMetadataSchema, want)
+			}
+
+			env, err := terminalEnvelopeFromJobResultWithOptions(stateDir, client.JobResult{
+				JobID: jobID,
+				State: engine.StateCompleted,
+			}, terminalEnvelopeOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if env.Timeout != want {
+				t.Fatalf("terminal timeout=%#v, want sanitized fallback %#v", env.Timeout, want)
+			}
+		})
+	}
+}
+
+type timeoutResponse struct {
+	Timeout timeoutResponseValue `json:"timeout"`
+}
+
+type timeoutResponseValue struct {
+	Effective int64  `json:"effective"`
+	Source    string `json:"source"`
+}
+
+func int64Pointer(value int64) *int64 { return &value }
+
+func equalInt64Pointers(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
+}
+
 func TestJSONSchemaTerminalEnvelopePreservesContractStamp(t *testing.T) {
 	spec := engine.ContractSpec{JSONSchema: json.RawMessage(`{"type":"object","required":["schema_version"],"properties":{"schema_version":{"const":"1"}}}`)}
 	validation, err := engine.ValidateContract(`{"schema_version":"2"}`, spec)
@@ -191,6 +509,7 @@ func TestSetupOutputIncludesReadinessFields(t *testing.T) {
 	defer restore()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
+	setupTestPreflightDirectories(t)
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"setup"}, nil, &stdout, &stderr)
@@ -218,6 +537,7 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, "codex-home"))
+	setupTestPreflightDirectories(t)
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
@@ -251,8 +571,11 @@ func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
 	if result.AgentbusStateRoot == "" || result.AgentbusAutostartLockRoot == "" || !result.AgentbusAutostartLockRootWritable || !result.AdmissionStrictContainment || !result.Ready {
 		t.Fatalf("setup D8 fields = root:%q lock:%q lockWritable:%t strict:%t ready:%t", result.AgentbusStateRoot, result.AgentbusAutostartLockRoot, result.AgentbusAutostartLockRootWritable, result.AdmissionStrictContainment, result.Ready)
 	}
-	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 0 || result.UnresolvedCleanupArtifactCount == nil || *result.UnresolvedCleanupArtifactCount != 0 {
-		t.Fatalf("setup counts = pending:%v unresolved:%v, want zero", result.PendingSubmissionIntentCount, result.UnresolvedCleanupArtifactCount)
+	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 0 || len(result.PendingSubmissionIntents) != 0 || result.UnresolvedCleanupArtifactCount == nil || *result.UnresolvedCleanupArtifactCount != 0 {
+		t.Fatalf("setup pending=%v summaries=%#v unresolved=%v, want clean state", result.PendingSubmissionIntentCount, result.PendingSubmissionIntents, result.UnresolvedCleanupArtifactCount)
+	}
+	if result.PendingSubmissionIntents == nil {
+		t.Fatalf("pendingSubmissionIntents is null, want an empty JSON array for a clean state")
 	}
 	if len(result.Skills) != 28 {
 		t.Fatalf("skill statuses = %d, want 28: %#v", len(result.Skills), result.Skills)
@@ -517,6 +840,8 @@ func TestTaskWaitDelegateReportValidationAndCorrection(t *testing.T) {
 		wantStatus   engine.ContractStatus
 		wantRetry    bool
 		wantAttempts int
+		wantState    engine.JobState
+		wantSkip     reportRetrySkipReason
 	}{
 		{
 			name:   "compliant_no_resubmit",
@@ -528,6 +853,7 @@ func TestTaskWaitDelegateReportValidationAndCorrection(t *testing.T) {
 			wantSubmits:  1,
 			wantStatus:   engine.ContractCompliant,
 			wantAttempts: 1,
+			wantState:    engine.StateCompleted,
 		},
 		{
 			name:   "noncompliant_one_report_only_resubmit",
@@ -541,6 +867,22 @@ func TestTaskWaitDelegateReportValidationAndCorrection(t *testing.T) {
 			wantStatus:   engine.ContractRetried,
 			wantRetry:    true,
 			wantAttempts: 2,
+			wantState:    engine.StateCompleted,
+		},
+		{
+			name:   "correction exhausted",
+			jobIDs: []string{"job_report_1", "job_report_2"},
+			results: map[string]client.JobResult{
+				"job_report_1": reportJobResult("job_report_1", badReport),
+				"job_report_2": reportJobResult("job_report_2", badReport),
+			},
+			wantJobID:    "job_report_2",
+			wantSubmits:  2,
+			wantStatus:   engine.ContractNoncompliant,
+			wantRetry:    true,
+			wantAttempts: 2,
+			wantState:    engine.StateCompletedNoncompliant,
+			wantSkip:     reportRetrySkipAttemptedAndExhausted,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -551,8 +893,8 @@ func TestTaskWaitDelegateReportValidationAndCorrection(t *testing.T) {
 
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--wait", "--json"}, nil, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+			if want := engine.ExitCodeForState(tc.wantState); code != want {
+				t.Fatalf("task code = %d, stderr = %q, want %d", code, stderr.String(), want)
 			}
 			if len(fake.submits) != tc.wantSubmits {
 				t.Fatalf("JobSubmit calls = %d, want %d", len(fake.submits), tc.wantSubmits)
@@ -570,11 +912,18 @@ func TestTaskWaitDelegateReportValidationAndCorrection(t *testing.T) {
 			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
 				t.Fatalf("terminal JSON invalid: %v; raw=%q", err, stdout.String())
 			}
-			if env.JobID != tc.wantJobID || env.Status != engine.StateCompleted {
-				t.Fatalf("terminal envelope job/status = %s/%s, want %s/%s", env.JobID, env.Status, tc.wantJobID, engine.StateCompleted)
+			if env.JobID != tc.wantJobID || env.Status != tc.wantState {
+				t.Fatalf("terminal envelope job/status = %s/%s, want %s/%s", env.JobID, env.Status, tc.wantJobID, tc.wantState)
 			}
 			if env.Contract.Status != tc.wantStatus || env.Contract.RetryUsed != tc.wantRetry || env.Contract.Attempts != tc.wantAttempts {
 				t.Fatalf("contract = %#v, want status=%s retry=%t attempts=%d", env.Contract, tc.wantStatus, tc.wantRetry, tc.wantAttempts)
+			}
+			gotSkip, found := terminalEnvelopeContractField(t, stdout.Bytes(), "retrySkipReason")
+			if tc.wantSkip == "" && found {
+				t.Fatalf("successful report correction contract unexpectedly contains retrySkipReason: %q", stdout.String())
+			}
+			if tc.wantSkip != "" && (!found || gotSkip != string(tc.wantSkip)) {
+				t.Fatalf("contract retrySkipReason=%q (found=%t), want %q", gotSkip, found, tc.wantSkip)
 			}
 
 			if tc.wantSubmits == 2 {
@@ -644,9 +993,240 @@ func TestTaskWaitCorrectionFailureFallsBackToOriginalResult(t *testing.T) {
 	if env.CleanupDisposition != cleanupDispositionVerifiedAbsent {
 		t.Fatalf("cleanup disposition = %q, want original %q", env.CleanupDisposition, cleanupDispositionVerifiedAbsent)
 	}
+	if got, found := terminalEnvelopeContractField(t, stdout.Bytes(), "retrySkipReason"); !found || got != string(reportRetrySkipAttemptedAndExhausted) {
+		t.Fatalf("contract retrySkipReason = %q (found=%t), want %q", got, found, reportRetrySkipAttemptedAndExhausted)
+	}
 	if !strings.Contains(stderr.String(), "warning: delegate-report correction job_report_2 for job_report_1 did not produce an authoritative result body; using original terminal result") {
 		t.Fatalf("stderr = %q, want correction fallback warning", stderr.String())
 	}
+}
+
+func TestTaskWaitCorrectionResolvesTerminalFieldsFromCorrectionJob(t *testing.T) {
+	goodReport := compliantReport()
+	badReport := malformedDelegateReport()
+	fake := &reportCorrectionRoundTripClient{
+		hello:  helloWithCapabilities(),
+		jobIDs: []string{"job_report_1", "job_report_2"},
+		resultsByJobID: map[string]client.JobResult{
+			"job_report_1": reportJobResult("job_report_1", badReport),
+			"job_report_2": reportJobResult("job_report_2", goodReport),
+		},
+		submittedTimeoutByJobID: map[string]config.DimensionResolution{
+			"job_report_1": {Effective: "45s", Source: "flag"},
+		},
+		resultTimeoutByJobID: map[string]config.DimensionResolution{
+			"job_report_2": {Effective: "30m0s", Source: "daemon"},
+		},
+	}
+	restore := stubAgentbusClientGlobals(t, fake)
+	defer restore()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("AI_AGENT", "")
+	t.Setenv("DELEGATE_DEPTH", "")
+
+	// Keep the original metadata required to discover the malformed report, but
+	// model loss of the correction's local metadata. The selected correction job
+	// still has a daemon timeout result, while its profile must be honestly
+	// unknown rather than inherited from the original --write request.
+	originalSave := saveDelegateJobMetadata
+	saveDelegateJobMetadata = func(stateDir string, meta jobMetadata) error {
+		if meta.ReportCorrectionOf != "" {
+			return nil
+		}
+		return originalSave(stateDir, meta)
+	}
+	defer func() { saveDelegateJobMetadata = originalSave }()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it",
+		"--write", "--timeout", "45s", "--origin", "delegate:test",
+		"--parent-client", "test-client", "--parent-session", "test-session", "--wait", "--json",
+	}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("task code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if env.JobID != "job_report_2" {
+		t.Fatalf("terminal job_id=%q, want correction job", env.JobID)
+	}
+	if want := (config.DimensionResolution{Requested: "45s", Effective: "30m0s", Source: "daemon"}); env.Timeout != want {
+		t.Fatalf("terminal timeout=%#v, want correction daemon resolution %#v", env.Timeout, want)
+	}
+	if want := (config.DimensionResolution{Source: "unknown"}); env.BackendProfile != want {
+		t.Fatalf("terminal backend_profile=%#v, want correction metadata loss reported as %#v", env.BackendProfile, want)
+	}
+	if env.Origin == nil || env.Origin.Skill != "delegate:test" || env.Origin.ParentClient != "test-client" || env.Origin.ParentSessionID != "test-session" {
+		t.Fatalf("terminal origin=%#v, want request-scoped origin linkage preserved", env.Origin)
+	}
+}
+
+func TestResultDirectFailedReportCorrectionReportsExhaustion(t *testing.T) {
+	correctionID := "job_report_correction"
+	badReport := malformedDelegateReport()
+	fake := &reportCorrectionRoundTripClient{
+		hello: helloWithCapabilities(),
+		resultsByJobID: map[string]client.JobResult{
+			correctionID: reportJobResult(correctionID, badReport),
+		},
+	}
+	restore := stubAgentbusClientGlobals(t, fake)
+	defer restore()
+
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveJobMetadata(stateDir, jobMetadata{
+		JobID:              correctionID,
+		Backend:            "codex",
+		ContractKind:       contractKindShape,
+		ReportCorrectionOf: "job_report_original",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"result", "--job", correctionID, "--json"}, nil, &stdout, &stderr)
+	if want := engine.ExitCodeForState(engine.StateCompletedNoncompliant); code != want {
+		t.Fatalf("result code=%d stderr=%q stdout=%q, want %d", code, stderr.String(), stdout.String(), want)
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if env.Status != engine.StateCompletedNoncompliant || env.Contract.Status != engine.ContractNoncompliant || !env.Contract.RetryUsed || env.Contract.Attempts != 2 {
+		t.Fatalf("direct correction envelope = %#v, want noncompliant with two attempts and retry used", env)
+	}
+	if got, found := terminalEnvelopeContractField(t, stdout.Bytes(), "retrySkipReason"); !found || got != string(reportRetrySkipAttemptedAndExhausted) {
+		t.Fatalf("contract retrySkipReason=%q (found=%t), want %q", got, found, reportRetrySkipAttemptedAndExhausted)
+	}
+}
+
+func TestResultCorrectionObservationDeadlineReportsUnknown(t *testing.T) {
+	originalID := "job_report_original"
+	correctionID := "job_report_correction"
+	badReport := malformedDelegateReport()
+	fake := &reportCorrectionRoundTripClient{
+		hello: helloWithCapabilities(),
+		resultsByJobID: map[string]client.JobResult{
+			originalID:   reportJobResult(originalID, badReport),
+			correctionID: {JobID: correctionID, SessionID: "session_" + correctionID, State: engine.StateRunning},
+		},
+	}
+	restore := stubAgentbusClientGlobals(t, fake)
+	defer restore()
+
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveJobMetadata(stateDir, jobMetadata{
+		JobID:                 originalID,
+		Backend:               "codex",
+		ContractKind:          contractKindShape,
+		ReportCorrectionJobID: correctionID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"result", "--job", originalID, "--wait", "--wait-timeout", "50ms", "--json"}, nil, &stdout, &stderr)
+	if want := engine.ExitCodeForState(engine.StateCompletedNoncompliant); code != want {
+		t.Fatalf("result code=%d stderr=%q stdout=%q, want %d", code, stderr.String(), stdout.String(), want)
+	}
+	var env TerminalEnvelope
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+		t.Fatalf("terminal JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if env.JobID != originalID || env.Status != engine.StateCompletedNoncompliant {
+		t.Fatalf("observation-deadline envelope job/status=%s/%s, want %s/completed_noncompliant", env.JobID, env.Status, originalID)
+	}
+	if got, found := terminalEnvelopeContractField(t, stdout.Bytes(), "retrySkipReason"); !found || got != string(reportRetrySkipUnknown) {
+		t.Fatalf("contract retrySkipReason=%q (found=%t), want %q", got, found, reportRetrySkipUnknown)
+	}
+	if !strings.Contains(stderr.String(), "could not complete") || !strings.Contains(stderr.String(), "context deadline exceeded") {
+		t.Fatalf("stderr=%q, want correction observation-deadline warning", stderr.String())
+	}
+}
+
+func TestTerminalEnvelopeReportsReportRetrySkipReason(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		result     client.JobResult
+		wantCode   int
+		wantReason reportRetrySkipReason
+	}{
+		{
+			name:       "disabled by no-contract flag",
+			args:       []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--no-contract", "--wait", "--json"},
+			result:     reportJobResult("job_fake", compliantReport()),
+			wantReason: reportRetrySkipDisabledByNoContractFlag,
+		},
+		{
+			name:       "no report to revalidate",
+			args:       []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--wait", "--json"},
+			result:     client.JobResult{JobID: "job_fake", State: engine.StateCompleted},
+			wantReason: reportRetrySkipNoReportToRevalidate,
+		},
+		{
+			name:       "terminal state not correctable",
+			args:       []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--wait", "--json"},
+			result:     client.JobResult{JobID: "job_fake", State: engine.StateFailed},
+			wantCode:   engine.ExitCodeForState(engine.StateFailed),
+			wantReason: reportRetrySkipTerminalState,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities(), result: tc.result}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, nil, &stdout, &stderr); code != tc.wantCode {
+				t.Fatalf("task code=%d stderr=%q stdout=%q, want %d", code, stderr.String(), stdout.String(), tc.wantCode)
+			}
+			if got, found := terminalEnvelopeContractField(t, stdout.Bytes(), "retrySkipReason"); !found || got != string(tc.wantReason) {
+				t.Fatalf("contract retrySkipReason=%q (found=%t), want %q", got, found, tc.wantReason)
+			}
+		})
+	}
+
+	t.Run("unknown without local report metadata", func(t *testing.T) {
+		fake := &fakeAgentbusClient{hello: helloWithCapabilities(), result: reportJobResult("job_unmanaged", compliantReport())}
+		restore := stubAgentbusGlobals(t, fake)
+		defer restore()
+
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"result", "--job", "job_unmanaged", "--json"}, nil, &stdout, &stderr); code != 0 {
+			t.Fatalf("result code=%d stderr=%q stdout=%q, want 0", code, stderr.String(), stdout.String())
+		}
+		if got, found := terminalEnvelopeContractField(t, stdout.Bytes(), "retrySkipReason"); !found || got != string(reportRetrySkipUnknown) {
+			t.Fatalf("contract retrySkipReason=%q (found=%t), want %q", got, found, reportRetrySkipUnknown)
+		}
+	})
+}
+
+func terminalEnvelopeContractField(t *testing.T, raw []byte, name string) (string, bool) {
+	t.Helper()
+	var wire struct {
+		Contract map[string]json.RawMessage `json:"contract"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &wire); err != nil {
+		t.Fatal(err)
+	}
+	value, found := wire.Contract[name]
+	if !found {
+		return "", false
+	}
+	var decoded string
+	if err := json.Unmarshal(value, &decoded); err != nil {
+		t.Fatalf("contract.%s: %v", name, err)
+	}
+	return decoded, true
 }
 
 func TestTaskSubmitFailurePreservesIntentAndHandoffForRecovery(t *testing.T) {
@@ -1050,6 +1630,98 @@ func TestTaskReadOnlyHintStaysOnStderr(t *testing.T) {
 	}
 }
 
+func TestTaskLaunchEnvelopeReportsEffectiveBackendProfile(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		flags []string
+		want  config.DimensionResolution
+	}{
+		{
+			name: "read_only_without_write",
+			want: config.DimensionResolution{Effective: backendProfileReadOnly, Source: "default"},
+		},
+		{
+			name:  "read_only_with_explicit_write_false",
+			flags: []string{"--write=false"},
+			want:  config.DimensionResolution{Effective: backendProfileReadOnly, Source: "flag"},
+		},
+		{
+			name:  "workspace_write_with_write",
+			flags: []string{"--write"},
+			want:  config.DimensionResolution{Effective: backendProfileWorkspaceWrite, Source: "flag"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+
+			args := append([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--background", "--json"}, tc.flags...)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
+			}
+			var envelope LaunchEnvelope
+			if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+				t.Fatalf("launch JSON=%q: %v", stdout.String(), err)
+			}
+			if envelope.BackendProfile != tc.want {
+				t.Fatalf("launch backend_profile=%#v, want %#v", envelope.BackendProfile, tc.want)
+			}
+		})
+	}
+}
+
+func TestTaskTerminalEnvelopeReportsEffectiveBackendProfile(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		flags []string
+		want  config.DimensionResolution
+	}{
+		{
+			name: "read_only_without_write",
+			want: config.DimensionResolution{Effective: backendProfileReadOnly, Source: "default"},
+		},
+		{
+			name:  "workspace_write_with_write",
+			flags: []string{"--write"},
+			want:  config.DimensionResolution{Effective: backendProfileWorkspaceWrite, Source: "flag"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{
+				hello:        helloWithCapabilities(),
+				submitResult: client.JobSubmitResult{JobID: "job_profile", State: engine.StateQueued},
+				result:       client.JobResult{JobID: "job_profile", State: engine.StateCompleted},
+			}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+
+			args := append([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "do it", "--background", "--json"}, tc.flags...)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("launch code = %d, stderr = %q", code, stderr.String())
+			}
+			var launch LaunchEnvelope
+			if err := json.Unmarshal(stdout.Bytes(), &launch); err != nil {
+				t.Fatalf("launch JSON=%q: %v", stdout.String(), err)
+			}
+			stdout.Reset()
+			stderr.Reset()
+			if code := run([]string{"result", "--job", launch.JobID, "--json"}, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("result code = %d, stderr = %q", code, stderr.String())
+			}
+			var envelope TerminalEnvelope
+			if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+				t.Fatalf("terminal JSON=%q: %v", stdout.String(), err)
+			}
+			if envelope.BackendProfile != tc.want {
+				t.Fatalf("terminal backend_profile=%#v, want %#v", envelope.BackendProfile, tc.want)
+			}
+		})
+	}
+}
+
 func stubAgentbusGlobals(t *testing.T, fake *fakeAgentbusClient) func() {
 	return stubAgentbusClientGlobals(t, fake)
 }
@@ -1057,7 +1729,7 @@ func stubAgentbusGlobals(t *testing.T, fake *fakeAgentbusClient) func() {
 func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setupTestPreflightEnvironment(t)
 	oldConnect := connectAgentbus
 	oldLookPath := lookPath
 	oldCommandOutput := commandOutput
@@ -1075,6 +1747,56 @@ func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 		lookPath = oldLookPath
 		commandOutput = oldCommandOutput
 	}
+}
+
+// setupTestPreflightEnvironment pins every environment input that setup's
+// state and lock-root resolution can consume. The lock root differs by OS:
+// os.UserCacheDir uses HOME/Library/Caches on Darwin and XDG_CACHE_HOME on
+// Unix, so both HOME and XDG_CACHE_HOME must be isolated.
+func setupTestPreflightEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("AGENTBUS_STATE_ROOT", "")
+}
+
+// setupTestPreflightDirectories models the pre-existing autostart behavior of
+// a successful agentbus connection: setup connects before evaluating the
+// preflight fields, so the daemon has already created its state and lock roots.
+// Missing-path behavior is covered separately without a daemon.
+func setupTestPreflightDirectories(t *testing.T) {
+	t.Helper()
+	for _, path := range setupTestPreflightPaths(t) {
+		if _, err := os.Lstat(path); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("inspect fake-agentbus preflight path %q: %v", path, err)
+		}
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatalf("create fake-agentbus preflight directory %q: %v", path, err)
+		}
+	}
+}
+
+// setupTestPreflightPaths resolves the same directories production setup will
+// probe. Tests must use these resolved paths rather than hard-coding one OS's
+// cache layout.
+func setupTestPreflightPaths(t *testing.T) []string {
+	t.Helper()
+	paths := make([]string, 0, 3)
+	for _, resolve := range []func() (string, error){
+		resolveAgentbusStateRoot,
+		func() (string, error) { return handoff.ResolveStateDir(handoff.StateConfig{}) },
+		resolveAgentbusAutostartLockRoot,
+	} {
+		path, err := resolve()
+		if err != nil {
+			t.Fatalf("resolve fake-agentbus preflight path: %v", err)
+		}
+		paths = append(paths, path)
+	}
+	return paths
 }
 
 func agentbusVersionFixtureOutput(version string) string {
@@ -1100,28 +1822,34 @@ func helloWithCapabilities() client.HelloResult {
 }
 
 type fakeAgentbusClient struct {
-	hello        client.HelloResult
-	submits      []client.JobSubmitParams
-	submitResult client.JobSubmitResult
-	submitErr    error
-	statuses     []client.JobStatusParams
-	statusErr    error
-	status       client.JobStatusResult
-	results      []client.JobResultParams
-	result       client.JobResult
-	resultErr    error
-	cancels      []client.JobCancelParams
-	cancel       client.JobCancelResult
-	cancelErr    error
+	hello            client.HelloResult
+	submits          []client.JobSubmitParams
+	submitResult     client.JobSubmitResult
+	submittedTimeout config.DimensionResolution
+	resultTimeout    config.DimensionResolution
+	statusTimeout    config.DimensionResolution
+	submitErr        error
+	statuses         []client.JobStatusParams
+	statusErr        error
+	status           client.JobStatusResult
+	results          []client.JobResultParams
+	result           client.JobResult
+	resultErr        error
+	cancels          []client.JobCancelParams
+	cancel           client.JobCancelResult
+	cancelErr        error
 }
 
 type reportCorrectionRoundTripClient struct {
-	hello          client.HelloResult
-	jobIDs         []string
-	resultsByJobID map[string]client.JobResult
-	submits        []client.JobSubmitParams
-	statuses       []client.JobStatusParams
-	results        []client.JobResultParams
+	hello                   client.HelloResult
+	jobIDs                  []string
+	resultsByJobID          map[string]client.JobResult
+	submittedTimeoutByJobID map[string]config.DimensionResolution
+	resultTimeoutByJobID    map[string]config.DimensionResolution
+	statusTimeoutByJobID    map[string]config.DimensionResolution
+	submits                 []client.JobSubmitParams
+	statuses                []client.JobStatusParams
+	results                 []client.JobResultParams
 }
 
 func (f *reportCorrectionRoundTripClient) Close() error { return nil }
@@ -1162,6 +1890,21 @@ func (f *reportCorrectionRoundTripClient) JobResult(_ context.Context, params cl
 
 func (f *reportCorrectionRoundTripClient) JobCancel(context.Context, client.JobCancelParams) (client.JobCancelResult, error) {
 	return client.JobCancelResult{}, errors.New("unexpected JobCancel")
+}
+
+func (f *reportCorrectionRoundTripClient) submittedTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
+	resolution, ok := f.submittedTimeoutByJobID[jobID]
+	return resolution, ok && timeoutResolutionIsResolved(resolution)
+}
+
+func (f *reportCorrectionRoundTripClient) resultTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
+	resolution, ok := f.resultTimeoutByJobID[jobID]
+	return resolution, ok && timeoutResolutionIsResolved(resolution)
+}
+
+func (f *reportCorrectionRoundTripClient) statusTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
+	resolution, ok := f.statusTimeoutByJobID[jobID]
+	return resolution, ok && timeoutResolutionIsResolved(resolution)
 }
 
 func (f *fakeAgentbusClient) Close() error { return nil }
@@ -1230,6 +1973,18 @@ func (f *fakeAgentbusClient) JobCancel(_ context.Context, params client.JobCance
 		return f.cancel, nil
 	}
 	return client.JobCancelResult{}, errors.New("unexpected JobCancel")
+}
+
+func (f *fakeAgentbusClient) submittedTimeoutResolution(string) (config.DimensionResolution, bool) {
+	return f.submittedTimeout, timeoutResolutionIsResolved(f.submittedTimeout)
+}
+
+func (f *fakeAgentbusClient) resultTimeoutResolution(string) (config.DimensionResolution, bool) {
+	return f.resultTimeout, timeoutResolutionIsResolved(f.resultTimeout)
+}
+
+func (f *fakeAgentbusClient) statusTimeoutResolution(string) (config.DimensionResolution, bool) {
+	return f.statusTimeout, timeoutResolutionIsResolved(f.statusTimeout)
 }
 
 func compliantReport() string {

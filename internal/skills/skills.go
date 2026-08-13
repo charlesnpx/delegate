@@ -482,11 +482,11 @@ Superseding escape hatch: if the requester explicitly asks you to perform the ta
 - exec: "delegate", "agentbus", and the {{.Backend}} backend executable are runnable.
 - repo+state write access: the target repo and delegate/agentbus state roots are writable when the task needs writes.
 - stdin handoff: sensitive prompt text can be piped to "delegate handoff create --json".
-- backend reachability: "delegate setup --json" shows agentbus capabilities and {{.Backend}} backend availability.
+- backend reachability: "delegate setup --json --backend {{.Backend}}" shows agentbus capabilities and {{.Backend}} backend availability without unrelated backend model catalogues.
 
-"delegate task" is read-only unless it has "--write". The worker sandbox is offline, and a write turn can write only inside the job "--cwd"; use it for repo-local edits/builds/tests and point "GOCACHE" and "GOMODCACHE" under that cwd. Route module downloads, other network work, and Git commits to the caller/orchestrator.
+"delegate task" is read-only unless it has "--write". The worker sandbox is offline, and a write turn can write only inside the job "--cwd"; use it for repo-local edits/builds/tests and point "GOCACHE" and "GOMODCACHE" under that cwd. Route module downloads, other network work, and Git commits to the caller/orchestrator. The launch and terminal envelope's "backend_profile" reports the effective Agentbus sandbox mode as "read-only" or "workspace-write"; use it to route runtime gates.
 
-The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
+The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted. The "--timeout" flag is optional; omit it or pass "--timeout 0" to leave the deadline to the daemon default, then use the launch envelope's "timeout" field as the authoritative effective value.
 
 When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id, job record, contract stamps, and read-only profile.
 
@@ -508,7 +508,7 @@ Each handoff prompt file is single-use: after the task consumes it, create a new
 
 When the caller has a machine-readable output schema, pass it with "--output-schema-file" instead of placing it in prompt prose. Violations return as "<json-pointer>: <message>", and one corrective retry runs automatically.
 
-Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", or "result_sha256" fields.
+Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "backend_profile", "timeout", or "result_sha256" fields.
 
 If submission is unresolved after Agentbus accepted or may have accepted the request, preserve the reported "request_id" and run only the exact recovery command "delegate task --recover-request <request_id> --json". Do not create a replacement request unless the user explicitly asks for a new logical task.
 
@@ -516,7 +516,7 @@ Launch with "--background" so the host agent loop stays free. To await the job, 
 
 ## Result Discipline
 
-When the delegated run returns, preserve the helper's verdict, summary, findings, and next steps structure. For review-style output, present findings first and keep them ordered by severity. Preserve file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Terminal envelopes may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing. After presenting review findings, do not auto-fix; ask the user which issues to address.
+When the delegated run returns, preserve the helper's verdict, summary, findings, and next steps structure. For review-style output, present findings first and keep them ordered by severity. Preserve file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Terminal envelopes carry the same "timeout" resolution as launch envelopes and may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing. After presenting review findings, do not auto-fix; ask the user which issues to address.
 
 Use delegate-report discipline in your own handoff: score criteria, label evidence as observed/inferred/assumed, separate changed from verified, state scope boundaries, and report divergences instead of hiding them.`
 
@@ -541,11 +541,11 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 - exec: "delegate", "agentbus", "git", and the {{.Backend}} backend executable are runnable. Git is used by host-side delegate assembly only; it is not a review-worker preflight or input source.
 - repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate applies path/history redaction and a final content scan to every assembled inline or spilled diff payload.
 - cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
-- backend reachability: "delegate setup --json" shows agentbus capabilities and {{.Backend}} backend availability.
+- backend reachability: "delegate setup --json --backend {{.Backend}}" shows agentbus capabilities and {{.Backend}} backend availability without unrelated backend model catalogues.
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
-Review commands never pass "--write" and intentionally run the backend read-only. A read-only review worker cannot create a build/temp directory, compile, or run tests, so the caller must execute runtime verification and gates.
+Review commands never pass "--write" and intentionally run the backend read-only. A read-only review worker cannot create a build/temp directory, compile, or run tests, so the caller must execute runtime verification and gates. The launch and terminal envelope's "backend_profile" reports the effective Agentbus sandbox mode as "read-only" or "workspace-write"; use it to route runtime gates.
 
 When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id, job record, contract stamps, and read-only profile.
 
@@ -571,7 +571,7 @@ Spawn the no-fork delegated review exactly through the CLI. Add "--base" or "--s
 delegate {{.Command}} --backend {{.Backend}} --origin {{.Name}} --cwd "$PWD" --background --json
 ~~~
 
-Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", or "result_sha256" fields.
+Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "backend_profile", "timeout", or "result_sha256" fields.
 
 If submission is unresolved after Agentbus accepted or may have accepted the request, preserve the reported "request_id" and run only the exact recovery command "delegate task --recover-request <request_id> --json". Do not create a replacement request unless the user explicitly asks for a new logical review.
 
@@ -579,7 +579,7 @@ Launch with "--background" so the host agent loop stays free. To await the job, 
 
 ## Review Result Discipline
 
-Present findings first and keep them ordered by severity. Preserve the delegated review's file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Distinguish observed evidence from inferred risk and assumptions. Terminal envelopes may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If there are no findings, say so explicitly and keep residual risk brief. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing or substituting a local review.
+Present findings first and keep them ordered by severity. Preserve the delegated review's file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Distinguish observed evidence from inferred risk and assumptions. Terminal envelopes carry the same "timeout" resolution as launch envelopes and may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If there are no findings, say so explicitly and keep residual risk brief. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing or substituting a local review.
 
 Never auto-fix after presenting review findings. Ask the user which issues, if any, they want addressed.`
 
@@ -634,9 +634,9 @@ Run:
 {{.Command}}
 ~~~
 
-Use this before launching delegated work. Confirm that "delegate" and "agentbus" are executable, agentbus reports "admission.strictContainment" plus the policy capabilities delegate requires, the intended backend is available, the repo and delegate state are writable when needed, and stdin handoff through "delegate handoff create --json" is viable.
+Use this before launching delegated work. Confirm that "delegate" and "agentbus" are executable, agentbus reports "admission.strictContainment" plus the policy capabilities delegate requires, the intended backend is available, the repo and delegate state are writable when needed, and stdin handoff through "delegate handoff create --json" is viable. Use "delegate setup --json --backend <name>" to focus the per-backend detail on one advertised backend; global readiness fields and capabilities remain complete.
 
-Report these setup fields when they are relevant: "agentbusStateRoot", "agentbusStateRootWritable", "agentbusAutostartLockRoot", "agentbusAutostartLockRootWritable", "pendingSubmissionIntentCount", "unresolvedCleanupArtifactCount", "admissionStrictContainment", and "ready". A nonzero "pendingSubmissionIntentCount" means there may be a recoverable request; use "delegate task --recover-request <request_id> --json" for a known request id rather than creating a replacement request. A nonzero "unresolvedCleanupArtifactCount" means Delegate retained local artifacts because Agentbus did not prove backend absence.
+Report these setup fields when they are relevant: "agentbusStateRoot", "agentbusStateRootWritable", "agentbusAutostartLockRoot", "agentbusAutostartLockRootWritable", "pendingSubmissionIntentCount", "pendingSubmissionIntents", "unresolvedCleanupArtifactCount", "admissionStrictContainment", and "ready". "pendingSubmissionIntents" contains up to 20 oldest pending intents (oldest first); its request IDs can go directly to "delegate task --recover-request <request_id> --json". "pendingSubmissionIntentCount" remains the authoritative total when that array is capped. A nonzero "unresolvedCleanupArtifactCount" means Delegate retained local artifacts because Agentbus did not prove backend absence.
 
 If setup fails, report the failing prerequisite and stop. Do not improvise alternate auth, install, or execution flows.`
 

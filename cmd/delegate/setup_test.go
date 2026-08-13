@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,10 +17,44 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	delegateconfig "github.com/charlesnpx/delegate/internal/config"
 	"github.com/charlesnpx/delegate/internal/handoff"
 )
 
+// setupJSONBeforeBackendFilter captures the established JSON layout using raw
+// Agentbus JSON so the default-output test can compare the full line without
+// changing Agentbus' handshake-only custom marshaling behavior.
+type setupJSONBeforeBackendFilter struct {
+	Schema                               int                            `json:"schema"`
+	Delegate                             string                         `json:"delegate"`
+	Agentbus                             json.RawMessage                `json:"agentbus"`
+	Config                               setupConfigBeforeBackendFilter `json:"config"`
+	Skills                               []setupSkill                   `json:"skills"`
+	StateRootWritable                    bool                           `json:"stateRootWritable"`
+	StateRootWritability                 setupWritability               `json:"stateRootWritability,omitempty"`
+	AgentbusStateRoot                    string                         `json:"agentbusStateRoot"`
+	AgentbusStateRootWritable            bool                           `json:"agentbusStateRootWritable"`
+	AgentbusStateRootWritability         setupWritability               `json:"agentbusStateRootWritability,omitempty"`
+	AgentbusAutostartLockRoot            string                         `json:"agentbusAutostartLockRoot"`
+	AgentbusAutostartLockRootWritable    bool                           `json:"agentbusAutostartLockRootWritable"`
+	AgentbusAutostartLockRootWritability setupWritability               `json:"agentbusAutostartLockRootWritability,omitempty"`
+	AdmissionStrictContainment           bool                           `json:"admissionStrictContainment"`
+	PendingSubmissionIntentCount         *int                           `json:"pendingSubmissionIntentCount"`
+	PendingSubmissionIntents             []setupPendingSubmissionIntent `json:"pendingSubmissionIntents"`
+	UnresolvedCleanupArtifactCount       *int                           `json:"unresolvedCleanupArtifactCount"`
+	DaemonReachable                      bool                           `json:"daemonReachable"`
+	Ready                                bool                           `json:"ready"`
+	Warnings                             []string                       `json:"warnings,omitempty"`
+}
+
+type setupConfigBeforeBackendFilter struct {
+	Path        string                  `json:"path"`
+	Overridable bool                    `json:"overridable"`
+	Defaults    delegateconfig.Backends `json:"defaults"`
+}
+
 func TestSetupStatePreflightRejectsRelativeAgentbusStateRoot(t *testing.T) {
+	setupTestPreflightEnvironment(t)
 	workspace := t.TempDir()
 	originalWD, err := os.Getwd()
 	if err != nil {
@@ -32,7 +69,6 @@ func TestSetupStatePreflightRejectsRelativeAgentbusStateRoot(t *testing.T) {
 		}
 	})
 	t.Setenv("XDG_STATE_HOME", "relative-state")
-	t.Setenv("AGENTBUS_STATE_ROOT", "")
 
 	result := setupStatePreflight()
 	if result.AgentbusStateRootWritable {
@@ -46,19 +82,274 @@ func TestSetupStatePreflightRejectsRelativeAgentbusStateRoot(t *testing.T) {
 	}
 }
 
-func TestSetupReportsPendingSubmissionAndUnresolvedCleanupCounts(t *testing.T) {
+func TestSetupPendingSubmissionIntentsDoesNotCreateMissingStateDirectory(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "delegate")
+
+	count, intents, warnings := setupPendingSubmissionIntents(stateDir)
+	if count == nil || *count != 0 || intents == nil || len(intents) != 0 || len(warnings) != 0 {
+		t.Fatalf("missing state pending output = count:%v intents:%#v warnings:%#v, want zero, empty array, and no warnings", count, intents, warnings)
+	}
+	if _, err := os.Lstat(stateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("intent enumeration created state path %q: %v", stateDir, err)
+	}
+}
+
+func TestSetupExistingDirectoryWritabilityProbesAndCleansUp(t *testing.T) {
+	dir := t.TempDir()
+
+	result := setupExistingDirectoryWritability(dir)
+	if result.Status != setupWritabilityWritable || result.Reason != "" {
+		t.Fatalf("existing directory writability = %#v, want writable", result)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("effective writability probe left files behind: %#v", entries)
+	}
+}
+
+func TestSetupPreflightEffectivelyProbesExistingRoots(t *testing.T) {
+	setupTestPreflightEnvironment(t)
+	paths := setupTestPreflightPaths(t)
+	for _, path := range paths {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result := setupStatePreflight()
+	for _, check := range []struct {
+		name   string
+		status setupWritability
+	}{
+		{"delegate state root", result.StateRootWritability},
+		{"agentbus state root", result.AgentbusStateRootWritability},
+		{"agentbus autostart lock root", result.AgentbusAutostartLockRootWritability},
+	} {
+		if check.status != setupWritabilityWritable {
+			t.Fatalf("%s writability=%q, want writable", check.name, check.status)
+		}
+	}
+	for _, path := range paths {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("preflight probe left files in %q: %#v", path, entries)
+		}
+	}
+}
+
+func TestSetupPreflightReportsMissingRootsAsUnknownWithoutCreatingThem(t *testing.T) {
+	setupTestPreflightEnvironment(t)
+
+	result := setupStatePreflight()
+	for _, check := range []struct {
+		name   string
+		path   string
+		status setupWritability
+	}{
+		{"delegate state root", result.DelegateStateRoot, result.StateRootWritability},
+		{"agentbus state root", result.AgentbusStateRoot, result.AgentbusStateRootWritability},
+		{"agentbus autostart lock root", result.AgentbusAutostartLockRoot, result.AgentbusAutostartLockRootWritability},
+	} {
+		if check.status != setupWritabilityUnknown {
+			t.Fatalf("%s writability=%q, want unknown for missing path", check.name, check.status)
+		}
+		if _, err := os.Lstat(check.path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("preflight created %s %q: %v", check.name, check.path, err)
+		}
+	}
+}
+
+func TestSetupMissingDirectoryWritabilityIsUnknownAndDoesNotCreate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing")
+
+	result := setupExistingDirectoryWritability(path)
+	if result.Status != setupWritabilityUnknown || !strings.Contains(result.Reason, "may be creatable") {
+		t.Fatalf("missing directory writability = %#v, want potentially-creatable unknown", result)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("writability probe created missing path %q: %v", path, err)
+	}
+}
+
+func TestSetupBackendFilterRestrictsDetailsAndPreservesReadiness(t *testing.T) {
+	hello := helloWithCapabilities()
+	hello.Backends = []string{"codex", "claude", "cursor"}
+	hello.BackendMetadata = []client.BackendInfo{
+		{Name: "codex", Models: []string{"gpt-5.6"}, Efforts: []string{"high"}},
+		{Name: "claude", Models: []string{"claude-opus"}, Efforts: []string{"medium"}},
+		{Name: "cursor", Models: []string{"cursor-1", "cursor-2"}, Efforts: []string{"low", "high"}},
+	}
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: hello})
+	defer restore()
+	setupTestPreflightDirectories(t)
+	if err := delegateconfig.Save(delegateconfig.Config{
+		Overridable: true,
+		Backend:     delegateconfig.Backends{Codex: delegateconfig.Defaults{Model: "codex-default", Effort: "high"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var unfilteredStdout, unfilteredStderr bytes.Buffer
+	if code := run([]string{"setup", "--json"}, nil, &unfilteredStdout, &unfilteredStderr); code != 0 {
+		t.Fatalf("unfiltered setup code=%d stderr=%q", code, unfilteredStderr.String())
+	}
+	var unfiltered setupJSON
+	if err := json.Unmarshal(unfilteredStdout.Bytes(), &unfiltered); err != nil {
+		t.Fatalf("unfiltered setup JSON invalid: %v; raw=%q", err, unfilteredStdout.String())
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json", "--backend", "codex"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code=%d stderr=%q", code, stderr.String())
+	}
+	var result setupJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if got, want := result.Agentbus.Backends, []string{"codex"}; !slices.Equal(got, want) {
+		t.Fatalf("filtered backends=%#v, want %#v", got, want)
+	}
+	if got, want := result.Agentbus.BackendMetadata, []client.BackendInfo{hello.BackendMetadata[0]}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("filtered backend metadata=%#v, want %#v", got, want)
+	}
+	var raw struct {
+		Config struct {
+			Defaults map[string]json.RawMessage `json:"defaults"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(raw.Config.Defaults), 1; got != want || raw.Config.Defaults["codex"] == nil {
+		t.Fatalf("filtered config defaults=%#v, want only codex", raw.Config.Defaults)
+	}
+	if result.Schema != unfiltered.Schema || result.Delegate != unfiltered.Delegate || !reflect.DeepEqual(result.Agentbus.Capabilities, unfiltered.Agentbus.Capabilities) || !slices.Equal(result.Agentbus.Required, unfiltered.Agentbus.Required) || !slices.Equal(result.Agentbus.Missing, unfiltered.Agentbus.Missing) || result.Agentbus.CapabilitiesOK != unfiltered.Agentbus.CapabilitiesOK || result.Config.Path != unfiltered.Config.Path || result.Config.Overridable != unfiltered.Config.Overridable || !reflect.DeepEqual(result.Skills, unfiltered.Skills) || result.StateRootWritable != unfiltered.StateRootWritable || result.StateRootWritability != unfiltered.StateRootWritability || result.AgentbusStateRoot != unfiltered.AgentbusStateRoot || result.AgentbusStateRootWritable != unfiltered.AgentbusStateRootWritable || result.AgentbusStateRootWritability != unfiltered.AgentbusStateRootWritability || result.AgentbusAutostartLockRoot != unfiltered.AgentbusAutostartLockRoot || result.AgentbusAutostartLockRootWritable != unfiltered.AgentbusAutostartLockRootWritable || result.AgentbusAutostartLockRootWritability != unfiltered.AgentbusAutostartLockRootWritability || result.AdmissionStrictContainment != unfiltered.AdmissionStrictContainment || !reflect.DeepEqual(result.PendingSubmissionIntentCount, unfiltered.PendingSubmissionIntentCount) || !reflect.DeepEqual(result.PendingSubmissionIntents, unfiltered.PendingSubmissionIntents) || !reflect.DeepEqual(result.UnresolvedCleanupArtifactCount, unfiltered.UnresolvedCleanupArtifactCount) || result.DaemonReachable != unfiltered.DaemonReachable || result.Ready != unfiltered.Ready || !slices.Equal(result.Warnings, unfiltered.Warnings) {
+		t.Fatalf("backend filter changed global setup readiness: filtered=%#v unfiltered=%#v", result, unfiltered)
+	}
+}
+
+func TestSetupBackendFilterRejectsUnavailableBackend(t *testing.T) {
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json", "--backend", "missing"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("setup code=%d, want failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("setup emitted success-looking JSON for unavailable backend: %q", stdout.String())
+	}
+	if got, want := stderr.String(), `backend "missing" is not available; agentbus reports: codex, claude`; !strings.Contains(got, want) {
+		t.Fatalf("stderr=%q, want %q", got, want)
+	}
+}
+
+func TestSetupWithoutBackendIncludesAllBackendDetails(t *testing.T) {
+	hello := helloWithCapabilities()
+	hello.Backends = []string{"codex", "claude", "cursor"}
+	hello.BackendMetadata = []client.BackendInfo{
+		{Name: "codex", Models: []string{"gpt-5.6"}, Efforts: []string{"high"}},
+		{Name: "claude", Models: []string{"claude-opus"}, Efforts: []string{"medium"}},
+		{Name: "cursor", Models: []string{"cursor-1", "cursor-2"}, Efforts: []string{"low", "high"}},
+	}
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: hello})
+	defer restore()
+	setupTestPreflightDirectories(t)
+	defaults := delegateconfig.Backends{
+		Claude: delegateconfig.Defaults{Model: "claude-default", Effort: "medium"},
+		Codex:  delegateconfig.Defaults{Model: "codex-default", Effort: "high"},
+		Cursor: delegateconfig.Defaults{Model: "cursor-default", Effort: "low"},
+	}
+	if err := delegateconfig.Save(delegateconfig.Config{Overridable: true, Backend: defaults}); err != nil {
+		t.Fatal(err)
+	}
+	gotConfig, err := json.Marshal(setupConfig{Path: "/tmp/config.toml", Overridable: true, Defaults: defaults})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantConfig, err := json.Marshal(struct {
+		Path        string                  `json:"path"`
+		Overridable bool                    `json:"overridable"`
+		Defaults    delegateconfig.Backends `json:"defaults"`
+	}{Path: "/tmp/config.toml", Overridable: true, Defaults: defaults})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotConfig, wantConfig) {
+		t.Fatalf("unfiltered config JSON changed: got=%s want=%s", gotConfig, wantConfig)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code=%d stderr=%q", code, stderr.String())
+	}
+	var result setupJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if !slices.Equal(result.Agentbus.Backends, hello.Backends) || !reflect.DeepEqual(result.Agentbus.BackendMetadata, hello.BackendMetadata) {
+		t.Fatalf("unfiltered backend detail changed: backends=%#v metadata=%#v", result.Agentbus.Backends, result.Agentbus.BackendMetadata)
+	}
+	var raw struct {
+		Config struct {
+			Defaults json.RawMessage `json:"defaults"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	var reportedDefaults delegateconfig.Backends
+	if err := json.Unmarshal(raw.Config.Defaults, &reportedDefaults); err != nil {
+		t.Fatalf("unfiltered config defaults changed shape: %v; raw=%s", err, raw.Config.Defaults)
+	}
+	if !reflect.DeepEqual(reportedDefaults, defaults) {
+		t.Fatalf("unfiltered config defaults=%#v, want established full backend object %#v", reportedDefaults, defaults)
+	}
+	var before setupJSONBeforeBackendFilter
+	if err := json.Unmarshal(stdout.Bytes(), &before); err != nil {
+		t.Fatalf("unfiltered setup JSON invalid for legacy layout: %v", err)
+	}
+	wantOutput, err := json.Marshal(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bytes.TrimSpace(stdout.Bytes()); !bytes.Equal(got, wantOutput) {
+		t.Fatalf("unfiltered setup JSON changed:\n got: %s\nwant: %s", got, wantOutput)
+	}
+}
+
+func TestSetupJSONReportsPendingSubmissionIntentsAndCounts(t *testing.T) {
 	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
 	defer restore()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setupTestPreflightDirectories(t)
 	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, phase := range []string{submissionPhasePrepared, submissionPhaseInFlight, submissionPhaseBlocked} {
+	for index, phase := range []string{submissionPhasePrepared, submissionPhaseInFlight, submissionPhaseBlocked} {
 		requestID := "delegate-" + strings.Repeat(string(phase[0]), 32)
 		intent := testSubmissionIntent(testSubmitParams(t, requestID, phase+" prompt", nil), t.TempDir())
 		intent.Phase = phase
+		intent.CreatedAt = time.Date(2026, time.January, 1, 0, index, 0, 0, time.UTC)
+		intent.Params.TaskSpec.Backend = strings.Repeat(string(phase[0]), setupPendingSubmissionIntentLabelLimit+1)
+		intent.Origin = &envelopeOrigin{
+			Skill:           "delegate:" + strings.Repeat(string(phase[0]), setupPendingSubmissionIntentLabelLimit+1),
+			ParentClient:    strings.Repeat("client-", 40),
+			ParentSessionID: "private-session-id",
+			ParentAgent:     "private-parent-agent",
+			Depth:           "private-depth-99",
+		}
 		if err := saveSubmissionIntent(stateDir, intent); err != nil {
 			t.Fatal(err)
 		}
@@ -120,8 +411,71 @@ func TestSetupReportsPendingSubmissionAndUnresolvedCleanupCounts(t *testing.T) {
 	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 3 {
 		t.Fatalf("pendingSubmissionIntentCount=%v, want 3", result.PendingSubmissionIntentCount)
 	}
+	if got, want := len(result.PendingSubmissionIntents), 3; got != want {
+		t.Fatalf("pendingSubmissionIntents length=%d, want %d: %#v", got, want, result.PendingSubmissionIntents)
+	}
+	for index, want := range []struct {
+		requestID string
+		phase     string
+	}{
+		{"delegate-" + strings.Repeat("p", 32), submissionPhasePrepared},
+		{"delegate-" + strings.Repeat("i", 32), submissionPhaseInFlight},
+		{"delegate-" + strings.Repeat("b", 32), submissionPhaseBlocked},
+	} {
+		got := result.PendingSubmissionIntents[index]
+		wantLabel := strings.Repeat(string(want.phase[0]), setupPendingSubmissionIntentLabelLimit)
+		if got.RequestID != want.requestID || got.Phase != want.phase || got.Backend != wantLabel || got.Origin == nil || got.Origin.Skill != "delegate:"+wantLabel[:setupPendingSubmissionIntentLabelLimit-len("delegate:")] {
+			t.Fatalf("pendingSubmissionIntents[%d]=%#v, want request %q with durable context", index, got, want.requestID)
+		}
+		if strings.Contains(stdout.String(), "parent_session_id") || strings.Contains(stdout.String(), "parent_agent") || strings.Contains(stdout.String(), "private-session-id") || strings.Contains(stdout.String(), "private-parent-agent") || strings.Contains(stdout.String(), "client-") || strings.Contains(stdout.String(), "private-depth") {
+			t.Fatalf("setup exposed unapproved origin fields: %s", stdout.String())
+		}
+		if got.CreatedAt.IsZero() {
+			t.Fatalf("pendingSubmissionIntents[%d].createdAt is zero", index)
+		}
+	}
 	if result.UnresolvedCleanupArtifactCount == nil || *result.UnresolvedCleanupArtifactCount != 2 {
 		t.Fatalf("unresolvedCleanupArtifactCount=%v, want 2", result.UnresolvedCleanupArtifactCount)
+	}
+}
+
+func TestSetupPendingSubmissionIntentsCap(t *testing.T) {
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	setupTestPreflightDirectories(t)
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < setupPendingSubmissionIntentLimit+1; index++ {
+		requestID := fmt.Sprintf("delegate-%032d", index)
+		intent := testSubmissionIntent(testSubmitParams(t, requestID, "prompt", nil), t.TempDir())
+		intent.Phase = submissionPhasePrepared
+		intent.CreatedAt = time.Date(2026, time.January, 1, 0, index, 0, 0, time.UTC)
+		if err := saveSubmissionIntent(stateDir, intent); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code=%d stderr=%q", code, stderr.String())
+	}
+	var result setupJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != setupPendingSubmissionIntentLimit+1 {
+		t.Fatalf("pendingSubmissionIntentCount=%v, want authoritative count %d", result.PendingSubmissionIntentCount, setupPendingSubmissionIntentLimit+1)
+	}
+	if got, want := len(result.PendingSubmissionIntents), setupPendingSubmissionIntentLimit; got != want {
+		t.Fatalf("returned intent summaries=%d, want cap %d", got, want)
+	}
+	if result.PendingSubmissionIntents[0].RequestID != "delegate-00000000000000000000000000000000" || result.PendingSubmissionIntents[len(result.PendingSubmissionIntents)-1].RequestID != "delegate-00000000000000000000000000000019" {
+		t.Fatalf("capped intents=%#v, want the %d oldest intents", result.PendingSubmissionIntents, setupPendingSubmissionIntentLimit)
 	}
 }
 
@@ -184,6 +538,7 @@ func TestSetupAgentbusVersionReadiness(t *testing.T) {
 				return []byte(tc.output), nil
 			}
 			t.Setenv("HOME", t.TempDir())
+			setupTestPreflightDirectories(t)
 
 			var stdout, stderr bytes.Buffer
 			code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
@@ -393,12 +748,12 @@ func TestMinimumSupportedAgentbusVersionDoesNotExceedGoModPin(t *testing.T) {
 func TestSetupReadyRequiresWritableAgentbusStateRoot(t *testing.T) {
 	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
 	defer restore()
-	t.Setenv("HOME", t.TempDir())
 	stateRoot := filepath.Join(t.TempDir(), "agentbus-state-file")
 	if err := os.WriteFile(stateRoot, []byte("not a directory\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("AGENTBUS_STATE_ROOT", stateRoot)
+	setupTestPreflightDirectories(t)
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
@@ -426,7 +781,6 @@ func TestSetupReadyRequiresWritableAgentbusStateRoot(t *testing.T) {
 func TestSetupReadyRequiresWritableDelegateStateRoot(t *testing.T) {
 	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
 	defer restore()
-	t.Setenv("HOME", t.TempDir())
 	agentbusRoot := filepath.Join(t.TempDir(), "agentbus")
 	if err := os.MkdirAll(agentbusRoot, 0o700); err != nil {
 		t.Fatal(err)
@@ -438,6 +792,7 @@ func TestSetupReadyRequiresWritableDelegateStateRoot(t *testing.T) {
 	if err := os.MkdirAll(delegateRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	setupTestPreflightDirectories(t)
 	if err := os.Chmod(delegateRoot, 0o500); err != nil {
 		t.Fatal(err)
 	}

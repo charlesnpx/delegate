@@ -17,46 +17,96 @@ const (
 	reportCorrectionOfTag = "delegate.report_correction_of"
 )
 
-func maybeCorrectDelegateReport(ctx context.Context, c agentbusClient, hello client.HelloResult, stateDir string, terminalJob terminalJobResult, cleanupWarnings *localCleanupWarnings) (terminalJobResult, agentbusClient, client.HelloResult, []string, error) {
+// reportRetrySkipReason records why delegate's report-format correction did not
+// complete. It is intentionally local to delegate: agentbus's contract stamp
+// describes contract validation, while this describes delegate's separate
+// report-only correction path.
+type reportRetrySkipReason string
+
+const (
+	reportRetrySkipDisabledByNoContractFlag reportRetrySkipReason = "disabled_by_no_contract_flag"
+	reportRetrySkipNoReportToRevalidate     reportRetrySkipReason = "no_report_to_revalidate"
+	reportRetrySkipTerminalState            reportRetrySkipReason = "terminal_state_not_correctable"
+	reportRetrySkipAttemptedAndExhausted    reportRetrySkipReason = "attempted_and_exhausted"
+	reportRetrySkipUnknown                  reportRetrySkipReason = "unknown"
+)
+
+func maybeCorrectDelegateReport(ctx context.Context, c agentbusClient, hello client.HelloResult, stateDir string, terminalJob terminalJobResult, cleanupWarnings *localCleanupWarnings) (terminalJobResult, agentbusClient, client.HelloResult, reportRetrySkipReason, []string, error) {
 	result := terminalJob.result
-	if !reportResultCanBeCorrected(result.State) || result.Result == nil {
-		return terminalJob, c, hello, nil, nil
+	if !reportResultCanBeCorrected(result.State) {
+		return terminalJob, c, hello, reportRetrySkipTerminalState, nil, nil
+	}
+	if result.Result == nil {
+		return terminalJob, c, hello, reportRetrySkipNoReportToRevalidate, nil, nil
 	}
 	meta, found, err := loadJobMetadata(stateDir, result.JobID)
-	if err != nil || !found || !managedDelegateReportMetadata(meta) {
-		return terminalJob, c, hello, nil, nil
+	if err != nil || !found {
+		return terminalJob, c, hello, reportRetrySkipUnknown, nil, nil
+	}
+	if meta.NoContract || meta.ContractKind == contractKindNone {
+		return terminalJob, c, hello, reportRetrySkipDisabledByNoContractFlag, nil, nil
+	}
+	if !managedDelegateReportMetadata(meta) {
+		return terminalJob, c, hello, reportRetrySkipUnknown, nil, nil
 	}
 	body, ok := resultBodyText(result.Result)
 	if !ok {
-		return terminalJob, c, hello, nil, nil
+		return terminalJob, c, hello, reportRetrySkipNoReportToRevalidate, nil, nil
 	}
 	validation, err := policy.ValidateDelegateReportShape(body)
 	if err != nil {
-		return terminalJob, c, hello, nil, err
+		return terminalJob, c, hello, reportRetrySkipUnknown, nil, err
 	}
-	if validation.Compliant || meta.ReportCorrectionOf != "" {
-		return terminalJob, c, hello, nil, nil
+	if validation.Compliant {
+		return terminalJob, c, hello, "", nil, nil
+	}
+	// A correction job is the one permitted retry. Once its own report is
+	// observed noncompliant, no further correction is eligible.
+	if meta.ReportCorrectionOf != "" {
+		return terminalJob, c, hello, reportRetrySkipAttemptedAndExhausted, nil, nil
 	}
 	if meta.ReportCorrectionJobID != "" {
 		corrected, err := waitForTerminalJobResult(ctx, c, stateDir, meta.ReportCorrectionJobID, cleanupWarnings)
 		if err != nil {
-			return terminalJob, c, hello, []string{reportCorrectionFallbackWarning(meta.JobID, meta.ReportCorrectionJobID, err)}, nil
+			return terminalJob, c, hello, reportRetrySkipUnknown, []string{reportCorrectionFallbackWarning(meta.JobID, meta.ReportCorrectionJobID, err)}, nil
 		}
 		if !reportCorrectionResultUsable(corrected.result) {
-			return terminalJob, c, hello, []string{reportCorrectionFallbackWarning(meta.JobID, corrected.result.JobID, nil)}, nil
+			return terminalJob, c, hello, reportRetrySkipAttemptedAndExhausted, []string{reportCorrectionFallbackWarning(meta.JobID, corrected.result.JobID, nil)}, nil
 		}
-		return corrected, c, hello, nil, nil
+		return corrected, c, hello, reportCorrectionCompletionReason(corrected.result), nil, nil
 	}
 	corrected, nextClient, nextHello, warnings, err := submitDelegateReportCorrection(ctx, c, hello, stateDir, meta, body, validation.Violations, cleanupWarnings)
 	if err != nil {
 		warnings = append(warnings, reportCorrectionFallbackWarning(meta.JobID, corrected.result.JobID, err))
-		return terminalJob, nextClient, nextHello, warnings, nil
+		return terminalJob, nextClient, nextHello, reportCorrectionErrorReason(corrected.result), warnings, nil
 	}
 	if !reportCorrectionResultUsable(corrected.result) {
 		warnings = append(warnings, reportCorrectionFallbackWarning(meta.JobID, corrected.result.JobID, nil))
-		return terminalJob, nextClient, nextHello, warnings, nil
+		return terminalJob, nextClient, nextHello, reportRetrySkipAttemptedAndExhausted, warnings, nil
 	}
-	return corrected, nextClient, nextHello, warnings, nil
+	return corrected, nextClient, nextHello, reportCorrectionCompletionReason(corrected.result), warnings, nil
+}
+
+func reportCorrectionErrorReason(result client.JobResult) reportRetrySkipReason {
+	if result.JobID == "" {
+		return reportRetrySkipUnknown
+	}
+	return reportRetrySkipAttemptedAndExhausted
+}
+
+func reportCorrectionCompletionReason(result client.JobResult) reportRetrySkipReason {
+	body, ok := resultBodyText(result.Result)
+	if !ok {
+		return reportRetrySkipUnknown
+	}
+	validation, err := policy.ValidateDelegateReportShape(body)
+	if err != nil {
+		return reportRetrySkipUnknown
+	}
+	if !validation.Compliant {
+		return reportRetrySkipAttemptedAndExhausted
+	}
+	return ""
 }
 
 func reportResultCanBeCorrected(state engine.JobState) bool {
@@ -128,6 +178,7 @@ func submitDelegateReportCorrection(ctx context.Context, c agentbusClient, hello
 	opts.WorkspaceKey = intent.WorkspaceKey
 	opts.SubmissionState = submitted.State
 	opts.Deduplicated = submitted.Deduplicated
+	opts.TimeoutResolution = timeoutResolutionForSubmission(opts.Timeout, opts.TimeoutSet, submitted, c)
 	warnings, acknowledged, err := acknowledgeSubmittedTask(opts, resolved, submitted, intent.ContractKind, "after report-correction submission")
 	if err != nil {
 		return terminalJobResult{}, c, hello, warnings, err

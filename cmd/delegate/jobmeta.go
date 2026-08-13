@@ -21,7 +21,10 @@ const (
 	backendDiagnosticMaxBytes  = 2 * 1024
 	backendDiagnosticReadBytes = 64 * 1024
 	backendDiagnosticTruncated = "\n[truncated]"
-	jobMetadataSchema          = 1
+	// jobMetadataSchema 2 marks timeout resolutions captured from the daemon's
+	// wire response. Schema 1 metadata predates that capture and may have
+	// recorded a requested --timeout as its effective value.
+	jobMetadataSchema = 2
 
 	cleanupDispositionNoExecutionPossible = "no_execution_possible"
 	cleanupDispositionVerifiedAbsent      = "verified_absent"
@@ -58,6 +61,8 @@ type jobMetadata struct {
 	BackendError          string                     `json:"backend_error,omitempty"`
 	Model                 config.DimensionResolution `json:"model,omitempty"`
 	Effort                config.DimensionResolution `json:"effort,omitempty"`
+	BackendProfile        config.DimensionResolution `json:"backend_profile,omitempty"`
+	Timeout               config.DimensionResolution `json:"timeout,omitempty"`
 	Origin                *envelopeOrigin            `json:"origin,omitempty"`
 	CreatedAt             time.Time                  `json:"created_at"`
 	UpdatedAt             time.Time                  `json:"updated_at"`
@@ -170,7 +175,12 @@ func saveJobMetadataFile(stateDir string, meta jobMetadata) error {
 	if err := validateDelegateJobID(meta.JobID); err != nil {
 		return err
 	}
-	if meta.Schema == 0 {
+	if meta.Schema < jobMetadataSchema {
+		// Schema 1 and schema-less metadata predate daemon timeout capture. Do
+		// not let an unrelated local metadata rewrite promote a requested flag
+		// value into a trusted effective timeout. A same-process daemon capture
+		// reaches this boundary as schema 2 and is preserved.
+		meta.Timeout = config.DimensionResolution{Requested: meta.Timeout.Requested, Source: "unknown"}
 		meta.Schema = jobMetadataSchema
 	}
 	now := time.Now().UTC()

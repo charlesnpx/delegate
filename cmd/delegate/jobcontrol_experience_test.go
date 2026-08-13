@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -150,6 +152,99 @@ func TestLocalReconstructedContractStampFromBody(t *testing.T) {
 	if _, ok := localReconstructedContractStamp(res, contractKindShape, false, reportValidationAttempt{attempts: 1}); ok {
 		t.Fatal("reconstruction without positive shape provenance must be refused")
 	}
+}
+
+func TestReportRetrySkipReasonsFollowCorrectionEligibility(t *testing.T) {
+	report := compliantReport()
+	for _, tc := range []struct {
+		name       string
+		metadata   *jobMetadata
+		result     client.JobResult
+		wantReason reportRetrySkipReason
+	}{
+		{
+			name: "disabled by no-contract flag",
+			metadata: &jobMetadata{
+				JobID:        "job_disabled",
+				ContractKind: contractKindNone,
+				NoContract:   true,
+			},
+			result:     reportJobResult("job_disabled", report),
+			wantReason: reportRetrySkipDisabledByNoContractFlag,
+		},
+		{
+			name:       "no report to revalidate",
+			result:     client.JobResult{JobID: "job_no_report", State: engine.StateCompleted},
+			wantReason: reportRetrySkipNoReportToRevalidate,
+		},
+		{
+			name:       "terminal state not correctable",
+			result:     client.JobResult{JobID: "job_failed", State: engine.StateFailed},
+			wantReason: reportRetrySkipTerminalState,
+		},
+		{
+			name:       "unknown without local report metadata",
+			result:     reportJobResult("job_unknown", report),
+			wantReason: reportRetrySkipUnknown,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			if err := os.Chmod(stateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if tc.metadata != nil {
+				if err := saveJobMetadata(stateDir, *tc.metadata); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			terminal := terminalJobResult{result: tc.result}
+			unchanged, _, _, gotReason, warnings, err := maybeCorrectDelegateReport(context.Background(), &fakeAgentbusClient{}, helloWithCapabilities(), stateDir, terminal, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotReason != tc.wantReason || len(warnings) != 0 || unchanged.result.JobID != tc.result.JobID {
+				t.Fatalf("correction result reason=%q warnings=%q job=%q, want %q/no warnings/%q", gotReason, warnings, unchanged.result.JobID, tc.wantReason, tc.result.JobID)
+			}
+
+			env, err := terminalEnvelopeFromJobResultWithOptions(stateDir, unchanged.result, terminalEnvelopeOptions{RetrySkipReason: gotReason})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := terminalEnvelopeRetrySkipReason(t, env); got != tc.wantReason {
+				t.Fatalf("envelope retrySkipReason=%q, want %q", got, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestReportCorrectionErrorReason(t *testing.T) {
+	if got := reportCorrectionErrorReason(client.JobResult{}); got != reportRetrySkipUnknown {
+		t.Fatalf("empty correction result reason=%q, want %q", got, reportRetrySkipUnknown)
+	}
+	if got := reportCorrectionErrorReason(client.JobResult{JobID: "job_correction"}); got != reportRetrySkipAttemptedAndExhausted {
+		t.Fatalf("submitted correction result reason=%q, want %q", got, reportRetrySkipAttemptedAndExhausted)
+	}
+}
+
+func terminalEnvelopeRetrySkipReason(t *testing.T, env TerminalEnvelope) reportRetrySkipReason {
+	t.Helper()
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Contract map[string]json.RawMessage `json:"contract"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	var reason reportRetrySkipReason
+	if err := json.Unmarshal(wire.Contract["retrySkipReason"], &reason); err != nil {
+		t.Fatalf("contract.retrySkipReason: %v; raw=%s", err, raw)
+	}
+	return reason
 }
 
 func reportSections(t *testing.T) []string {

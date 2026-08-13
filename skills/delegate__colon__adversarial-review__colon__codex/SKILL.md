@@ -19,11 +19,11 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 - exec: "delegate", "agentbus", "git", and the codex backend executable are runnable. Git is used by host-side delegate assembly only; it is not a review-worker preflight or input source.
 - repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate applies path/history redaction and a final content scan to every assembled inline or spilled diff payload.
 - cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
-- backend reachability: "delegate setup --json" shows agentbus capabilities and codex backend availability.
+- backend reachability: "delegate setup --json --backend codex" shows agentbus capabilities and codex backend availability without unrelated backend model catalogues.
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
-Review commands never pass "--write" and intentionally run the backend read-only. A read-only review worker cannot create a build/temp directory, compile, or run tests, so the caller must execute runtime verification and gates.
+Review commands never pass "--write" and intentionally run the backend read-only. A read-only review worker cannot create a build/temp directory, compile, or run tests, so the caller must execute runtime verification and gates. The launch and terminal envelope's "backend_profile" reports the effective Agentbus sandbox mode as "read-only" or "workspace-write"; use it to route runtime gates.
 
 When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id, job record, contract stamps, and read-only profile.
 
@@ -49,7 +49,7 @@ Spawn the no-fork delegated review exactly through the CLI. Add "--base" or "--s
 delegate adversarial-review --backend codex --origin delegate:adversarial-review:codex --cwd "$PWD" --background --json
 ~~~
 
-Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", or "result_sha256" fields.
+Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "backend_profile", "timeout", or "result_sha256" fields.
 
 If submission is unresolved after Agentbus accepted or may have accepted the request, preserve the reported "request_id" and run only the exact recovery command "delegate task --recover-request <request_id> --json". Do not create a replacement request unless the user explicitly asks for a new logical review.
 
@@ -57,6 +57,6 @@ Launch with "--background" so the host agent loop stays free. To await the job, 
 
 ## Review Result Discipline
 
-Present findings first and keep them ordered by severity. Preserve the delegated review's file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Distinguish observed evidence from inferred risk and assumptions. Terminal envelopes may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If there are no findings, say so explicitly and keep residual risk brief. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing or substituting a local review.
+Present findings first and keep them ordered by severity. Preserve the delegated review's file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Distinguish observed evidence from inferred risk and assumptions. Terminal envelopes carry the same "timeout" resolution as launch envelopes and may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If there are no findings, say so explicitly and keep residual risk brief. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing or substituting a local review.
 
 Never auto-fix after presenting review findings. Ask the user which issues, if any, they want addressed.
