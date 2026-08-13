@@ -54,6 +54,7 @@ type setupConfigBeforeBackendFilter struct {
 }
 
 func TestSetupStatePreflightRejectsRelativeAgentbusStateRoot(t *testing.T) {
+	setupTestPreflightEnvironment(t)
 	workspace := t.TempDir()
 	originalWD, err := os.Getwd()
 	if err != nil {
@@ -68,7 +69,6 @@ func TestSetupStatePreflightRejectsRelativeAgentbusStateRoot(t *testing.T) {
 		}
 	})
 	t.Setenv("XDG_STATE_HOME", "relative-state")
-	t.Setenv("AGENTBUS_STATE_ROOT", "")
 
 	result := setupStatePreflight()
 	if result.AgentbusStateRootWritable {
@@ -111,16 +111,8 @@ func TestSetupExistingDirectoryWritabilityProbesAndCleansUp(t *testing.T) {
 }
 
 func TestSetupPreflightEffectivelyProbesExistingRoots(t *testing.T) {
-	stateHome := t.TempDir()
-	cacheHome := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", stateHome)
-	t.Setenv("XDG_CACHE_HOME", cacheHome)
-	t.Setenv("AGENTBUS_STATE_ROOT", "")
-	paths := []string{
-		filepath.Join(stateHome, "delegate"),
-		filepath.Join(stateHome, "agentbus"),
-		filepath.Join(cacheHome, "agentbus", "start-locks"),
-	}
+	setupTestPreflightEnvironment(t)
+	paths := setupTestPreflightPaths(t)
 	for _, path := range paths {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			t.Fatal(err)
@@ -152,10 +144,7 @@ func TestSetupPreflightEffectivelyProbesExistingRoots(t *testing.T) {
 }
 
 func TestSetupPreflightReportsMissingRootsAsUnknownWithoutCreatingThem(t *testing.T) {
-	stateHome := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", stateHome)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("AGENTBUS_STATE_ROOT", "")
+	setupTestPreflightEnvironment(t)
 
 	result := setupStatePreflight()
 	for _, check := range []struct {
@@ -759,15 +748,12 @@ func TestMinimumSupportedAgentbusVersionDoesNotExceedGoModPin(t *testing.T) {
 func TestSetupReadyRequiresWritableAgentbusStateRoot(t *testing.T) {
 	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
 	defer restore()
-	t.Setenv("HOME", t.TempDir())
 	stateRoot := filepath.Join(t.TempDir(), "agentbus-state-file")
 	if err := os.WriteFile(stateRoot, []byte("not a directory\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("AGENTBUS_STATE_ROOT", stateRoot)
-	if err := os.MkdirAll(filepath.Join(os.Getenv("HOME"), "Library", "Caches", "agentbus", "start-locks"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	setupTestPreflightDirectories(t)
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
@@ -795,7 +781,6 @@ func TestSetupReadyRequiresWritableAgentbusStateRoot(t *testing.T) {
 func TestSetupReadyRequiresWritableDelegateStateRoot(t *testing.T) {
 	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
 	defer restore()
-	t.Setenv("HOME", t.TempDir())
 	agentbusRoot := filepath.Join(t.TempDir(), "agentbus")
 	if err := os.MkdirAll(agentbusRoot, 0o700); err != nil {
 		t.Fatal(err)
@@ -807,9 +792,7 @@ func TestSetupReadyRequiresWritableDelegateStateRoot(t *testing.T) {
 	if err := os.MkdirAll(delegateRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(os.Getenv("HOME"), "Library", "Caches", "agentbus", "start-locks"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	setupTestPreflightDirectories(t)
 	if err := os.Chmod(delegateRoot, 0o500); err != nil {
 		t.Fatal(err)
 	}
