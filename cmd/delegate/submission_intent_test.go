@@ -647,7 +647,7 @@ func TestRecoverRequestRestoresNoContractForBackendFailure(t *testing.T) {
 			JobID:              jobID,
 			State:              engine.StateFailed,
 			CleanupDisposition: cleanupDispositionVerifiedAbsent,
-			LogPaths:           engine.LogPaths{Stderr: stderrLog},
+			LogPaths:           &engine.LogPaths{Stderr: stderrLog},
 		}}},
 		result: client.JobResult{
 			JobID:              jobID,
