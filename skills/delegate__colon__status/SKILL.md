@@ -1,7 +1,7 @@
 ---
 name: delegate:status
 description: Check a delegated job status through delegate.
-version: v0.9.0
+version: v0.9.1
 ---
 
 # delegate:status

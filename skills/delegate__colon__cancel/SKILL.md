@@ -1,7 +1,7 @@
 ---
 name: delegate:cancel
 description: Cancel a delegated job after an explicit operator decision through delegate.
-version: v0.9.0
+version: v0.9.1
 ---
 
 # delegate:cancel
