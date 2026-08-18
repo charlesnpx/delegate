@@ -6,6 +6,10 @@ type DimensionResolution struct {
 	Requested string `json:"requested,omitempty"`
 	Effective string `json:"effective,omitempty"`
 	Source    string `json:"source"`
+	// Validated is false when a non-empty Agentbus advertised set did not
+	// contain Effective. It is omitted for compatible values and unknown sets
+	// to preserve the legacy resolution shape.
+	Validated *bool `json:"validated,omitempty"`
 }
 
 // ModelEffortResolution is the independent model and effort resolution result.
