@@ -94,6 +94,173 @@ func TestSetupPendingSubmissionIntentsDoesNotCreateMissingStateDirectory(t *test
 	}
 }
 
+func TestSetupJSONReportsFreshPendingSubmissionIntent(t *testing.T) {
+	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
+	stubSetupNow(t, now)
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	setupTestPreflightDirectories(t)
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := testSubmissionIntent(testSubmitParams(t, "delegate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "fresh", nil), t.TempDir())
+	intent.Phase = submissionPhaseInFlight
+	intent.CreatedAt = now.Add(-30 * time.Second)
+	intent.UpdatedAt = intent.CreatedAt
+	writeSetupSubmissionIntent(t, stateDir, intent)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"setup", "--json"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("setup code=%d stderr=%q", code, stderr.String())
+	}
+	var result setupJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 1 {
+		t.Fatalf("pendingSubmissionIntentCount=%v, want 1", result.PendingSubmissionIntentCount)
+	}
+	if len(result.PendingSubmissionIntents) != 1 {
+		t.Fatalf("pendingSubmissionIntents=%#v, want one intent", result.PendingSubmissionIntents)
+	}
+	intentSummary := result.PendingSubmissionIntents[0]
+	if intentSummary.AgeSeconds != 30 || intentSummary.Stale || intentSummary.UpdatedAt != nil {
+		t.Fatalf("fresh pending intent=%#v, want ageSeconds=30, stale=false, and no later timestamp", intentSummary)
+	}
+	if !result.Ready {
+		t.Fatalf("ready=%t, want true with a fresh pending intent", result.Ready)
+	}
+}
+
+func TestSetupJSONReportsStalePendingSubmissionIntent(t *testing.T) {
+	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
+	stubSetupNow(t, now)
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	setupTestPreflightDirectories(t)
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := testSubmissionIntent(testSubmitParams(t, "delegate-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "stale", nil), t.TempDir())
+	intent.Phase = submissionPhaseInFlight
+	intent.CreatedAt = now.Add(-3 * setupPendingSubmissionIntentStaleAfter)
+	intent.UpdatedAt = now.Add(-2 * setupPendingSubmissionIntentStaleAfter)
+	writeSetupSubmissionIntent(t, stateDir, intent)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"setup", "--json"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("setup code=%d stderr=%q", code, stderr.String())
+	}
+	var result setupJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 1 {
+		t.Fatalf("pendingSubmissionIntentCount=%v, want 1", result.PendingSubmissionIntentCount)
+	}
+	if len(result.PendingSubmissionIntents) != 1 {
+		t.Fatalf("pendingSubmissionIntents=%#v, want one intent", result.PendingSubmissionIntents)
+	}
+	intentSummary := result.PendingSubmissionIntents[0]
+	if intentSummary.AgeSeconds != int64((3*setupPendingSubmissionIntentStaleAfter)/time.Second) || !intentSummary.Stale || intentSummary.UpdatedAt == nil || !intentSummary.UpdatedAt.Equal(intent.UpdatedAt) {
+		t.Fatalf("stale pending intent=%#v, want later updated_at, ageSeconds=%d, and stale=true", intentSummary, int64((3*setupPendingSubmissionIntentStaleAfter)/time.Second))
+	}
+	if !result.Ready {
+		t.Fatalf("ready=%t, want true with a stale pending intent", result.Ready)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"setup"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("plain setup code=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "pendingSubmissionIntentCount: 1 (1 stale)\n") {
+		t.Fatalf("plain setup output did not mark the stale intent: %q", stdout.String())
+	}
+}
+
+// TestSetupJSONPrefersUpdatedAtOverCreatedAtForStaleness pins which timestamp
+// drives the verdict. Both timestamps in the stale test above are past the
+// threshold, so that test alone would still pass if staleness were derived from
+// created_at. Here creation is long past while activity is recent, so only an
+// implementation that uses the later updated_at reports the intent as live.
+func TestSetupJSONPrefersUpdatedAtOverCreatedAtForStaleness(t *testing.T) {
+	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
+	stubSetupNow(t, now)
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	setupTestPreflightDirectories(t)
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := testSubmissionIntent(testSubmitParams(t, "delegate-cccccccccccccccccccccccccccccccc", "active", nil), t.TempDir())
+	intent.Phase = submissionPhaseInFlight
+	intent.CreatedAt = now.Add(-5 * setupPendingSubmissionIntentStaleAfter)
+	intent.UpdatedAt = now.Add(-30 * time.Second)
+	writeSetupSubmissionIntent(t, stateDir, intent)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"setup", "--json"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("setup code=%d stderr=%q", code, stderr.String())
+	}
+	var result setupJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if len(result.PendingSubmissionIntents) != 1 {
+		t.Fatalf("pendingSubmissionIntents=%#v, want one intent", result.PendingSubmissionIntents)
+	}
+	intentSummary := result.PendingSubmissionIntents[0]
+	wantAge := int64((5 * setupPendingSubmissionIntentStaleAfter) / time.Second)
+	if intentSummary.Stale {
+		t.Fatalf("stale=true for an intent updated 30s ago; staleness must follow updated_at, not created_at: %#v", intentSummary)
+	}
+	if intentSummary.AgeSeconds != wantAge {
+		t.Fatalf("ageSeconds=%d, want %d measured from created_at", intentSummary.AgeSeconds, wantAge)
+	}
+	if intentSummary.UpdatedAt == nil || !intentSummary.UpdatedAt.Equal(intent.UpdatedAt) {
+		t.Fatalf("updated_at=%v, want %v reported", intentSummary.UpdatedAt, intent.UpdatedAt)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"setup"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("plain setup code=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "pendingSubmissionIntentCount: 1\n") {
+		t.Fatalf("plain setup marked a live intent as stale: %q", stdout.String())
+	}
+}
+
+func stubSetupNow(t *testing.T, now time.Time) {
+	t.Helper()
+	old := setupNow
+	setupNow = func() time.Time { return now }
+	t.Cleanup(func() { setupNow = old })
+}
+
+func writeSetupSubmissionIntent(t *testing.T, stateDir string, intent submissionIntent) {
+	t.Helper()
+	dir, err := setupSubmissionIntentDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.MarshalIndent(intent, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = append(raw, '\n')
+	if err := os.WriteFile(filepath.Join(dir, encodedStateFilename(intent.RequestID)), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSetupExistingDirectoryWritabilityProbesAndCleansUp(t *testing.T) {
 	dir := t.TempDir()
 

@@ -212,8 +212,12 @@ func TestWaitForJobResultSynthesizesEnvelopeInputForOrphanedTerminalState(t *tes
 func TestValidateBackendUsesHelloDiscoveryAndMetadata(t *testing.T) {
 	hello := client.HelloResult{Backends: []string{"gemini", "codex"}, BackendMetadata: []client.BackendInfo{{Name: "gemini", Models: []string{"gemini-2.5-pro"}, Efforts: []string{"high"}}}}
 	var stderr bytes.Buffer
-	if err := validateBackend(hello, "gemini", "gemini-2.5-pro", "high", &stderr); err != nil {
+	known, err := validateBackendValues(hello, "gemini", "gemini-2.5-pro", "high", false, &stderr)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if known.ModelUnadvertised || known.EffortUnadvertised {
+		t.Fatalf("known catalog validation = %#v", known)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("known values warning = %q", stderr.String())
@@ -222,8 +226,12 @@ func TestValidateBackendUsesHelloDiscoveryAndMetadata(t *testing.T) {
 		t.Fatalf("unknown backend error = %v", err)
 	}
 	stderr.Reset()
-	if err := validateBackend(hello, "gemini", "wrong-model", "wrong-effort", &stderr); err != nil {
+	unadvertised, err := validateBackendValues(hello, "gemini", "wrong-model", "wrong-effort", false, &stderr)
+	if err != nil {
 		t.Fatalf("unadvertised catalog values error = %v", err)
+	}
+	if !unadvertised.ModelUnadvertised || !unadvertised.EffortUnadvertised {
+		t.Fatalf("unadvertised catalog validation = %#v", unadvertised)
 	}
 	for _, want := range []string{
 		`warning: model "wrong-model" is not advertised by agentbus for backend "gemini" (advertised: gemini-2.5-pro); passing through — the backend is authoritative`,
@@ -236,8 +244,12 @@ func TestValidateBackendUsesHelloDiscoveryAndMetadata(t *testing.T) {
 
 	stderr.Reset()
 	emptyCatalog := client.HelloResult{Backends: []string{"gemini"}, BackendMetadata: []client.BackendInfo{{Name: "gemini"}}}
-	if err := validateBackend(emptyCatalog, "gemini", "unadvertised-model", "unadvertised-effort", &stderr); err != nil {
+	unknown, err := validateBackendValues(emptyCatalog, "gemini", "unadvertised-model", "unadvertised-effort", false, &stderr)
+	if err != nil {
 		t.Fatalf("empty catalog error = %v", err)
+	}
+	if unknown.ModelUnadvertised || unknown.EffortUnadvertised {
+		t.Fatalf("empty catalog validation = %#v", unknown)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("empty catalog warning = %q", stderr.String())

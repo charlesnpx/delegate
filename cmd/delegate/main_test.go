@@ -129,6 +129,36 @@ func TestRunVersionJSON(t *testing.T) {
 	}
 }
 
+func TestRunVersionFlagMatchesVersionSubcommand(t *testing.T) {
+	for _, alias := range []string{"--version", "-version", "-V"} {
+		var wantStdout, wantStderr bytes.Buffer
+		wantCode := run([]string{"version"}, nil, &wantStdout, &wantStderr)
+
+		var gotStdout, gotStderr bytes.Buffer
+		gotCode := run([]string{alias}, nil, &gotStdout, &gotStderr)
+
+		if gotCode != wantCode || gotStdout.String() != wantStdout.String() || gotStderr.String() != wantStderr.String() {
+			t.Fatalf("run(%q) = code=%d stdout=%q stderr=%q, want code=%d stdout=%q stderr=%q",
+				alias, gotCode, gotStdout.String(), gotStderr.String(),
+				wantCode, wantStdout.String(), wantStderr.String())
+		}
+	}
+}
+
+func TestRunVersionFlagJSONMatchesVersionJSONSubcommand(t *testing.T) {
+	var wantStdout, wantStderr bytes.Buffer
+	wantCode := run([]string{"version", "--json"}, nil, &wantStdout, &wantStderr)
+
+	var gotStdout, gotStderr bytes.Buffer
+	gotCode := run([]string{"--version", "--json"}, nil, &gotStdout, &gotStderr)
+
+	if gotCode != wantCode || gotStdout.String() != wantStdout.String() || gotStderr.String() != wantStderr.String() {
+		t.Fatalf("run(--version --json) = code=%d stdout=%q stderr=%q, want code=%d stdout=%q stderr=%q",
+			gotCode, gotStdout.String(), gotStderr.String(),
+			wantCode, wantStdout.String(), wantStderr.String())
+	}
+}
+
 func TestRunFlagParseError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"handoff", "create", "--bad"}, nil, &stdout, &stderr)

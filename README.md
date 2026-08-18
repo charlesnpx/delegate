@@ -39,7 +39,7 @@ delegate handoff create --json
 
 delegate task --backend claude|codex|cursor [--background|--wait] [--json] [--cwd <abs>]
               [--model <model>] [--effort <effort>]
-              [--timeout <duration>] [--write] [--strict-contract|--no-contract]
+              [--strict-model] [--timeout <duration>] [--write] [--strict-contract|--no-contract]
               [--output-schema-file <path>] [--origin <skill>] [--parent-client <client>] [--parent-session <id>] [prompt source]
 delegate task --recover-request <request-id> [--background|--wait] [--json]
 
@@ -218,7 +218,7 @@ Agentbus reports terminal outcome and cleanup proof separately. Delegate removes
 - the full capability map, required delegate capabilities, missing capabilities, `capabilitiesOK`, and explicit `admissionStrictContainment`;
 - resolved `agentbusStateRoot` plus `agentbusStateRootWritable`;
 - resolved `agentbusAutostartLockRoot` (`<UserCacheDir>/agentbus/start-locks`) plus `agentbusAutostartLockRootWritable`;
-- `pendingSubmissionIntentCount` for the total prepared, in-flight, and blocked local submission intents, plus `pendingSubmissionIntents`: up to 20 oldest pending intents (oldest first), each with its `request_id`, phase, creation time, backend, and recorded origin when available. The count remains authoritative when the array is capped; recover a listed request with `delegate task --recover-request <request_id> --json`;
+- `pendingSubmissionIntentCount` for the total prepared, in-flight, and blocked local submission intents, plus `pendingSubmissionIntents`: up to 20 oldest pending intents (oldest first), each with its `request_id`, phase, creation time, `ageSeconds`, `stale`, backend, and recorded origin when available. `ageSeconds` is derived from `created_at`; when a later `updated_at` exists, setup reports it and uses it as the staleness basis. The count remains authoritative when the array is capped; use `stale` and `ageSeconds` before deciding whether to recover a listed request with `delegate task --recover-request <request_id> --json`. Setup reports staleness only: it neither expires an intent nor changes `ready`;
 - `unresolvedCleanupArtifactCount` for retained terminal local artifacts whose cleanup is not proven safe;
 - `stateRootWritable`, `daemonReachable`, `ready`, and managed skill statuses.
 

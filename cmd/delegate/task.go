@@ -42,6 +42,7 @@ type taskOptions struct {
 	ModelSet           bool
 	Effort             string
 	EffortSet          bool
+	StrictModel        bool
 	Timeout            time.Duration
 	TimeoutSet         bool
 	TimeoutResolution  config.DimensionResolution
@@ -195,6 +196,7 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute working directory")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
+	fs.BoolVar(&opts.StrictModel, "strict-model", false, "reject model or effort not advertised by agentbus")
 	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout; 0 leaves the deadline to the daemon default; envelope.timeout is authoritative")
 	fs.BoolVar(&opts.Write, "write", false, "allow backend writes")
 	fs.BoolVar(&opts.StrictContract, "strict-contract", false, "compatibility flag; delegate-report corrective retry is enabled by default")
@@ -309,7 +311,7 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 
 func validateRecoverRequestFlags(visited map[string]bool, positional []string) error {
 	rejected := []string{
-		"backend", "cwd", "model", "effort", "timeout", "write", "strict-contract", "no-contract",
+		"backend", "cwd", "model", "effort", "strict-model", "timeout", "write", "strict-contract", "no-contract",
 		"origin", "parent-client", "parent-session",
 		"prompt", "prompt-file", "prompt-stdin", "handoff-prompt-file",
 		"output-schema", "output-schema-file", "output-schema-stdin",
@@ -370,9 +372,11 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 	}
 	defer func() { _ = c.Close() }()
 	opts.AgentbusStateRoot = agentbusStateRoot
-	if err := validateBackend(hello, opts.Backend, opts.Model, opts.Effort, stderr); err != nil {
+	validation, err := validateBackendValues(hello, opts.Backend, opts.Model, opts.Effort, opts.StrictModel, stderr)
+	if err != nil {
 		return taskRunResult{}, err
 	}
+	markUnadvertisedTaskModelEffort(&opts.ModelEffort, validation)
 	intent, err := prepareNewSubmissionIntent(opts, resolved, turnPolicy)
 	if err != nil {
 		return taskRunResult{}, err
@@ -751,6 +755,20 @@ func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contra
 
 func taskModelEffort(opts taskOptions) config.ModelEffortResolution {
 	return opts.ModelEffort
+}
+
+func markUnadvertisedTaskModelEffort(resolution *config.ModelEffortResolution, validation backendValueValidation) {
+	if validation.ModelUnadvertised {
+		resolution.Model.Validated = unvalidatedDimensionMarker()
+	}
+	if validation.EffortUnadvertised {
+		resolution.Effort.Validated = unvalidatedDimensionMarker()
+	}
+}
+
+func unvalidatedDimensionMarker() *bool {
+	validated := false
+	return &validated
 }
 
 // taskBackendProfile is derived directly from --write. It deliberately has no
