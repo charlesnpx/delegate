@@ -77,7 +77,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, `usage: delegate <command> [flags]
 
 commands:
-  version         print the delegate version (also: --version, -V)
+  version         print the delegate version (also: --version, -version, -V)
   setup [--json] [--backend <name>]
                   verify delegate, agentbus, backends, config, and skills
   config          list/get/set/unset user model and effort defaults

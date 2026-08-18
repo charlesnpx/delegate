@@ -129,31 +129,33 @@ func TestRunVersionJSON(t *testing.T) {
 	}
 }
 
-func TestRunVersionFlag(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"--version"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
-	}
-	if got, want := stdout.String(), "delegate 0.0.0-dev\n"; got != want {
-		t.Fatalf("stdout = %q, want %q", got, want)
+func TestRunVersionFlagMatchesVersionSubcommand(t *testing.T) {
+	for _, alias := range []string{"--version", "-version", "-V"} {
+		var wantStdout, wantStderr bytes.Buffer
+		wantCode := run([]string{"version"}, nil, &wantStdout, &wantStderr)
+
+		var gotStdout, gotStderr bytes.Buffer
+		gotCode := run([]string{alias}, nil, &gotStdout, &gotStderr)
+
+		if gotCode != wantCode || gotStdout.String() != wantStdout.String() || gotStderr.String() != wantStderr.String() {
+			t.Fatalf("run(%q) = code=%d stdout=%q stderr=%q, want code=%d stdout=%q stderr=%q",
+				alias, gotCode, gotStdout.String(), gotStderr.String(),
+				wantCode, wantStdout.String(), wantStderr.String())
+		}
 	}
 }
 
-func TestRunVersionFlagJSON(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"--version", "--json"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
-	}
-	var result struct {
-		Version string `json:"version"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("version JSON invalid: %v; raw = %q", err, stdout.String())
-	}
-	if result.Version != Version {
-		t.Fatalf("version = %q, want %q", result.Version, Version)
+func TestRunVersionFlagJSONMatchesVersionJSONSubcommand(t *testing.T) {
+	var wantStdout, wantStderr bytes.Buffer
+	wantCode := run([]string{"version", "--json"}, nil, &wantStdout, &wantStderr)
+
+	var gotStdout, gotStderr bytes.Buffer
+	gotCode := run([]string{"--version", "--json"}, nil, &gotStdout, &gotStderr)
+
+	if gotCode != wantCode || gotStdout.String() != wantStdout.String() || gotStderr.String() != wantStderr.String() {
+		t.Fatalf("run(--version --json) = code=%d stdout=%q stderr=%q, want code=%d stdout=%q stderr=%q",
+			gotCode, gotStdout.String(), gotStderr.String(),
+			wantCode, wantStdout.String(), wantStderr.String())
 	}
 }
 
