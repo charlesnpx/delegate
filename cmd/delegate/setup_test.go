@@ -181,6 +181,60 @@ func TestSetupJSONReportsStalePendingSubmissionIntent(t *testing.T) {
 	}
 }
 
+// TestSetupJSONPrefersUpdatedAtOverCreatedAtForStaleness pins which timestamp
+// drives the verdict. Both timestamps in the stale test above are past the
+// threshold, so that test alone would still pass if staleness were derived from
+// created_at. Here creation is long past while activity is recent, so only an
+// implementation that uses the later updated_at reports the intent as live.
+func TestSetupJSONPrefersUpdatedAtOverCreatedAtForStaleness(t *testing.T) {
+	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
+	stubSetupNow(t, now)
+	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
+	defer restore()
+	setupTestPreflightDirectories(t)
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := testSubmissionIntent(testSubmitParams(t, "delegate-cccccccccccccccccccccccccccccccc", "active", nil), t.TempDir())
+	intent.Phase = submissionPhaseInFlight
+	intent.CreatedAt = now.Add(-5 * setupPendingSubmissionIntentStaleAfter)
+	intent.UpdatedAt = now.Add(-30 * time.Second)
+	writeSetupSubmissionIntent(t, stateDir, intent)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"setup", "--json"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("setup code=%d stderr=%q", code, stderr.String())
+	}
+	var result setupJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
+	}
+	if len(result.PendingSubmissionIntents) != 1 {
+		t.Fatalf("pendingSubmissionIntents=%#v, want one intent", result.PendingSubmissionIntents)
+	}
+	intentSummary := result.PendingSubmissionIntents[0]
+	wantAge := int64((5 * setupPendingSubmissionIntentStaleAfter) / time.Second)
+	if intentSummary.Stale {
+		t.Fatalf("stale=true for an intent updated 30s ago; staleness must follow updated_at, not created_at: %#v", intentSummary)
+	}
+	if intentSummary.AgeSeconds != wantAge {
+		t.Fatalf("ageSeconds=%d, want %d measured from created_at", intentSummary.AgeSeconds, wantAge)
+	}
+	if intentSummary.UpdatedAt == nil || !intentSummary.UpdatedAt.Equal(intent.UpdatedAt) {
+		t.Fatalf("updated_at=%v, want %v reported", intentSummary.UpdatedAt, intent.UpdatedAt)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"setup"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("plain setup code=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "pendingSubmissionIntentCount: 1\n") {
+		t.Fatalf("plain setup marked a live intent as stale: %q", stdout.String())
+	}
+}
+
 func stubSetupNow(t *testing.T, now time.Time) {
 	t.Helper()
 	old := setupNow
