@@ -167,6 +167,8 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"agentbusAutostartLockRoot",
 				"pendingSubmissionIntentCount",
 				"pendingSubmissionIntents",
+				"ageSeconds",
+				"stale",
 				"unresolvedCleanupArtifactCount",
 			})
 		case KindConfig:
