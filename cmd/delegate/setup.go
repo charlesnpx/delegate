@@ -47,15 +47,18 @@ type setupJSON struct {
 }
 
 // setupPendingSubmissionIntent is the bounded recovery information setup
-// exposes for a durable pending submission intent. Setup projects only its
-// request ID, phase, creation time, and bounded backend and origin labels; it
-// neither adds nor changes durable state.
+// exposes for a durable pending submission intent. Setup projects its request
+// ID, phase, timestamps, creation age, derived staleness, and bounded backend
+// and origin labels; it neither adds nor changes durable state.
 type setupPendingSubmissionIntent struct {
-	RequestID string                    `json:"request_id"`
-	Phase     string                    `json:"phase"`
-	CreatedAt time.Time                 `json:"created_at"`
-	Backend   string                    `json:"backend,omitempty"`
-	Origin    *setupIntentOriginSummary `json:"origin,omitempty"`
+	RequestID  string                    `json:"request_id"`
+	Phase      string                    `json:"phase"`
+	CreatedAt  time.Time                 `json:"created_at"`
+	UpdatedAt  *time.Time                `json:"updated_at,omitempty"`
+	AgeSeconds int64                     `json:"ageSeconds"`
+	Stale      bool                      `json:"stale"`
+	Backend    string                    `json:"backend,omitempty"`
+	Origin     *setupIntentOriginSummary `json:"origin,omitempty"`
 }
 
 // setupIntentOriginSummary contains only the coarse origin label needed to recognize
@@ -67,7 +70,14 @@ type setupIntentOriginSummary struct {
 const (
 	setupPendingSubmissionIntentLimit      = 20
 	setupPendingSubmissionIntentLabelLimit = 80
+
+	// setupPendingSubmissionIntentStaleAfter is a deliberately generous bound
+	// for the short handoff from Agentbus accepting a submission to Delegate
+	// observing its outcome; an older pending intent is no longer credibly live.
+	setupPendingSubmissionIntentStaleAfter = time.Hour
 )
+
+var setupNow = time.Now
 
 type setupConfig struct {
 	Path        string                  `json:"path"`
@@ -297,7 +307,7 @@ func runSetup(args []string, stdout, stderr io.Writer) (int, error) {
 	if _, err := fmt.Fprintf(stdout, "agentbus discovery: found\nagentbus protocol: %d\ncapabilities: %s\nadmission.strictContainment: %t\n", hello.ProtocolVersion, capabilityStatus, hello.Capabilities["admission.strictContainment"]); err != nil {
 		return 0, err
 	}
-	if _, err := fmt.Fprintf(stdout, "agentbusStateRoot: %s\nagentbusStateRootWritable: %t\nagentbusStateRootWritability: %s\nagentbusAutostartLockRoot: %s\nagentbusAutostartLockRootWritable: %t\nagentbusAutostartLockRootWritability: %s\nstateRootWritable: %t\nstateRootWritability: %s\npendingSubmissionIntentCount: %s\nunresolvedCleanupArtifactCount: %s\ndaemonReachable: true\nready: %t\n", preflight.AgentbusStateRoot, preflight.AgentbusStateRootWritable, preflight.AgentbusStateRootWritability, preflight.AgentbusAutostartLockRoot, preflight.AgentbusAutostartLockRootWritable, preflight.AgentbusAutostartLockRootWritability, preflight.StateRootWritable, preflight.StateRootWritability, setupCountText(pendingSubmissionIntentCount), setupCountText(unresolvedCleanupArtifacts), ready); err != nil {
+	if _, err := fmt.Fprintf(stdout, "agentbusStateRoot: %s\nagentbusStateRootWritable: %t\nagentbusStateRootWritability: %s\nagentbusAutostartLockRoot: %s\nagentbusAutostartLockRootWritable: %t\nagentbusAutostartLockRootWritability: %s\nstateRootWritable: %t\nstateRootWritability: %s\npendingSubmissionIntentCount: %s\nunresolvedCleanupArtifactCount: %s\ndaemonReachable: true\nready: %t\n", preflight.AgentbusStateRoot, preflight.AgentbusStateRootWritable, preflight.AgentbusStateRootWritability, preflight.AgentbusAutostartLockRoot, preflight.AgentbusAutostartLockRootWritable, preflight.AgentbusAutostartLockRootWritability, preflight.StateRootWritable, preflight.StateRootWritability, setupPendingSubmissionIntentCountText(pendingSubmissionIntentCount, pendingSubmissionIntents), setupCountText(unresolvedCleanupArtifacts), ready); err != nil {
 		return 0, err
 	}
 	for _, warning := range preflight.Warnings {
@@ -583,13 +593,31 @@ func setupPendingSubmissionIntents(stateDir string) (*int, []setupPendingSubmiss
 	count := len(pending)
 	limit := min(count, setupPendingSubmissionIntentLimit)
 	summaries := make([]setupPendingSubmissionIntent, 0, limit)
+	now := setupNow().UTC()
 	for _, intent := range pending[:limit] {
+		age := now.Sub(intent.CreatedAt)
+		if age < 0 {
+			age = 0
+		}
+		stalenessAge := age
+		var updatedAt *time.Time
+		if intent.UpdatedAt.After(intent.CreatedAt) {
+			value := intent.UpdatedAt
+			updatedAt = &value
+			stalenessAge = now.Sub(value)
+			if stalenessAge < 0 {
+				stalenessAge = 0
+			}
+		}
 		summaries = append(summaries, setupPendingSubmissionIntent{
-			RequestID: intent.RequestID,
-			Phase:     intent.Phase,
-			CreatedAt: intent.CreatedAt,
-			Backend:   setupBoundedIntentLabel(intent.Params.TaskSpec.Backend),
-			Origin:    setupIntentOrigin(intent.Origin),
+			RequestID:  intent.RequestID,
+			Phase:      intent.Phase,
+			CreatedAt:  intent.CreatedAt,
+			UpdatedAt:  updatedAt,
+			AgeSeconds: int64(age / time.Second),
+			Stale:      stalenessAge > setupPendingSubmissionIntentStaleAfter,
+			Backend:    setupBoundedIntentLabel(intent.Params.TaskSpec.Backend),
+			Origin:     setupIntentOrigin(intent.Origin),
 		})
 	}
 	return &count, summaries, nil
@@ -602,6 +630,27 @@ func setupCountText(count *int) string {
 		return "uncounted"
 	}
 	return strconv.Itoa(*count)
+}
+
+// setupPendingSubmissionIntentCountText marks stale listed intents without
+// changing the count's established meaning. A capped list can prove only a
+// lower bound on the number of stale intents.
+func setupPendingSubmissionIntentCountText(count *int, intents []setupPendingSubmissionIntent) string {
+	text := setupCountText(count)
+	staleCount := 0
+	for _, intent := range intents {
+		if intent.Stale {
+			staleCount++
+		}
+	}
+	if staleCount == 0 {
+		return text
+	}
+	prefix := ""
+	if count != nil && len(intents) < *count {
+		prefix = "at least "
+	}
+	return fmt.Sprintf("%s (%s%d stale)", text, prefix, staleCount)
 }
 
 func submissionIntentPending(intent submissionIntent) bool {
