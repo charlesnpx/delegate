@@ -1660,6 +1660,16 @@ func TestTaskStrictModelRejectsUnadvertisedCatalogValue(t *testing.T) {
 	}}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
+	// "Rejected before submission" has to mean no durable artifact, not merely
+	// no JobSubmit call: an intent persisted before the refusal would leave a
+	// recoverable pending record for a job that never existed.
+	intentWrites := 0
+	oldSave := saveSubmissionIntent
+	saveSubmissionIntent = func(dir string, intent submissionIntent) error {
+		intentWrites++
+		return oldSave(dir, intent)
+	}
+	defer func() { saveSubmissionIntent = oldSave }()
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
@@ -1671,6 +1681,9 @@ func TestTaskStrictModelRejectsUnadvertisedCatalogValue(t *testing.T) {
 	}
 	if len(fake.submits) != 0 {
 		t.Fatalf("JobSubmit calls = %d, want 0", len(fake.submits))
+	}
+	if intentWrites != 0 {
+		t.Fatalf("submission intent writes = %d, want 0 before a strict-model refusal", intentWrites)
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("strict-model stdout = %q, want no launch envelope", stdout.String())
@@ -1722,6 +1735,16 @@ func TestTaskStrictModelAllowsUnknownEffortCatalog(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "warning: effort") {
 		t.Fatalf("unknown effort catalog warning = %q", stderr.String())
+	}
+	// An unknown catalog means the value is unverifiable, not wrong, so it must
+	// still reach the backend unchanged. Absence of a marker and a warning does
+	// not prove that: an implementation that silently cleared or replaced the
+	// value would satisfy both assertions while breaking passthrough.
+	if got := fake.submits[0].TaskSpec.Effort; got != "unlisted-effort" {
+		t.Fatalf("submitted effort = %q, want the unadvertised value passed through unchanged", got)
+	}
+	if launch.Effort.Effective != "unlisted-effort" || launch.Effort.Source != "flag" {
+		t.Fatalf("envelope effort = %#v, want effective=%q source=flag", launch.Effort, "unlisted-effort")
 	}
 }
 
