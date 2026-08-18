@@ -22,7 +22,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		return finishCommand(runVersion(nil, stdout, stderr), nil, stderr)
 	}
-	if args[0] == "version" {
+	if args[0] == "version" || args[0] == "--version" || args[0] == "-version" || args[0] == "-V" {
 		return finishCommand(runVersion(args[1:], stdout, stderr), nil, stderr)
 	}
 	switch args[0] {
@@ -77,7 +77,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, `usage: delegate <command> [flags]
 
 commands:
-  version         print the delegate version
+  version         print the delegate version (also: --version, -V)
   setup [--json] [--backend <name>]
                   verify delegate, agentbus, backends, config, and skills
   config          list/get/set/unset user model and effort defaults
