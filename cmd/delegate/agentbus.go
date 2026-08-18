@@ -404,7 +404,17 @@ func readAgentbusWireFrame(ctx context.Context, conn net.Conn, reader *bufio.Rea
 	return reader.ReadBytes('\n')
 }
 
+type backendValueValidation struct {
+	ModelUnadvertised  bool
+	EffortUnadvertised bool
+}
+
 func validateBackend(hello client.HelloResult, backend, model, effort string, stderr io.Writer) error {
+	_, err := validateBackendValues(hello, backend, model, effort, false, stderr)
+	return err
+}
+
+func validateBackendValues(hello client.HelloResult, backend, model, effort string, strictModel bool, stderr io.Writer) (backendValueValidation, error) {
 	available := append([]string(nil), hello.Backends...)
 	sort.Strings(available)
 	found := false
@@ -415,29 +425,51 @@ func validateBackend(hello client.HelloResult, backend, model, effort string, st
 		}
 	}
 	if !found {
-		return fmt.Errorf("unknown backend %q; available backends: %s", backend, strings.Join(available, ", "))
+		return backendValueValidation{}, fmt.Errorf("unknown backend %q; available backends: %s", backend, strings.Join(available, ", "))
 	}
 	for _, meta := range hello.BackendMetadata {
 		if meta.Name != backend {
 			continue
 		}
-		if model != "" && len(meta.Models) > 0 && !containsString(meta.Models, model) {
+		validation := backendValueValidation{
+			ModelUnadvertised:  model != "" && len(meta.Models) > 0 && !containsString(meta.Models, model),
+			EffortUnadvertised: effort != "" && len(meta.Efforts) > 0 && !containsString(meta.Efforts, effort),
+		}
+		var strictErrors []error
+		if validation.ModelUnadvertised {
 			if _, err := fmt.Fprintf(stderr, "warning: %s\n", unadvertisedBackendValueWarning("model", model, backend, meta.Models)); err != nil {
-				return err
+				return backendValueValidation{}, err
+			}
+			if strictModel {
+				strictErrors = append(strictErrors, errors.New(unadvertisedBackendValueRejection("model", model, backend, meta.Models)))
 			}
 		}
-		if effort != "" && len(meta.Efforts) > 0 && !containsString(meta.Efforts, effort) {
+		if validation.EffortUnadvertised {
 			if _, err := fmt.Fprintf(stderr, "warning: %s\n", unadvertisedBackendValueWarning("effort", effort, backend, meta.Efforts)); err != nil {
-				return err
+				return backendValueValidation{}, err
+			}
+			if strictModel {
+				strictErrors = append(strictErrors, errors.New(unadvertisedBackendValueRejection("effort", effort, backend, meta.Efforts)))
 			}
 		}
-		return nil
+		return validation, errors.Join(strictErrors...)
 	}
-	return nil
+	return backendValueValidation{}, nil
 }
 
 func unadvertisedBackendValueWarning(dimension, value, backend string, advertised []string) string {
-	return fmt.Sprintf("%s %q is not advertised by agentbus for backend %q (advertised: %s); passing through — the backend is authoritative", dimension, value, backend, strings.Join(advertised, ", "))
+	return fmt.Sprintf("%s; passing through — the backend is authoritative", unadvertisedBackendValue(dimension, value, backend, advertised))
+}
+
+// unadvertisedBackendValueRejection reuses the warning's identifying half but
+// not its "passing through" clause, which would be false under --strict-model:
+// nothing is passed through, because no job is submitted.
+func unadvertisedBackendValueRejection(dimension, value, backend string, advertised []string) string {
+	return fmt.Sprintf("%s; --strict-model rejected it before submission", unadvertisedBackendValue(dimension, value, backend, advertised))
+}
+
+func unadvertisedBackendValue(dimension, value, backend string, advertised []string) string {
+	return fmt.Sprintf("%s %q is not advertised by agentbus for backend %q (advertised: %s)", dimension, value, backend, strings.Join(advertised, ", "))
 }
 
 func containsString(values []string, want string) bool {

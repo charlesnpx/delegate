@@ -39,7 +39,7 @@ delegate handoff create --json
 
 delegate task --backend claude|codex|cursor [--background|--wait] [--json] [--cwd <abs>]
               [--model <model>] [--effort <effort>]
-              [--timeout <duration>] [--write] [--strict-contract|--no-contract]
+              [--strict-model] [--timeout <duration>] [--write] [--strict-contract|--no-contract]
               [--output-schema-file <path>] [--origin <skill>] [--parent-client <client>] [--parent-session <id>] [prompt source]
 delegate task --recover-request <request-id> [--background|--wait] [--json]
 
