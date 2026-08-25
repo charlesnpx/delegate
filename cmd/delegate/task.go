@@ -395,7 +395,7 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 	opts.WorkspaceKey = intent.WorkspaceKey
 	opts.SubmissionState = submitted.State
 	opts.Deduplicated = submitted.Deduplicated
-	opts.TimeoutResolution = timeoutResolutionForSubmission(opts.Timeout, opts.TimeoutSet, submitted, c)
+	opts.TimeoutResolution = timeoutResolutionForSubmission(opts.Timeout, opts.TimeoutSet, submitted)
 	contractKind := intent.ContractKind
 	ackWarnings, acknowledged, err := acknowledgeSubmittedTask(opts, resolved, submitted, contractKind, "after submission")
 	warnings = append(warnings, ackWarnings...)
@@ -653,7 +653,7 @@ func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted c
 		WorkspaceKey:       intent.WorkspaceKey,
 		SubmissionState:    submitted.State,
 		Deduplicated:       submitted.Deduplicated,
-		TimeoutResolution:  timeoutResolutionForSubmission(timeout, timeoutSet, submitted, c),
+		TimeoutResolution:  timeoutResolutionForSubmission(timeout, timeoutSet, submitted),
 	}
 }
 
@@ -856,7 +856,7 @@ func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.
 		envelopeOptions := correctionEnvelopeOptions(submitted.JobID, corrected.result.JobID, terminalOptions)
 		envelopeOptions.ModelsReportedCapable = hello.Capabilities["models.reported"]
 		envelopeOptions.RetrySkipReason = retrySkipReason
-		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, corrected.result, corrected.envelopeOptions(c, envelopeOptions))
+		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, corrected.result, corrected.envelopeOptions(envelopeOptions))
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
@@ -877,7 +877,7 @@ func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.
 		envelopeOptions := correctionEnvelopeOptions(submitted.JobID, corrected.result.JobID, terminalOptions)
 		envelopeOptions.ModelsReportedCapable = hello.Capabilities["models.reported"]
 		envelopeOptions.RetrySkipReason = retrySkipReason
-		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, corrected.result, corrected.envelopeOptions(c, envelopeOptions))
+		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, corrected.result, corrected.envelopeOptions(envelopeOptions))
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}

@@ -178,7 +178,7 @@ func submitDelegateReportCorrection(ctx context.Context, c agentbusClient, hello
 	opts.WorkspaceKey = intent.WorkspaceKey
 	opts.SubmissionState = submitted.State
 	opts.Deduplicated = submitted.Deduplicated
-	opts.TimeoutResolution = timeoutResolutionForSubmission(opts.Timeout, opts.TimeoutSet, submitted, c)
+	opts.TimeoutResolution = timeoutResolutionForSubmission(opts.Timeout, opts.TimeoutSet, submitted)
 	warnings, acknowledged, err := acknowledgeSubmittedTask(opts, resolved, submitted, intent.ContractKind, "after report-correction submission")
 	if err != nil {
 		return terminalJobResult{}, c, hello, warnings, err

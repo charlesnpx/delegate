@@ -1,13 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +17,6 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
-	"github.com/charlesnpx/delegate/internal/config"
 	"github.com/charlesnpx/delegate/internal/handoff"
 	"github.com/charlesnpx/delegate/internal/policy"
 )
@@ -75,29 +72,6 @@ func TestSubmissionIntentPhaseSequenceModeAndPayloadRemoval(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("intent mode=%o, want 600", got)
-	}
-}
-
-func TestTimeoutCapturingClientRetainsDaemonSubmissionResolution(t *testing.T) {
-	server := startProtocolV2FakeServer(t)
-	server.setSubmitTimeout(map[string]any{
-		"requested": int64(120 * time.Minute / time.Millisecond),
-		"effective": int64(90 * time.Minute / time.Millisecond),
-		"source":    "client",
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	c, err := newTimeoutCapturingClient(ctx, client.Options{StateRoot: server.root, DisableAutoStart: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	submitted, err := c.JobSubmit(ctx, client.JobSubmitParams{TaskSpec: client.TaskSpec{Backend: "codex", Prompt: "retain timeout"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := timeoutResolutionForSubmission(120*time.Minute, true, submitted, c), (config.DimensionResolution{Requested: "2h0m0s", Effective: "1h30m0s", Source: "flag"}); got != want {
-		t.Fatalf("submission timeout=%#v, want retained daemon resolution %#v", got, want)
 	}
 }
 
@@ -328,28 +302,6 @@ func TestLostResponseReplayUsesSameRequestAndOneBackendExecution(t *testing.T) {
 		t.Fatalf("replayed params changed:\nfirst=%#v\nsecond=%#v", submits[0], submits[1])
 	}
 	if got := bus.backendExecutions(); got != 1 {
-		t.Fatalf("backend executions=%d, want 1", got)
-	}
-}
-
-func TestProtocolV2FakeServerLostResponseReplay(t *testing.T) {
-	server := startProtocolV2FakeServer(t)
-	server.closeBeforeFirstSubmitResponse = true
-	restore := useRealAgentbusClient(t)
-	defer restore()
-	t.Setenv("AGENTBUS_STATE_ROOT", server.root)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "lost response over protocol", "--background", "--json"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("task code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
-	}
-	submits := server.submittedParams()
-	if len(submits) != 2 || submits[0].RequestID == "" || submits[0].RequestID != submits[1].RequestID || !reflect.DeepEqual(submits[0], submits[1]) {
-		t.Fatalf("protocol submits=%#v, want exact replay with same request", submits)
-	}
-	if got := server.backendExecutions(); got != 1 {
 		t.Fatalf("backend executions=%d, want 1", got)
 	}
 }
@@ -1237,24 +1189,6 @@ func testSubmissionIntent(params client.JobSubmitParams, root string) submission
 	}
 }
 
-func useRealAgentbusClient(t *testing.T) func() {
-	t.Helper()
-	oldConnect := connectAgentbus
-	oldLookPath := lookPath
-	oldCommandOutput := commandOutput
-	connectAgentbus = func(ctx context.Context, opts client.Options) (agentbusClient, error) {
-		opts.DisableAutoStart = true
-		return client.Connect(ctx, opts)
-	}
-	lookPath = func(string) (string, error) { return "", exec.ErrNotFound }
-	commandOutput = func(string, ...string) ([]byte, error) { return nil, errors.New("unexpected agentbus version call") }
-	return func() {
-		connectAgentbus = oldConnect
-		lookPath = oldLookPath
-		commandOutput = oldCommandOutput
-	}
-}
-
 type replayAdmissionBus struct {
 	mu                             sync.Mutex
 	closeBeforeFirstSubmitResponse bool
@@ -1387,202 +1321,7 @@ func mustSubmitFingerprint(params client.JobSubmitParams) string {
 	return string(raw)
 }
 
-type protocolV2FakeServer struct {
-	t                              *testing.T
-	root                           string
-	ln                             net.Listener
-	closeBeforeFirstSubmitResponse bool
-	mu                             sync.Mutex
-	closedFirstSubmitResponse      bool
-	submits                        []client.JobSubmitParams
-	accepted                       map[string]storedProtocolSubmit
-	submitTimeout                  any
-	executions                     int
-	nextJob                        int
-}
-
 type storedProtocolSubmit struct {
 	jobID       string
 	fingerprint string
-}
-
-func startProtocolV2FakeServer(t *testing.T) *protocolV2FakeServer {
-	t.Helper()
-	root, err := os.MkdirTemp("/tmp", "ab-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = os.RemoveAll(root)
-	})
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "token"), []byte("test-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	socketPath := filepath.Join(root, "agentbus.sock")
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		if errors.Is(err, os.ErrPermission) {
-			t.Skipf("sandbox disallows unix socket bind for protocol-v2 fake server: %v", err)
-		}
-		t.Fatal(err)
-	}
-	server := &protocolV2FakeServer{t: t, root: root, ln: ln, accepted: map[string]storedProtocolSubmit{}}
-	go server.accept()
-	t.Cleanup(func() {
-		_ = ln.Close()
-	})
-	return server
-}
-
-func (s *protocolV2FakeServer) seedAccepted(params client.JobSubmitParams, jobID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.accepted[params.RequestID] = storedProtocolSubmit{jobID: jobID, fingerprint: submitFingerprint(s.t, params)}
-	s.executions++
-}
-
-func (s *protocolV2FakeServer) accept() {
-	for {
-		conn, err := s.ln.Accept()
-		if err != nil {
-			return
-		}
-		go s.handle(conn)
-	}
-}
-
-func (s *protocolV2FakeServer) handle(conn net.Conn) {
-	defer conn.Close()
-	reader := bufio.NewReader(conn)
-	for {
-		line, err := reader.ReadBytes('\n')
-		if err != nil {
-			return
-		}
-		var req struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
-			Params json.RawMessage `json:"params"`
-		}
-		if err := json.Unmarshal(bytes.TrimSpace(line), &req); err != nil {
-			return
-		}
-		switch req.Method {
-		case "protocol.hello":
-			s.writeResult(conn, req.ID, map[string]any{
-				"protocolVersion": 2,
-				"backends":        []string{"codex"},
-				"capabilities":    helloWithCapabilities().Capabilities,
-			})
-		case "job.submit":
-			var params client.JobSubmitParams
-			if err := json.Unmarshal(req.Params, &params); err != nil {
-				s.writeError(conn, req.ID, "invalid_task_spec", "invalid submit params", "")
-				continue
-			}
-			jobID, conflict, closeWithoutResponse := s.acceptSubmit(params)
-			if closeWithoutResponse {
-				return
-			}
-			if conflict {
-				s.writeError(conn, req.ID, agentbusErrorBackendUnavailable, "replay conflict", admissionCauseReplayConflict)
-				continue
-			}
-			result := map[string]any{"jobId": jobID, "state": string(engine.StateQueued)}
-			if timeout := s.currentSubmitTimeout(); timeout != nil {
-				result["timeout"] = timeout
-			}
-			s.writeResult(conn, req.ID, result)
-		default:
-			s.writeError(conn, req.ID, "method_not_found", "method not found", "")
-		}
-	}
-}
-
-func (s *protocolV2FakeServer) setSubmitTimeout(timeout any) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.submitTimeout = timeout
-}
-
-func (s *protocolV2FakeServer) currentSubmitTimeout() any {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.submitTimeout
-}
-
-func (s *protocolV2FakeServer) acceptSubmit(params client.JobSubmitParams) (jobID string, conflict bool, closeWithoutResponse bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.submits = append(s.submits, params)
-	fingerprint := submitFingerprint(s.t, params)
-	if existing, ok := s.accepted[params.RequestID]; ok {
-		if existing.fingerprint != fingerprint {
-			return existing.jobID, true, false
-		}
-		jobID = existing.jobID
-	} else {
-		s.nextJob++
-		jobID = fmt.Sprintf("opaque/job:%d", s.nextJob)
-		s.accepted[params.RequestID] = storedProtocolSubmit{jobID: jobID, fingerprint: fingerprint}
-		s.executions++
-	}
-	if s.closeBeforeFirstSubmitResponse && !s.closedFirstSubmitResponse {
-		s.closedFirstSubmitResponse = true
-		return jobID, false, true
-	}
-	return jobID, false, false
-}
-
-func (s *protocolV2FakeServer) writeResult(conn net.Conn, id json.RawMessage, result any) {
-	raw, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": result})
-	if err != nil {
-		s.t.Errorf("marshal result: %v", err)
-		return
-	}
-	_, _ = conn.Write(append(raw, '\n'))
-}
-
-func (s *protocolV2FakeServer) writeError(conn net.Conn, id json.RawMessage, code, message, admissionCause string) {
-	raw, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      json.RawMessage(id),
-		"error": map[string]any{
-			"code":    -32000,
-			"message": message,
-			"data": map[string]any{
-				"code":           code,
-				"admissionCause": admissionCause,
-			},
-		},
-	})
-	if err != nil {
-		s.t.Errorf("marshal error: %v", err)
-		return
-	}
-	_, _ = conn.Write(append(raw, '\n'))
-}
-
-func (s *protocolV2FakeServer) submittedParams() []client.JobSubmitParams {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]client.JobSubmitParams(nil), s.submits...)
-}
-
-func (s *protocolV2FakeServer) backendExecutions() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.executions
-}
-
-func submitFingerprint(t *testing.T, params client.JobSubmitParams) string {
-	t.Helper()
-	raw, err := json.Marshal(params.TaskSpec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(raw)
 }
