@@ -19,7 +19,10 @@ Superseding escape hatch: if the requester explicitly asks you to perform the ta
 - exec: "delegate", "agentbus", and the claude backend executable are runnable.
 - repo+state write access: the target repo and delegate/agentbus state roots are writable when the task needs writes.
 - stdin handoff: sensitive prompt text can be piped to "delegate handoff create --json".
-- backend reachability: "agentbus setup --json" shows agentbus capabilities and claude backend availability without unrelated backend model catalogues.
+
+"agentbus setup --json" is a one-time, installation-time check that every configured backend is usable, not a per-launch prerequisite. It covers all configured backends together and fails if any of them fails, so a failure does not by itself mean the selected claude backend is unusable.
+
+The per-launch gate is "delegate task": it enforces the selected backend and required Agentbus capabilities at submission time, and a launch failure reports its own connection or backend error directly.
 
 "delegate task" is read-only unless it has "--write". The worker sandbox is offline, and a write turn can write only inside the job "--cwd"; use it for repo-local edits/builds/tests and point "GOCACHE" and "GOMODCACHE" under that cwd. Route module downloads, other network work, and Git commits to the caller/orchestrator. The launch and terminal envelope's "backend_profile" reports the effective Agentbus sandbox mode as "read-only" or "workspace-write"; use it to route runtime gates.
 
