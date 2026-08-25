@@ -214,11 +214,6 @@ func agentbusCommandErrorResult(jsonOut bool, stdout io.Writer, err error) (int,
 	if !ok {
 		return 0, err
 	}
-	var unresolved submissionUnresolvedError
-	if errors.As(err, &unresolved) {
-		classification.Message = unresolved.Error()
-		classification.Guidance = fmt.Sprintf("delegate task --recover-request %s", unresolved.RequestID)
-	}
 	if jsonOut {
 		return classification.ExitCode, writeJSONLine(stdout, classification.Envelope())
 	}

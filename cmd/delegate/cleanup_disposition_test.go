@@ -511,10 +511,7 @@ func prepareCleanupDispositionArtifacts(t *testing.T, jobID string) (string, str
 	input, err := handoff.PersistJobInput(handoff.JobInputOptions{
 		StateDir: stateDir,
 		JobID:    jobID,
-		Prompt: handoff.ResolvedPrompt{
-			Prompt: "prompt for " + jobID,
-			Source: handoff.SourcePrompt,
-		},
+		Prompt:   "prompt for " + jobID,
 	})
 	if err != nil {
 		t.Fatal(err)

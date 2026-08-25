@@ -74,6 +74,14 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 		if strings.Contains(skill.Content, "--no-contract") {
 			t.Fatalf("%s contains forbidden --no-contract", skill.Name)
 		}
+		for _, removed := range []string{
+			"delegate handoff create", "--handoff-prompt-file", "--recover-request",
+			"--output-schema-file", "--origin", "--parent-client", "--parent-session",
+		} {
+			if strings.Contains(skill.Content, removed) {
+				t.Fatalf("%s contains removed task surface %q", skill.Name, removed)
+			}
+		}
 		if strings.Contains(strings.ToLower(skill.Content), "opus") || strings.Contains(strings.ToLower(skill.Content), "terra") {
 			t.Fatalf("%s hardcodes a model name", skill.Name)
 		}
@@ -93,18 +101,19 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"\"delegate task\" is read-only unless it has \"--write\"",
 				"worker sandbox is offline",
 				"only inside the job \"--cwd\"",
-				"single-use",
-				"create a new handoff file before a relaunch",
-				"stdin handoff",
+				"stdin prompt",
 				"per-launch gate",
-				"delegate handoff create --json",
+				"delegate task --prompt-file -",
 				`--cwd "$PWD"`,
-				`--handoff-prompt-file "$HANDOFF_PATH"`,
-				"--output-schema-file",
+				"--prompt-file -",
+				`--tag "skill=`,
+				"--schema-file",
 				"<json-pointer>: <message>",
 				"one corrective retry",
-				"Return the launch envelope verbatim",
-				"--recover-request <request_id>",
+				"Return the submit receipt verbatim",
+				"\"requestId\"",
+				"--request-id <id>",
+				"Task submission already returns immediately",
 				"cleanup_disposition",
 			})
 			requireNonBlockingWaitGuidance(t, skill)
@@ -138,7 +147,6 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"probe for already-supplied metadata or context",
 				"with \"&&\"",
 				"self-collect supplemental context remain permitted after that context read",
-				"--recover-request <request_id>",
 				"cleanup_disposition",
 			})
 			action := strings.Split(skill.Name, ":")[1]

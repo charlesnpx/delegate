@@ -74,8 +74,8 @@ func TestReviewCommandsUseReadOnlySanitizedTaskPipelineAndEnvelopeKinds(t *testi
 			if spec.CWD == repo || !strings.Contains(filepath.ToSlash(spec.CWD), "/delegate/review-") {
 				t.Fatalf("safe review cwd=%q, repo=%q", spec.CWD, repo)
 			}
-			if spec.Tags["delegate.kind"] != tc.wantKind {
-				t.Fatalf("delegate.kind=%q, want %q", spec.Tags["delegate.kind"], tc.wantKind)
+			if len(spec.Tags) != 0 {
+				t.Fatalf("review tags=%#v, want no automatic tags", spec.Tags)
 			}
 			if spec.Model != "review-default-model" || spec.Effort != "review-default-effort" {
 				t.Fatalf("review defaults model=%q effort=%q", spec.Model, spec.Effort)
@@ -118,6 +118,31 @@ func TestReviewCommandsRejectRemovedContractFlags(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestReviewAmbiguousSubmissionFailureKeepsWorkspace(t *testing.T) {
+	repo := newCommandGitFixture(t)
+	writeCommandFixture(t, repo, "visible.txt", "change\n")
+	fake := &fakeAgentbusClient{
+		hello:     helloWithCapabilities(),
+		submitErr: errors.New("lost submission acknowledgement"),
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--json"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("review code=%d stdout=%q stderr=%q, want submission failure", code, stdout.String(), stderr.String())
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("JobSubmit calls=%d, want 1", len(fake.submits))
+	}
+	workspace := fake.submits[0].TaskSpec.CWD
+	if info, err := os.Stat(workspace); err != nil || !info.IsDir() {
+		t.Fatalf("ambiguous submission removed review workspace: info=%v err=%v", info, err)
 	}
 }
 
@@ -256,37 +281,6 @@ func TestReviewBackgroundArtifactPersistsUntilTerminalResultCleanup(t *testing.T
 	}
 }
 
-func TestReviewSubmissionIntentFailureBeforeLaunchAbortsAndCleansWorkspace(t *testing.T) {
-	repo := newCommandGitFixture(t)
-	writeCommandFixture(t, repo, "visible.txt", "change\n")
-	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
-	restore := stubAgentbusGlobals(t, fake)
-	defer restore()
-	oldSave := saveSubmissionIntent
-	saveSubmissionIntent = func(string, submissionIntent) error {
-		return errors.New("intent store unavailable before launch")
-	}
-	defer func() { saveSubmissionIntent = oldSave }()
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--background", "--json"}, nil, &stdout, &stderr)
-	if code == 0 {
-		t.Fatalf("review code=0, want metadata failure; stdout=%q", stdout.String())
-	}
-	if len(fake.submits) != 0 {
-		t.Fatalf("JobSubmit calls=%d, want 0", len(fake.submits))
-	}
-	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate")
-	workspaces, err := filepath.Glob(filepath.Join(stateDir, "review-*"))
-	if err != nil || len(workspaces) != 0 {
-		t.Fatalf("review workspaces after aborted launch=%#v, %v", workspaces, err)
-	}
-	if !strings.Contains(stderr.String(), "persist submission intent before launch") {
-		t.Fatalf("stderr=%q", stderr.String())
-	}
-}
-
 func TestReviewMetadataFailureAfterLaunchUsesDurableFallbackAndPreservesKind(t *testing.T) {
 	repo := newCommandGitFixture(t)
 	writeCommandFixture(t, repo, "visible.txt", "change\n")
@@ -380,14 +374,6 @@ func TestReviewMetadataFailureAfterSubmitReturnsRealJobEnvelopeAndKeepsWorkspace
 		if !strings.Contains(stderr.String(), warning) {
 			t.Fatalf("stderr=%q, want warning %q", stderr.String(), warning)
 		}
-	}
-	requestID := fake.submits[0].RequestID
-	intent, found, err := loadSubmissionIntent("", requestID)
-	if err != nil || !found {
-		t.Fatalf("submission intent found=%v err=%v", found, err)
-	}
-	if intent.Phase != submissionPhaseInFlight || intent.ReviewWorkspace != workspace || intent.JobID != "" {
-		t.Fatalf("submission intent=%#v, want in-flight intent retaining review workspace and no ack job", intent)
 	}
 	if _, found, err := loadJobMetadata("", "job_review_metadata_orphan"); err != nil || found {
 		t.Fatalf("metadata found=%v err=%v, want absent after primary+fallback failure", found, err)

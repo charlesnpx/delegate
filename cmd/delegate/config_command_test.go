@@ -81,50 +81,6 @@ func TestConfigCommandRoundTrip(t *testing.T) {
 	}
 }
 
-func TestTaskEnvelopeUsesLockedConfigAndReportedModel(t *testing.T) {
-	fake := &fakeAgentbusClient{
-		hello: client.HelloResult{
-			ProtocolVersion: 1,
-			Backends:        []string{"claude"},
-			Capabilities:    helloWithCapabilities().Capabilities,
-			BackendMetadata: []client.BackendInfo{{Name: "claude", Models: []string{"configured-model"}, Efforts: []string{"configured-effort"}}},
-		},
-		result: client.JobResult{JobID: "job_locked", State: engine.StateCompleted, ModelReported: "backend-resolved-model"},
-	}
-	restore := stubAgentbusGlobals(t, fake)
-	defer restore()
-	cfg := delegateconfig.Config{Overridable: false, Backend: delegateconfig.Backends{Claude: delegateconfig.Defaults{Model: "configured-model", Effort: "configured-effort"}}}
-	if err := delegateconfig.Save(cfg); err != nil {
-		t.Fatal(err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"task", "--backend", "claude", "--cwd", t.TempDir(), "--model", "requested-model", "--effort", "requested-effort", "--prompt", "do it", "--wait"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("task code=%d stderr=%q", code, stderr.String())
-	}
-	if len(fake.submits) != 1 || fake.submits[0].TaskSpec.Model != "configured-model" || fake.submits[0].TaskSpec.Effort != "configured-effort" {
-		t.Fatalf("submitted task = %#v", fake.submits)
-	}
-	var env TerminalEnvelope
-	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
-		t.Fatalf("terminal JSON = %q: %v", stdout.String(), err)
-	}
-	if env.Model.Requested != "requested-model" || env.Model.Effective != "configured-model" || env.Model.Source != "config-locked" {
-		t.Fatalf("model envelope = %#v", env.Model)
-	}
-	if env.Effort.Requested != "requested-effort" || env.Effort.Effective != "configured-effort" || env.Effort.Source != "config-locked" {
-		t.Fatalf("effort envelope = %#v", env.Effort)
-	}
-	if env.ModelReported != "backend-resolved-model" || env.ModelReportedUnavailableReason != "" {
-		t.Fatalf("reported-model envelope = %#v", env)
-	}
-	meta, found, err := loadJobMetadata("", "job_locked")
-	if err != nil || !found || meta.Model.Effective != "configured-model" || meta.Effort.Effective != "configured-effort" {
-		t.Fatalf("metadata=%#v found=%v err=%v", meta, found, err)
-	}
-}
-
 func TestTerminalEnvelopeModelReportedFallbackReasons(t *testing.T) {
 	modelEffort := delegateconfig.ModelEffortResolution{
 		Model:  delegateconfig.DimensionResolution{Requested: "requested", Effective: "effective", Source: "flag"},
