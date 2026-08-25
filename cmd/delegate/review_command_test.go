@@ -34,7 +34,7 @@ func TestReviewCommandsUseReadOnlySanitizedTaskPipelineAndEnvelopeKinds(t *testi
 			gitCommandFixture(t, repo, "commit", "-m", "track secret path")
 			writeCommandFixture(t, repo, ".env.local", "CLI_CHANGED_SECRET_NEVER\n")
 
-			report := compliantReport()
+			report := testResultText()
 			fake := &fakeAgentbusClient{
 				hello: helloWithCapabilities(),
 				result: client.JobResult{
@@ -43,7 +43,6 @@ func TestReviewCommandsUseReadOnlySanitizedTaskPipelineAndEnvelopeKinds(t *testi
 					State:              engine.StateCompleted,
 					CleanupDisposition: cleanupDispositionVerifiedAbsent,
 					Result:             &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-					Contract:           ptr(compliantContractStamp(t, report)),
 				},
 			}
 			restore := stubAgentbusGlobals(t, fake)
@@ -68,6 +67,9 @@ func TestReviewCommandsUseReadOnlySanitizedTaskPipelineAndEnvelopeKinds(t *testi
 			spec := fake.submits[0].TaskSpec
 			if spec.Write {
 				t.Fatal("review TaskSpec.Write=true, want read-only")
+			}
+			if spec.Policy != nil {
+				t.Fatalf("review TaskSpec.Policy = %#v, want nil", spec.Policy)
 			}
 			if spec.CWD == repo || !strings.Contains(filepath.ToSlash(spec.CWD), "/delegate/review-") {
 				t.Fatalf("safe review cwd=%q, repo=%q", spec.CWD, repo)
@@ -105,10 +107,24 @@ func TestReviewCommandsUseReadOnlySanitizedTaskPipelineAndEnvelopeKinds(t *testi
 	}
 }
 
+func TestReviewCommandsRejectRemovedContractFlags(t *testing.T) {
+	for _, command := range []string{"review", "adversarial-review"} {
+		for _, removedFlag := range []string{"--strict-contract", "--no-contract"} {
+			t.Run(command+"/"+removedFlag, func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				code := run([]string{command, "--backend", "codex", "--cwd", t.TempDir(), removedFlag}, nil, &stdout, &stderr)
+				if code == 0 || !strings.Contains(stderr.String(), "flag provided but not defined") {
+					t.Fatalf("code=%d stderr=%q, want unknown flag", code, stderr.String())
+				}
+			})
+		}
+	}
+}
+
 func TestReviewWaitCleanupUsesStatusDispositionWhenResultOmitsIt(t *testing.T) {
 	repo := newCommandGitFixture(t)
 	writeCommandFixture(t, repo, "visible.txt", "change\n")
-	report := compliantReport()
+	report := testResultText()
 	jobID := "job_review_wait_status_cleanup"
 	sessionID := "session_review_wait_status_cleanup"
 	fake := &reviewWaitStatusCleanupClient{fakeAgentbusClient: fakeAgentbusClient{
@@ -118,7 +134,6 @@ func TestReviewWaitCleanupUsesStatusDispositionWhenResultOmitsIt(t *testing.T) {
 			SessionID: sessionID,
 			State:     engine.StateCompleted,
 			Result:    &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-			Contract:  ptr(compliantContractStamp(t, report)),
 		},
 	}}
 	restore := stubAgentbusClientGlobals(t, fake)
@@ -185,7 +200,7 @@ func (f *reviewWaitStatusCleanupClient) JobStatus(_ context.Context, params clie
 func TestReviewBackgroundArtifactPersistsUntilTerminalResultCleanup(t *testing.T) {
 	repo := newCommandGitFixture(t)
 	writeCommandFixture(t, repo, "large.txt", strings.Repeat("x", reviewpkg.MaxInlineBytes+1))
-	report := compliantReport()
+	report := testResultText()
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		result: client.JobResult{
@@ -194,7 +209,6 @@ func TestReviewBackgroundArtifactPersistsUntilTerminalResultCleanup(t *testing.T
 			State:              engine.StateCompleted,
 			CleanupDisposition: cleanupDispositionVerifiedAbsent,
 			Result:             &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-			Contract:           ptr(compliantContractStamp(t, report)),
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)
@@ -276,7 +290,7 @@ func TestReviewSubmissionIntentFailureBeforeLaunchAbortsAndCleansWorkspace(t *te
 func TestReviewMetadataFailureAfterLaunchUsesDurableFallbackAndPreservesKind(t *testing.T) {
 	repo := newCommandGitFixture(t)
 	writeCommandFixture(t, repo, "visible.txt", "change\n")
-	report := compliantReport()
+	report := testResultText()
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		result: client.JobResult{
@@ -285,7 +299,6 @@ func TestReviewMetadataFailureAfterLaunchUsesDurableFallbackAndPreservesKind(t *
 			State:              engine.StateCompleted,
 			CleanupDisposition: cleanupDispositionVerifiedAbsent,
 			Result:             &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-			Contract:           ptr(compliantContractStamp(t, report)),
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)

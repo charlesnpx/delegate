@@ -529,7 +529,6 @@ func prepareCleanupDispositionArtifacts(t *testing.T, jobID string) (string, str
 	if err := saveJobMetadata(stateDir, jobMetadata{
 		JobID:           jobID,
 		Kind:            reviewKind,
-		ContractKind:    contractKindShape,
 		JobInputPath:    input.Path,
 		ReviewWorkspace: workspace,
 	}); err != nil {

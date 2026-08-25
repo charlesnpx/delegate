@@ -397,7 +397,7 @@ func TestCancelRaceCompletedUsesTerminalResultAndCleanupDisposition(t *testing.T
 	}
 }
 
-func TestWaitForJobResultPermanentPollErrorsReturnPromptly(t *testing.T) {
+func TestRunResultWaitPermanentStatusErrorsReturnPromptly(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
 		err                error
@@ -433,7 +433,7 @@ func TestWaitForJobResultPermanentPollErrorsReturnPromptly(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &fakeAgentbusClient{hello: helloWithCapabilities(), resultErr: tc.err}
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities(), statusErr: tc.err}
 			restore := stubAgentbusClientGlobals(t, fake)
 			defer restore()
 			oldSleep := jobPollSleep
@@ -449,8 +449,8 @@ func TestWaitForJobResultPermanentPollErrorsReturnPromptly(t *testing.T) {
 			if code != tc.wantCode {
 				t.Fatalf("result code=%d stderr=%q stdout=%q, want %d", code, stderr.String(), stdout.String(), tc.wantCode)
 			}
-			if sleepCalls != 0 || len(fake.results) != 1 || len(fake.statuses) != 0 {
-				t.Fatalf("poll calls sleep=%d results=%#v statuses=%#v, want one result and no retry/status", sleepCalls, fake.results, fake.statuses)
+			if sleepCalls != 0 || len(fake.results) != 0 || len(fake.statuses) != 1 {
+				t.Fatalf("poll calls sleep=%d results=%#v statuses=%#v, want one status and no result fetch", sleepCalls, fake.results, fake.statuses)
 			}
 			var env agentbusErrorEnvelope
 			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
@@ -463,7 +463,7 @@ func TestWaitForJobResultPermanentPollErrorsReturnPromptly(t *testing.T) {
 	}
 }
 
-func TestWaitForJobResultRetryablePollErrorsKeepPollingThenSucceed(t *testing.T) {
+func TestRunResultWaitPollsStatusThenFetchesTerminalResultOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -476,12 +476,11 @@ func TestWaitForJobResultRetryablePollErrorsKeepPollingThenSucceed(t *testing.T)
 			fake := &scriptedPollingClient{
 				fakeAgentbusClient: base,
 				results: []jobResultStep{
-					{err: tc.err},
 					{result: client.JobResult{JobID: "job_retryable", State: engine.StateCompleted}},
 				},
-				statuses: []client.JobStatusResult{
-					{Jobs: []client.JobStatus{{JobID: "job_retryable", State: engine.StateRunning}}},
-					{Jobs: []client.JobStatus{{JobID: "job_retryable", State: engine.StateCompleted, CleanupDisposition: cleanupDispositionVerifiedAbsent}}},
+				statusSteps: []jobStatusStep{
+					{err: tc.err},
+					{status: client.JobStatusResult{Jobs: []client.JobStatus{{JobID: "job_retryable", State: engine.StateCompleted, CleanupDisposition: cleanupDispositionVerifiedAbsent}}}},
 				},
 			}
 			restore := stubAgentbusClientGlobals(t, fake)
@@ -502,8 +501,11 @@ func TestWaitForJobResultRetryablePollErrorsKeepPollingThenSucceed(t *testing.T)
 			if sleepCalls != 1 {
 				t.Fatalf("sleep calls=%d, want one retry delay", sleepCalls)
 			}
-			if want := []string{"result", "status", "result", "status"}; !reflect.DeepEqual(fake.calls, want) {
+			if want := []string{"status", "status", "result"}; !reflect.DeepEqual(fake.calls, want) {
 				t.Fatalf("RPC order=%#v, want %#v", fake.calls, want)
+			}
+			if len(fake.submits) != 0 {
+				t.Fatalf("JobSubmit calls=%d, want 0", len(fake.submits))
 			}
 			var env TerminalEnvelope
 			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
@@ -626,9 +628,8 @@ func TestWaitForTerminalJobResultRunningStatusesResetTransportBudget(t *testing.
 
 func TestWaitForTerminalJobResultRetriesRetryableResultErrorsBeforeStatusFallback(t *testing.T) {
 	jobID := "job_retry_before_status_fallback"
-	report := compliantReport()
+	report := testResultText()
 	resultSHA := strings.Repeat("9", 64)
-	stamp := compliantContractStamp(t, report)
 	base := &fakeAgentbusClient{hello: helloWithCapabilities()}
 	fake := &scriptedPollingClient{
 		fakeAgentbusClient: base,
@@ -637,10 +638,9 @@ func TestWaitForTerminalJobResultRetriesRetryableResultErrorsBeforeStatusFallbac
 			{err: errors.New("temporary result transport failure 2")},
 			{err: errors.New("temporary result transport failure 3")},
 			{result: client.JobResult{
-				JobID:    jobID,
-				State:    engine.StateCompleted,
-				Result:   &engine.ResultInfo{Text: report, SHA256: resultSHA, Bytes: int64(len(report))},
-				Contract: ptr(stamp),
+				JobID:  jobID,
+				State:  engine.StateCompleted,
+				Result: &engine.ResultInfo{Text: report, SHA256: resultSHA, Bytes: int64(len(report))},
 			}},
 		},
 		statuses: []client.JobStatusResult{
@@ -674,9 +674,6 @@ func TestWaitForTerminalJobResultRetriesRetryableResultErrorsBeforeStatusFallbac
 	}
 	if terminalJob.result.Result == nil || terminalJob.result.Result.SHA256 != resultSHA {
 		t.Fatalf("terminal result info=%#v, want real result sha %s", terminalJob.result.Result, resultSHA)
-	}
-	if terminalJob.result.Contract == nil || !reflect.DeepEqual(*terminalJob.result.Contract, stamp) {
-		t.Fatalf("terminal contract=%#v, want real result contract %#v", terminalJob.result.Contract, stamp)
 	}
 }
 

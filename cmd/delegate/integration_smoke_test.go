@@ -14,7 +14,6 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
-	"github.com/charlesnpx/delegate/internal/policy"
 )
 
 // TestRescueSmokeFixtures exercises the actual handoff and task/result CLI flow
@@ -43,7 +42,7 @@ func TestRescueSmokeFixtures(t *testing.T) {
 			backend := &recordingBackend{
 				name:      tc.backend,
 				sessionID: "session_" + tc.backend,
-				reports:   []string{compliantReport()},
+				reports:   []string{testResultText()},
 			}
 			bus := &engineSmokeClient{
 				fakeAgentbusClient: fakeAgentbusClient{hello: helloWithCapabilities()},
@@ -89,8 +88,8 @@ func TestRescueSmokeFixtures(t *testing.T) {
 			if got := bus.submits[0].TaskSpec.Tags["delegate.origin"]; got != tc.origin {
 				t.Fatalf("delegate.origin = %q, want %q", got, tc.origin)
 			}
-			if got, want := bus.submits[0].TaskSpec.Prompt, promptWithReportFormat(t, prompt); got != want {
-				t.Fatalf("handoff prompt = %q, want %q", got, want)
+			if got := bus.submits[0].TaskSpec.Prompt; got != prompt {
+				t.Fatalf("handoff prompt = %q, want %q", got, prompt)
 			}
 			if _, err := os.Stat(handoffResult.HandoffPath); !os.IsNotExist(err) {
 				t.Fatalf("handoff file remains after launch: %v", err)
@@ -104,20 +103,20 @@ func TestRescueSmokeFixtures(t *testing.T) {
 			if err := json.Unmarshal(terminalOut.Bytes(), &terminal); err != nil {
 				t.Fatalf("terminal JSON invalid: %v; raw = %q", err, terminalOut.String())
 			}
-			if terminal.Status != engine.StateCompleted || terminal.Kind != taskKind || terminal.ContractKind != contractKindShape {
-				t.Fatalf("terminal envelope = %#v, want completed shape task", terminal)
+			if terminal.Status != engine.StateCompleted || terminal.Kind != taskKind {
+				t.Fatalf("terminal envelope = %#v, want completed task", terminal)
 			}
-			if terminal.Contract.Status != engine.ContractCompliant || terminal.Contract.Attempts != 1 || terminal.Contract.RetryUsed {
-				t.Fatalf("contract stamp = %#v, want one compliant validation", terminal.Contract)
+			if terminal.Contract != nil {
+				t.Fatalf("contract stamp = %#v, want omitted without a policy", terminal.Contract)
 			}
-			if terminal.Contract.ContractSHA256 == "" || terminal.ResultSHA256 == nil || *terminal.ResultSHA256 != sha256Text(compliantReport()) {
-				t.Fatalf("terminal hashes = %#v, want contract and result hashes", terminal)
+			if terminal.ResultSHA256 == nil || *terminal.ResultSHA256 != sha256Text(testResultText()) {
+				t.Fatalf("terminal hashes = %#v, want result hash", terminal)
 			}
 			if len(backend.turns) != 1 || backend.turns[0].Write {
 				t.Fatalf("backend turn inputs = %#v, want one read-only launch", backend.turns)
 			}
-			if effective := backend.turns[0].Prompt; !strings.Contains(effective, policy.DelegateContractDigest()) || !strings.HasSuffix(effective, reportFormatBlock(t)) {
-				t.Fatalf("effective prompt = %q, want digest prologue and trailing report format block", effective)
+			if effective := backend.turns[0].Prompt; effective != prompt {
+				t.Fatalf("effective prompt = %q, want %q", effective, prompt)
 			}
 		})
 	}

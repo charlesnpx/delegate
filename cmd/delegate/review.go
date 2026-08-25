@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/charlesnpx/delegate/internal/handoff"
-	"github.com/charlesnpx/delegate/internal/policy"
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
 )
 
@@ -25,7 +24,6 @@ type reviewOptions struct {
 	Effort            string
 	Timeout           time.Duration
 	TimeoutSet        bool
-	StrictContract    bool
 	Origin            string
 	ParentClient      optionalStringFlag
 	ParentSession     optionalStringFlag
@@ -64,10 +62,6 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	if err != nil {
 		return 0, err
 	}
-	turnPolicy, err := policy.ResolveTurnPolicy(policy.Flags{StrictContract: opts.StrictContract})
-	if err != nil {
-		return 0, err
-	}
 	taskOpts := taskOptions{
 		Backend:          opts.Backend,
 		Wait:             opts.Wait,
@@ -77,7 +71,6 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		Effort:           opts.Effort,
 		Timeout:          opts.Timeout,
 		TimeoutSet:       opts.TimeoutSet,
-		StrictContract:   opts.StrictContract,
 		Origin:           opts.Origin,
 		AuditOrigin:      captureTaskOrigin(opts.Origin, opts.ParentClient, opts.ParentSession, nil),
 		StateDir:         assembled.StateDir,
@@ -86,7 +79,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		ModelEffort:      taskDefaults.ModelEffort,
 		LogicalWorkspace: assembled.RepositoryRoot,
 	}
-	result, err := executeTask(taskOpts, handoff.ResolvedPrompt{Prompt: prompt, Source: handoff.SourcePrompt}, turnPolicy, stderr)
+	result, err := executeTask(taskOpts, handoff.ResolvedPrompt{Prompt: prompt, Source: handoff.SourcePrompt}, nil, stderr)
 	if result.Submitted {
 		// A successful daemon submission owns the workspace even if later local
 		// bookkeeping fails; the durable submission intent and launch envelope recover it.
@@ -135,7 +128,6 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
 	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout; 0 leaves the deadline to the daemon default; envelope.timeout is authoritative")
-	fs.BoolVar(&opts.StrictContract, "strict-contract", false, "compatibility flag; delegate-report corrective retry is enabled by default")
 	fs.StringVar(&opts.Origin, "origin", "", "originating skill")
 	fs.Var(&opts.ParentClient, "parent-client", "explicit parent client for audit linkage")
 	fs.Var(&opts.ParentSession, "parent-session", "explicit parent session id for audit linkage")

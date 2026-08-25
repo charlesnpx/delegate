@@ -16,7 +16,6 @@ import (
 	"github.com/charlesnpx/agentbus/engine"
 	"github.com/charlesnpx/delegate/internal/config"
 	"github.com/charlesnpx/delegate/internal/handoff"
-	"github.com/charlesnpx/delegate/internal/policy"
 )
 
 type optionalStringFlag struct {
@@ -33,50 +32,45 @@ func (f *optionalStringFlag) Set(value string) error {
 }
 
 type taskOptions struct {
-	Backend            string
-	Background         bool
-	Wait               bool
-	JSON               bool
-	CWD                string
-	Model              string
-	ModelSet           bool
-	Effort             string
-	EffortSet          bool
-	StrictModel        bool
-	Timeout            time.Duration
-	TimeoutSet         bool
-	TimeoutResolution  config.DimensionResolution
-	BackendProfile     config.DimensionResolution
-	Write              bool
-	WriteSet           bool
-	StrictContract     bool
-	StrictContractSet  bool
-	NoContract         bool
-	NoContractSet      bool
-	ReportCorrectionOf string
-	Origin             string
-	ParentClient       optionalStringFlag
-	ParentSession      optionalStringFlag
-	AuditOrigin        envelopeOrigin
-	Prompt             optionalStringFlag
-	PromptFile         string
-	PromptStdin        bool
-	HandoffPromptFile  string
-	OutputSchema       optionalStringFlag
-	OutputSchemaFile   optionalStringFlag
-	OutputSchemaStdin  bool
-	Positional         []string
-	RecoverRequest     string
-	StateDir           string
-	Kind               string
-	ReviewWorkspace    string
-	ModelEffort        config.ModelEffortResolution
-	AgentbusStateRoot  string
-	RequestID          string
-	WorkspaceKey       string
-	LogicalWorkspace   string
-	SubmissionState    engine.JobState
-	Deduplicated       bool
+	Backend           string
+	Background        bool
+	Wait              bool
+	JSON              bool
+	CWD               string
+	Model             string
+	ModelSet          bool
+	Effort            string
+	EffortSet         bool
+	StrictModel       bool
+	Timeout           time.Duration
+	TimeoutSet        bool
+	TimeoutResolution config.DimensionResolution
+	BackendProfile    config.DimensionResolution
+	Write             bool
+	WriteSet          bool
+	Origin            string
+	ParentClient      optionalStringFlag
+	ParentSession     optionalStringFlag
+	AuditOrigin       envelopeOrigin
+	Prompt            optionalStringFlag
+	PromptFile        string
+	PromptStdin       bool
+	HandoffPromptFile string
+	OutputSchema      optionalStringFlag
+	OutputSchemaFile  optionalStringFlag
+	OutputSchemaStdin bool
+	Positional        []string
+	RecoverRequest    string
+	StateDir          string
+	Kind              string
+	ReviewWorkspace   string
+	ModelEffort       config.ModelEffortResolution
+	AgentbusStateRoot string
+	RequestID         string
+	WorkspaceKey      string
+	LogicalWorkspace  string
+	SubmissionState   engine.JobState
+	Deduplicated      bool
 }
 
 type taskRunResult struct {
@@ -92,6 +86,7 @@ const (
 	readOnlyTaskHint             = "notice: task will run with a read-only backend profile; pass --write for edits or builds."
 	backendProfileReadOnly       = "read-only"
 	backendProfileWorkspaceWrite = "workspace-write"
+	jsonSchemaRetryTemplate      = "The previous response did not conform to the requested JSON Schema: {{missing}}.\n\nReturn only a corrected response."
 )
 
 func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
@@ -113,15 +108,7 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 	if err != nil {
 		return 0, err
 	}
-	turnPolicy, err := policy.ResolveTurnPolicy(policy.Flags{
-		Write:          opts.Write,
-		StrictContract: opts.StrictContract,
-		NoContract:     opts.NoContract,
-		JSONSchema:     outputSchema,
-	})
-	if err != nil {
-		return 0, err
-	}
+	turnPolicy := turnPolicyForOutputSchema(outputSchema)
 	resolved, err := handoff.ResolvePrompt(handoff.PromptSources{
 		Prompt:            opts.Prompt.value,
 		PromptSet:         opts.Prompt.set,
@@ -199,8 +186,6 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	fs.BoolVar(&opts.StrictModel, "strict-model", false, "reject model or effort not advertised by agentbus")
 	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout; 0 leaves the deadline to the daemon default; envelope.timeout is authoritative")
 	fs.BoolVar(&opts.Write, "write", false, "allow backend writes")
-	fs.BoolVar(&opts.StrictContract, "strict-contract", false, "compatibility flag; delegate-report corrective retry is enabled by default")
-	fs.BoolVar(&opts.NoContract, "no-contract", false, "disable contract enforcement (cannot be used with --output-schema*)")
 	fs.StringVar(&opts.Origin, "origin", "", "originating skill")
 	fs.Var(&opts.ParentClient, "parent-client", "explicit parent client for audit linkage")
 	fs.Var(&opts.ParentSession, "parent-session", "explicit parent session id for audit linkage")
@@ -228,10 +213,6 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 			opts.TimeoutSet = true
 		case "write":
 			opts.WriteSet = true
-		case "strict-contract":
-			opts.StrictContractSet = true
-		case "no-contract":
-			opts.NoContractSet = true
 		}
 	})
 	if opts.RecoverRequest != "" {
@@ -258,9 +239,6 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	if opts.Background && opts.Wait {
 		return taskOptions{}, fmt.Errorf("use only one of --background or --wait")
 	}
-	if opts.StrictContract && opts.NoContract {
-		return taskOptions{}, fmt.Errorf("use only one of --strict-contract or --no-contract")
-	}
 	outputSchemaSources := 0
 	if opts.OutputSchema.set {
 		outputSchemaSources++
@@ -273,9 +251,6 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 	}
 	if outputSchemaSources > 1 {
 		return taskOptions{}, fmt.Errorf("use only one of --output-schema, --output-schema-file, or --output-schema-stdin")
-	}
-	if opts.NoContract && outputSchemaSources > 0 {
-		return taskOptions{}, fmt.Errorf("--no-contract cannot be used with --output-schema, --output-schema-file, or --output-schema-stdin")
 	}
 	if opts.OutputSchemaStdin && opts.PromptStdin {
 		return taskOptions{}, fmt.Errorf("--output-schema-stdin cannot be used with --prompt-stdin")
@@ -311,7 +286,7 @@ func parseTaskOptions(args []string, stdin io.Reader, stderr io.Writer) (taskOpt
 
 func validateRecoverRequestFlags(visited map[string]bool, positional []string) error {
 	rejected := []string{
-		"backend", "cwd", "model", "effort", "strict-model", "timeout", "write", "strict-contract", "no-contract",
+		"backend", "cwd", "model", "effort", "strict-model", "timeout", "write",
 		"origin", "parent-client", "parent-session",
 		"prompt", "prompt-file", "prompt-stdin", "handoff-prompt-file",
 		"output-schema", "output-schema-file", "output-schema-stdin",
@@ -364,6 +339,19 @@ func resolveTaskOutputSchema(opts taskOptions, stdin io.Reader) (json.RawMessage
 	return nil, nil
 }
 
+func turnPolicyForOutputSchema(schema json.RawMessage) *engine.TurnPolicy {
+	if schema == nil {
+		return nil
+	}
+	return &engine.TurnPolicy{
+		Contract: &engine.ContractSpec{JSONSchema: append(json.RawMessage(nil), schema...)},
+		Retry: &engine.RetryPolicy{
+			Max:      1,
+			Template: jsonSchemaRetryTemplate,
+		},
+	}
+}
+
 func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.ResolvedPrompt, turnPolicy *engine.TurnPolicy, stderr io.Writer) (taskRunResult, error) {
 	requiredCapabilities := requiredCapabilitiesForPolicy(turnPolicy)
 	c, hello, agentbusStateRoot, err := connectAgentbusCommand(ctx, requiredCapabilities)
@@ -396,8 +384,7 @@ func runDaemonTask(ctx context.Context, opts taskOptions, resolved handoff.Resol
 	opts.SubmissionState = submitted.State
 	opts.Deduplicated = submitted.Deduplicated
 	opts.TimeoutResolution = timeoutResolutionForSubmission(opts.Timeout, opts.TimeoutSet, submitted)
-	contractKind := intent.ContractKind
-	ackWarnings, acknowledged, err := acknowledgeSubmittedTask(opts, resolved, submitted, contractKind, "after submission")
+	ackWarnings, acknowledged, err := acknowledgeSubmittedTask(opts, resolved, submitted, "after submission")
 	warnings = append(warnings, ackWarnings...)
 	if err != nil {
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
@@ -446,10 +433,6 @@ func prepareNewSubmissionIntent(opts taskOptions, resolved handoff.ResolvedPromp
 	if err != nil {
 		return submissionIntent{}, err
 	}
-	prompt, err := policy.AppendReportFormatBlock(resolved.Prompt, turnPolicy)
-	if err != nil {
-		return submissionIntent{}, err
-	}
 	logicalWorkspace := opts.LogicalWorkspace
 	if logicalWorkspace == "" {
 		logicalWorkspace = opts.CWD
@@ -469,7 +452,7 @@ func prepareNewSubmissionIntent(opts taskOptions, resolved handoff.ResolvedPromp
 			Write:     opts.Write,
 			Model:     opts.Model,
 			Effort:    opts.Effort,
-			Prompt:    prompt,
+			Prompt:    resolved.Prompt,
 			Policy:    turnPolicy,
 			Tags:      tags,
 			TimeoutMs: timeoutMillis(opts.Timeout, opts.TimeoutSet),
@@ -484,8 +467,6 @@ func prepareNewSubmissionIntent(opts taskOptions, resolved handoff.ResolvedPromp
 		AgentbusStateRoot:  opts.AgentbusStateRoot,
 		Params:             params,
 		Kind:               effectiveTaskKind(opts),
-		ContractKind:       contractKindForPolicy(turnPolicy, opts.NoContract),
-		NoContract:         opts.NoContract,
 		HandoffSource:      resolved.Source == handoff.SourceHandoffPromptFile,
 		HandoffPayloadPath: handoffPayloadPathForIntent(resolved),
 		Model:              modelEffort.Model,
@@ -601,7 +582,7 @@ func recoverTaskSubmission(opts taskOptions, stderr io.Writer) (taskRunResult, e
 	taskOpts.Wait = opts.Wait
 	var warnings []string
 	resolved := resolvedPromptFromIntent(intent)
-	ackWarnings, acknowledged, err := acknowledgeSubmittedTask(taskOpts, resolved, submitted, intent.ContractKind, "after recovery")
+	ackWarnings, acknowledged, err := acknowledgeSubmittedTask(taskOpts, resolved, submitted, "after recovery")
 	warnings = append(warnings, ackWarnings...)
 	if err != nil {
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
@@ -632,28 +613,26 @@ func taskOptionsFromIntent(stateDir string, intent submissionIntent, submitted c
 	spec := intent.Params.TaskSpec
 	timeout, timeoutSet := timeoutFromMillis(spec.TimeoutMs)
 	return taskOptions{
-		Backend:            spec.Backend,
-		CWD:                spec.CWD,
-		Model:              spec.Model,
-		Effort:             spec.Effort,
-		Timeout:            timeout,
-		TimeoutSet:         timeoutSet,
-		BackendProfile:     recoveredTaskBackendProfile(spec),
-		Write:              spec.Write,
-		WriteSet:           spec.Write,
-		NoContract:         intent.NoContract,
-		ReportCorrectionOf: recoveredReportCorrectionOf(intent),
-		StateDir:           stateDir,
-		Kind:               intent.Kind,
-		ReviewWorkspace:    intent.ReviewWorkspace,
-		ModelEffort:        modelEffort,
-		AuditOrigin:        origin,
-		AgentbusStateRoot:  intent.AgentbusStateRoot,
-		RequestID:          intent.RequestID,
-		WorkspaceKey:       intent.WorkspaceKey,
-		SubmissionState:    submitted.State,
-		Deduplicated:       submitted.Deduplicated,
-		TimeoutResolution:  timeoutResolutionForSubmission(timeout, timeoutSet, submitted),
+		Backend:           spec.Backend,
+		CWD:               spec.CWD,
+		Model:             spec.Model,
+		Effort:            spec.Effort,
+		Timeout:           timeout,
+		TimeoutSet:        timeoutSet,
+		BackendProfile:    recoveredTaskBackendProfile(spec),
+		Write:             spec.Write,
+		WriteSet:          spec.Write,
+		StateDir:          stateDir,
+		Kind:              intent.Kind,
+		ReviewWorkspace:   intent.ReviewWorkspace,
+		ModelEffort:       modelEffort,
+		AuditOrigin:       origin,
+		AgentbusStateRoot: intent.AgentbusStateRoot,
+		RequestID:         intent.RequestID,
+		WorkspaceKey:      intent.WorkspaceKey,
+		SubmissionState:   submitted.State,
+		Deduplicated:      submitted.Deduplicated,
+		TimeoutResolution: timeoutResolutionForSubmission(timeout, timeoutSet, submitted),
 	}
 }
 
@@ -665,13 +644,6 @@ func recoveredTaskBackendProfile(spec client.TaskSpec) config.DimensionResolutio
 		return config.DimensionResolution{Effective: backendProfileWorkspaceWrite, Source: "flag"}
 	}
 	return config.DimensionResolution{Effective: backendProfileReadOnly, Source: "unknown"}
-}
-
-func recoveredReportCorrectionOf(intent submissionIntent) string {
-	if intent.Params.TaskSpec.Tags == nil {
-		return ""
-	}
-	return intent.Params.TaskSpec.Tags[reportCorrectionOfTag]
 }
 
 func resolvedPromptFromIntent(intent submissionIntent) handoff.ResolvedPrompt {
@@ -726,30 +698,27 @@ func persistDelegateJobInput(opts taskOptions, resolved handoff.ResolvedPrompt, 
 	})
 }
 
-func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) jobMetadata {
+func delegateJobMetadata(opts taskOptions, input handoff.JobInput, jobID string) jobMetadata {
 	modelEffort := normalizedModelEffort(taskModelEffort(opts))
 	return jobMetadata{
-		Schema:             jobMetadataSchema,
-		JobID:              jobID,
-		RequestID:          opts.RequestID,
-		WorkspaceKey:       opts.WorkspaceKey,
-		Kind:               effectiveTaskKind(opts),
-		Backend:            opts.Backend,
-		CWD:                opts.CWD,
-		ContractKind:       contractKind,
-		NoContract:         opts.NoContract,
-		ReportCorrectionOf: opts.ReportCorrectionOf,
-		JobInputPath:       input.Path,
-		ReviewWorkspace:    opts.ReviewWorkspace,
-		AgentbusStateRoot:  opts.AgentbusStateRoot,
-		SubmissionState:    opts.SubmissionState,
-		State:              opts.SubmissionState,
-		Deduplicated:       opts.Deduplicated,
-		Model:              modelEffort.Model,
-		Effort:             modelEffort.Effort,
-		BackendProfile:     taskBackendProfile(opts),
-		Timeout:            normalizedTimeout(opts.TimeoutResolution),
-		Origin:             envelopeOriginPointer(taskEnvelopeOrigin(opts)),
+		Schema:            jobMetadataSchema,
+		JobID:             jobID,
+		RequestID:         opts.RequestID,
+		WorkspaceKey:      opts.WorkspaceKey,
+		Kind:              effectiveTaskKind(opts),
+		Backend:           opts.Backend,
+		CWD:               opts.CWD,
+		JobInputPath:      input.Path,
+		ReviewWorkspace:   opts.ReviewWorkspace,
+		AgentbusStateRoot: opts.AgentbusStateRoot,
+		SubmissionState:   opts.SubmissionState,
+		State:             opts.SubmissionState,
+		Deduplicated:      opts.Deduplicated,
+		Model:             modelEffort.Model,
+		Effort:            modelEffort.Effort,
+		BackendProfile:    taskBackendProfile(opts),
+		Timeout:           normalizedTimeout(opts.TimeoutResolution),
+		Origin:            envelopeOriginPointer(taskEnvelopeOrigin(opts)),
 	}
 }
 
@@ -786,8 +755,8 @@ func taskBackendProfile(opts taskOptions) config.DimensionResolution {
 	return config.DimensionResolution{Effective: backendProfileReadOnly, Source: "default"}
 }
 
-func persistLaunchedJobMetadata(opts taskOptions, input handoff.JobInput, jobID, contractKind string) (string, error) {
-	meta := delegateJobMetadata(opts, input, jobID, contractKind)
+func persistLaunchedJobMetadata(opts taskOptions, input handoff.JobInput, jobID string) (string, error) {
+	meta := delegateJobMetadata(opts, input, jobID)
 	if existing, found, err := acknowledgedJobMetadata(opts, jobID); err != nil {
 		return "", err
 	} else if found {
@@ -805,13 +774,13 @@ func persistLaunchedJobMetadata(opts taskOptions, input handoff.JobInput, jobID,
 	return "", nil
 }
 
-func acknowledgeSubmittedTask(opts taskOptions, resolved handoff.ResolvedPrompt, submitted client.JobSubmitResult, contractKind, inputContext string) ([]string, bool, error) {
+func acknowledgeSubmittedTask(opts taskOptions, resolved handoff.ResolvedPrompt, submitted client.JobSubmitResult, inputContext string) ([]string, bool, error) {
 	var warnings []string
 	input, inputErr := persistDelegateJobInputWithoutPayloadCleanup(opts, resolved, submitted.JobID)
 	if inputErr != nil {
 		warnings = append(warnings, fmt.Sprintf("job input for %s could not be persisted %s: %v", submitted.JobID, inputContext, inputErr))
 	}
-	if warning, err := persistLaunchedJobMetadata(opts, input, submitted.JobID, contractKind); err != nil {
+	if warning, err := persistLaunchedJobMetadata(opts, input, submitted.JobID); err != nil {
 		warnings = append(warnings, err.Error())
 		return warnings, false, nil
 	} else if warning != "" {
@@ -846,17 +815,7 @@ func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
-		corrected, nextClient, nextHello, retrySkipReason, correctionWarnings, err := maybeCorrectDelegateReport(ctx, c, hello, opts.StateDir, jobResult, cleanupWarnings)
-		c = nextClient
-		hello = nextHello
-		warnings = append(warnings, correctionWarnings...)
-		if err != nil {
-			return taskRunResult{Submitted: true, Warnings: warnings}, err
-		}
-		envelopeOptions := correctionEnvelopeOptions(submitted.JobID, corrected.result.JobID, terminalOptions)
-		envelopeOptions.ModelsReportedCapable = hello.Capabilities["models.reported"]
-		envelopeOptions.RetrySkipReason = retrySkipReason
-		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, corrected.result, corrected.envelopeOptions(envelopeOptions))
+		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, jobResult.result, jobResult.envelopeOptions(terminalOptions))
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
@@ -867,17 +826,7 @@ func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
-		corrected, nextClient, nextHello, retrySkipReason, correctionWarnings, err := maybeCorrectDelegateReport(ctx, c, hello, opts.StateDir, jobResult, cleanupWarnings)
-		c = nextClient
-		hello = nextHello
-		warnings = append(warnings, correctionWarnings...)
-		if err != nil {
-			return taskRunResult{Submitted: true, Warnings: warnings}, err
-		}
-		envelopeOptions := correctionEnvelopeOptions(submitted.JobID, corrected.result.JobID, terminalOptions)
-		envelopeOptions.ModelsReportedCapable = hello.Capabilities["models.reported"]
-		envelopeOptions.RetrySkipReason = retrySkipReason
-		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, corrected.result, corrected.envelopeOptions(envelopeOptions))
+		env, err := terminalEnvelopeFromJobResultWithOptions(opts.StateDir, jobResult.result, jobResult.envelopeOptions(terminalOptions))
 		if err != nil {
 			return taskRunResult{Submitted: true, Warnings: warnings}, err
 		}
@@ -888,22 +837,6 @@ func submittedTaskRunResult(ctx context.Context, c agentbusClient, hello client.
 		return taskRunResult{Submitted: true, Warnings: warnings}, err
 	}
 	return taskRunResult{Launch: &env, Warnings: warnings, Submitted: true}, nil
-}
-
-func correctionEnvelopeOptions(originalJobID, finalJobID string, options terminalEnvelopeOptions) terminalEnvelopeOptions {
-	if finalJobID == "" || finalJobID == originalJobID {
-		return options
-	}
-	// The request's timeout flag and audit origin remain meaningful for its
-	// correction. Effective timeout and profile are properties of the terminal
-	// job, however, and must be resolved from the correction's daemon response,
-	// status, or metadata rather than inherited from the original job.
-	options.Timeout = config.DimensionResolution{Requested: options.Timeout.Requested}
-	options.BackendProfile = config.DimensionResolution{}
-	options.RequestID = ""
-	options.Deduplicated = false
-	options.DeduplicatedSet = false
-	return options
 }
 
 func writeWarnings(stderr io.Writer, warnings []string) error {
@@ -979,18 +912,6 @@ func mergeAcknowledgedJobMetadata(existing, next jobMetadata) jobMetadata {
 	if merged.CWD == "" {
 		merged.CWD = next.CWD
 	}
-	if merged.ContractKind == "" {
-		merged.ContractKind = next.ContractKind
-	}
-	if next.NoContract {
-		merged.NoContract = true
-	}
-	if merged.ReportCorrectionOf == "" {
-		merged.ReportCorrectionOf = next.ReportCorrectionOf
-	}
-	if merged.ReportCorrectionJobID == "" {
-		merged.ReportCorrectionJobID = next.ReportCorrectionJobID
-	}
 	if merged.AgentbusStateRoot == "" {
 		merged.AgentbusStateRoot = next.AgentbusStateRoot
 	}
@@ -1040,10 +961,6 @@ func taskTags(opts taskOptions) map[string]string {
 	if origin.Depth != "" {
 		tags[delegateDepthTag] = origin.Depth
 	}
-	if opts.ReportCorrectionOf != "" {
-		tags[reportCorrectionTag] = "true"
-		tags[reportCorrectionOfTag] = opts.ReportCorrectionOf
-	}
 	return tags
 }
 
@@ -1077,17 +994,4 @@ func requestedTimeoutValue(timeout time.Duration, set bool) string {
 		return ""
 	}
 	return timeout.String()
-}
-
-func contractKindForPolicy(turnPolicy *engine.TurnPolicy, noContract bool) string {
-	if noContract || turnPolicy == nil || turnPolicy.Contract == nil {
-		return contractKindNone
-	}
-	if turnPolicy.Contract.Shape != nil {
-		return contractKindShape
-	}
-	if turnPolicy.Contract.JSONSchema != nil {
-		return contractKindJSONSchema
-	}
-	return contractKindNone
 }

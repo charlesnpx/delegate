@@ -2,50 +2,14 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
-	"github.com/charlesnpx/delegate/internal/policy"
 )
 
-// TestReportCorrectionResultUsableRequiresDigest locks in the round-2 fix: a
-// correction result is "usable" (allowed to replace the original) only when it
-// carries a present result digest, matching the terminal envelope's
-// authoritative-result criterion. Otherwise the envelope would emit
-// completed_without_result and suppress the original body SHA + cleanup.
-func TestReportCorrectionResultUsableRequiresDigest(t *testing.T) {
-	body := compliantReport()
-	sum := sha256.Sum256([]byte(body))
-	digest := hex.EncodeToString(sum[:])
-
-	noDigest := client.JobResult{JobID: "corr", State: engine.StateCompleted, Result: &engine.ResultInfo{Text: body, Bytes: int64(len(body))}}
-	if reportCorrectionResultUsable(noDigest) {
-		t.Fatal("correction without a result digest must not be usable (would suppress the original)")
-	}
-
-	withDigest := client.JobResult{JobID: "corr", State: engine.StateCompleted, Result: &engine.ResultInfo{Text: body, Bytes: int64(len(body)), SHA256: digest}}
-	if !reportCorrectionResultUsable(withDigest) {
-		t.Fatal("correction with a present matching digest should be usable")
-	}
-
-	if reportCorrectionResultUsable(client.JobResult{JobID: "corr", State: engine.StateCompleted}) {
-		t.Fatal("correction without a result must not be usable")
-	}
-}
-
-// TestRunStatusTerminalJobEmitsJobsShapeWithExitCode locks in ⑧: `delegate
-// status --job` must emit the {"jobs":[...]} JobStatusResult shape even when the
-// job is terminal (it previously flipped to a flat TerminalEnvelope, breaking
-// single-schema pollers at exactly the terminal transition). The terminal state
-// still maps to the process exit code.
 func TestRunStatusTerminalJobEmitsJobsShapeWithExitCode(t *testing.T) {
 	finalAttemptStartedAt := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	finalAttemptEndedAt := finalAttemptStartedAt.Add(time.Minute)
@@ -100,7 +64,7 @@ func TestRunStatusTerminalJobEmitsJobsShapeWithExitCode(t *testing.T) {
 				t.Fatalf("status job = %#v, want object", jobs[0])
 			}
 			if _, flipped := envelope["contract"]; flipped {
-				t.Fatalf("status JSON leaked a terminal-envelope 'contract' field (schema flip regressed): %q", stdout.String())
+				t.Fatalf("status JSON leaked a terminal-envelope contract field: %q", stdout.String())
 			}
 			if tc.wantTerminalMetadata {
 				if job["failureReason"] != tc.job.FailureReason || job["failureClass"] != string(tc.job.FailureClass) || job["finalAttemptStartedAt"] != finalAttemptStartedAt.Format(time.RFC3339) || job["finalAttemptEndedAt"] != finalAttemptEndedAt.Format(time.RFC3339) {
@@ -115,149 +79,4 @@ func TestRunStatusTerminalJobEmitsJobsShapeWithExitCode(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestLocalReconstructedContractStampFromBody locks in ⑦: when agentbus returns
-// no contract stamp (admission/v2 jobs) but a result body is present, delegate
-// re-derives the true verdict from the body instead of defaulting to
-// result_unavailable — and only with positive shape provenance.
-func TestLocalReconstructedContractStampFromBody(t *testing.T) {
-	reconstructCompliantReport := compliantReport()
-	res := client.JobResult{
-		JobID:  "j",
-		State:  engine.StateCompleted,
-		Result: &engine.ResultInfo{Text: reconstructCompliantReport, Bytes: int64(len(reconstructCompliantReport))},
-	}
-
-	stamp, ok := localReconstructedContractStamp(res, contractKindShape, true, reportValidationAttempt{attempts: 1})
-	if !ok {
-		t.Fatal("expected reconstruction from a present shape body")
-	}
-	if stamp.Status != engine.ContractCompliant {
-		t.Fatalf("stamp status = %q, want compliant; missing=%v", stamp.Status, stamp.Missing)
-	}
-
-	sections := reportSections(t)
-	lastSection := sections[len(sections)-1]
-	noncompliant := strings.Replace(reconstructCompliantReport, lastSection+":", "Scope omitted:", 1)
-	res.Result.Text = noncompliant
-	res.Result.Bytes = int64(len(noncompliant))
-	stamp, ok = localReconstructedContractStamp(res, contractKindShape, true, reportValidationAttempt{attempts: 1})
-	if !ok || stamp.Status != engine.ContractNoncompliant {
-		t.Fatalf("noncompliant reconstruction = (%v, %q), want noncompliant (never result_unavailable with a body)", ok, stamp.Status)
-	}
-
-	// Without metadata provenance the contract kind is unknown; reconstruction
-	// must be refused rather than validate against the wrong (default shape) spec.
-	if _, ok := localReconstructedContractStamp(res, contractKindShape, false, reportValidationAttempt{attempts: 1}); ok {
-		t.Fatal("reconstruction without positive shape provenance must be refused")
-	}
-}
-
-func TestReportRetrySkipReasonsFollowCorrectionEligibility(t *testing.T) {
-	report := compliantReport()
-	for _, tc := range []struct {
-		name       string
-		metadata   *jobMetadata
-		result     client.JobResult
-		wantReason reportRetrySkipReason
-	}{
-		{
-			name: "disabled by no-contract flag",
-			metadata: &jobMetadata{
-				JobID:        "job_disabled",
-				ContractKind: contractKindNone,
-				NoContract:   true,
-			},
-			result:     reportJobResult("job_disabled", report),
-			wantReason: reportRetrySkipDisabledByNoContractFlag,
-		},
-		{
-			name:       "no report to revalidate",
-			result:     client.JobResult{JobID: "job_no_report", State: engine.StateCompleted},
-			wantReason: reportRetrySkipNoReportToRevalidate,
-		},
-		{
-			name:       "terminal state not correctable",
-			result:     client.JobResult{JobID: "job_failed", State: engine.StateFailed},
-			wantReason: reportRetrySkipTerminalState,
-		},
-		{
-			name:       "unknown without local report metadata",
-			result:     reportJobResult("job_unknown", report),
-			wantReason: reportRetrySkipUnknown,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			stateDir := t.TempDir()
-			if err := os.Chmod(stateDir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if tc.metadata != nil {
-				if err := saveJobMetadata(stateDir, *tc.metadata); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			terminal := terminalJobResult{result: tc.result}
-			unchanged, _, _, gotReason, warnings, err := maybeCorrectDelegateReport(context.Background(), &fakeAgentbusClient{}, helloWithCapabilities(), stateDir, terminal, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if gotReason != tc.wantReason || len(warnings) != 0 || unchanged.result.JobID != tc.result.JobID {
-				t.Fatalf("correction result reason=%q warnings=%q job=%q, want %q/no warnings/%q", gotReason, warnings, unchanged.result.JobID, tc.wantReason, tc.result.JobID)
-			}
-
-			env, err := terminalEnvelopeFromJobResultWithOptions(stateDir, unchanged.result, terminalEnvelopeOptions{RetrySkipReason: gotReason})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := terminalEnvelopeRetrySkipReason(t, env); got != tc.wantReason {
-				t.Fatalf("envelope retrySkipReason=%q, want %q", got, tc.wantReason)
-			}
-		})
-	}
-}
-
-func TestReportCorrectionErrorReason(t *testing.T) {
-	if got := reportCorrectionErrorReason(client.JobResult{}); got != reportRetrySkipUnknown {
-		t.Fatalf("empty correction result reason=%q, want %q", got, reportRetrySkipUnknown)
-	}
-	if got := reportCorrectionErrorReason(client.JobResult{JobID: "job_correction"}); got != reportRetrySkipAttemptedAndExhausted {
-		t.Fatalf("submitted correction result reason=%q, want %q", got, reportRetrySkipAttemptedAndExhausted)
-	}
-}
-
-func terminalEnvelopeRetrySkipReason(t *testing.T, env TerminalEnvelope) reportRetrySkipReason {
-	t.Helper()
-	raw, err := json.Marshal(env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var wire struct {
-		Contract map[string]json.RawMessage `json:"contract"`
-	}
-	if err := json.Unmarshal(raw, &wire); err != nil {
-		t.Fatal(err)
-	}
-	var reason reportRetrySkipReason
-	if err := json.Unmarshal(wire.Contract["retrySkipReason"], &reason); err != nil {
-		t.Fatalf("contract.retrySkipReason: %v; raw=%s", err, raw)
-	}
-	return reason
-}
-
-func reportSections(t *testing.T) []string {
-	t.Helper()
-	spec, err := policy.DelegateReportSpec()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var shape struct {
-		RequiredSections []string `json:"requiredSections"`
-	}
-	if len(spec.Shape) == 0 || json.Unmarshal(spec.Shape, &shape) != nil || len(shape.RequiredSections) == 0 {
-		t.Fatalf("delegate report spec = %#v, want sections", spec)
-	}
-	return shape.RequiredSections
 }

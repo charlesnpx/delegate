@@ -18,7 +18,6 @@ import (
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
 	"github.com/charlesnpx/delegate/internal/handoff"
-	"github.com/charlesnpx/delegate/internal/policy"
 )
 
 func TestSubmissionIntentPhaseSequenceModeAndPayloadRemoval(t *testing.T) {
@@ -86,7 +85,7 @@ func TestBackgroundDeduplicatedTerminalReplayEmitsLaunchEnvelopeWithoutResultFet
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			jobID := "job_dedup_" + tc.name
-			report := compliantReport()
+			report := testResultText()
 			fake := &fakeAgentbusClient{
 				hello: helloWithCapabilities(),
 				submitResult: client.JobSubmitResult{
@@ -104,7 +103,6 @@ func TestBackgroundDeduplicatedTerminalReplayEmitsLaunchEnvelopeWithoutResultFet
 					SessionID: "session_" + tc.name,
 					State:     tc.state,
 					Result:    &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-					Contract:  ptr(compliantContractStamp(t, report)),
 				},
 			}
 			restore := stubAgentbusGlobals(t, fake)
@@ -215,7 +213,7 @@ func TestAcknowledgementPathIsIdempotent(t *testing.T) {
 	submitted := client.JobSubmitResult{JobID: "job_idempotent_ack", State: engine.StateRunning}
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		warnings, acknowledged, err := acknowledgeSubmittedTask(opts, resolved, submitted, contractKindShape, "after idempotent test")
+		warnings, acknowledged, err := acknowledgeSubmittedTask(opts, resolved, submitted, "after idempotent test")
 		if err != nil || !acknowledged || len(warnings) != 0 {
 			t.Fatalf("ack attempt %d warnings=%#v acknowledged=%v err=%v", attempt, warnings, acknowledged, err)
 		}
@@ -480,7 +478,7 @@ func TestRecoverRequestRestoresCrashAfterResponseJobMapping(t *testing.T) {
 
 func TestRecoverRequestRestoresHandoffPayloadAndSafeCleanup(t *testing.T) {
 	jobID := "job_recovered_handoff_cleanup"
-	report := compliantReport()
+	report := testResultText()
 	fake := &fakeAgentbusClient{
 		hello:     helloWithCapabilities(),
 		submitErr: errors.New("lost response after accept"),
@@ -493,7 +491,6 @@ func TestRecoverRequestRestoresHandoffPayloadAndSafeCleanup(t *testing.T) {
 			State:              engine.StateCompleted,
 			CleanupDisposition: cleanupDispositionVerifiedAbsent,
 			Result:             &engine.ResultInfo{Text: report, SHA256: strings.Repeat("d", 64), Bytes: int64(len(report))},
-			Contract:           ptr(compliantContractStamp(t, report)),
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)
@@ -576,85 +573,8 @@ func TestRecoverRequestRestoresHandoffPayloadAndSafeCleanup(t *testing.T) {
 		t.Fatalf("metadata=%#v, want cleaned job input and verified_absent disposition", meta)
 	}
 	lastSubmit := fake.submits[len(fake.submits)-1]
-	if len(fake.submits) != maxSubmissionAttempts+1 || lastSubmit.RequestID != requestID || lastSubmit.TaskSpec.Prompt != promptWithReportFormat(t, "recover handoff prompt") {
+	if len(fake.submits) != maxSubmissionAttempts+1 || lastSubmit.RequestID != requestID || lastSubmit.TaskSpec.Prompt != "recover handoff prompt" {
 		t.Fatalf("recovery submit=%#v, want same request and prompt", fake.submits)
-	}
-}
-
-func TestRecoverRequestRestoresNoContractForBackendFailure(t *testing.T) {
-	jobID := "job_recovered_no_contract_failure"
-	logDir := t.TempDir()
-	stderrLog := filepath.Join(logDir, "backend.err")
-	if err := os.WriteFile(stderrLog, []byte("backend exploded\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fake := &fakeAgentbusClient{
-		hello:     helloWithCapabilities(),
-		submitErr: errors.New("lost response after accept"),
-		submitResult: client.JobSubmitResult{
-			JobID: jobID,
-			State: engine.StateFailed,
-		},
-		status: client.JobStatusResult{Jobs: []client.JobStatus{{
-			JobID:              jobID,
-			State:              engine.StateFailed,
-			CleanupDisposition: cleanupDispositionVerifiedAbsent,
-			LogPaths:           &engine.LogPaths{Stderr: stderrLog},
-		}}},
-		result: client.JobResult{
-			JobID:              jobID,
-			State:              engine.StateFailed,
-			CleanupDisposition: cleanupDispositionVerifiedAbsent,
-		},
-	}
-	restore := stubAgentbusGlobals(t, fake)
-	defer restore()
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "recover no-contract prompt", "--no-contract", "--background", "--json"}, nil, &stdout, &stderr)
-	if code == 0 {
-		t.Fatalf("initial task code=0, want unresolved submission; stdout=%q stderr=%q", stdout.String(), stderr.String())
-	}
-	if len(fake.submits) != maxSubmissionAttempts {
-		t.Fatalf("initial submits=%d, want %d", len(fake.submits), maxSubmissionAttempts)
-	}
-	requestID := fake.submits[0].RequestID
-	intent, found, err := loadSubmissionIntent(stateDir, requestID)
-	if err != nil || !found {
-		t.Fatalf("load intent found=%v err=%v", found, err)
-	}
-	if !intent.NoContract || intent.Params.TaskSpec.Policy != nil {
-		t.Fatalf("intent=%#v, want durable no-contract request with nil policy", intent)
-	}
-
-	fake.submitErr = nil
-	stdout.Reset()
-	stderr.Reset()
-	code = run([]string{"task", "--recover-request", requestID, "--json"}, nil, &stdout, &stderr)
-	if want := engine.ExitCodeForState(engine.StateFailed); code != want {
-		t.Fatalf("recover code=%d stderr=%q stdout=%q, want %d", code, stderr.String(), stdout.String(), want)
-	}
-	var env TerminalEnvelope
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
-		t.Fatalf("terminal JSON invalid: %v; raw=%q", err, stdout.String())
-	}
-	if env.ContractKind != contractKindNone || env.Contract.Status != engine.ContractDisabled || env.Contract.Reason != policy.NoContractFlagReason {
-		t.Fatalf("contract stamp=%#v kind=%q, want disabled/no_contract_flag", env.Contract, env.ContractKind)
-	}
-	if env.BackendError == "" {
-		t.Fatalf("terminal envelope=%#v, want captured backend error", env)
-	}
-	meta, found, err := loadJobMetadata(stateDir, jobID)
-	if err != nil || !found {
-		t.Fatalf("metadata found=%v err=%v after recovery", found, err)
-	}
-	if !meta.NoContract {
-		t.Fatalf("metadata=%#v, want no_contract=true after recovery acknowledgement", meta)
 	}
 }
 
@@ -775,7 +695,7 @@ func TestOpaqueJobMetadataFilenamesRoundTripAndVerifyInFileID(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, jobID := range []string{"abc123", "opaque/job:with?chars", "id with spaces"} {
-		meta := jobMetadata{JobID: jobID, Kind: taskKind, ContractKind: contractKindShape}
+		meta := jobMetadata{JobID: jobID, Kind: taskKind}
 		if err := saveJobMetadata(stateDir, meta); err != nil {
 			t.Fatalf("save %q: %v", jobID, err)
 		}
@@ -804,7 +724,7 @@ func TestOpaqueJobMetadataFilenamesRoundTripAndVerifyInFileID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := json.Marshal(jobMetadata{JobID: "different", Kind: taskKind, ContractKind: contractKindShape})
+	raw, err := json.Marshal(jobMetadata{JobID: "different", Kind: taskKind})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -819,7 +739,7 @@ func TestOpaqueJobMetadataFilenamesRoundTripAndVerifyInFileID(t *testing.T) {
 func TestOpaqueJobIDsWorkForStatusAndResultCommands(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	jobID := "opaque/status result:1"
-	if err := saveJobMetadata("", jobMetadata{JobID: jobID, Kind: taskKind, ContractKind: contractKindShape}); err != nil {
+	if err := saveJobMetadata("", jobMetadata{JobID: jobID, Kind: taskKind}); err != nil {
 		t.Fatal(err)
 	}
 	fake := &fakeAgentbusClient{
@@ -910,10 +830,7 @@ func TestSubmissionIntentExactParamsRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	zero := int64(0)
-	policyValue, err := policy.ResolveTurnPolicy(policy.Flags{StrictContract: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	policyValue := turnPolicyForOutputSchema(json.RawMessage(`{"type":"object"}`))
 	withPresent := testSubmissionIntent(testSubmitParams(t, "delegate-33333333333333333333333333333333", "present prompt", &zero), "/tmp/agentbus-present")
 	withPresent.Params.TaskSpec.Policy = policyValue
 	withPresent.Params.TaskSpec.Tags = map[string]string{"delegate.kind": taskKind, delegateRequestIDTag: withPresent.RequestID}
@@ -1087,73 +1004,6 @@ func TestRecoverRequestUsesRecordedRootAndPersistedParams(t *testing.T) {
 	}
 }
 
-func TestRecoverRequestPreservesReportCorrectionProvenance(t *testing.T) {
-	tmp := t.TempDir()
-	recordedRoot := filepath.Join(tmp, "recorded-agentbus")
-	if err := os.MkdirAll(recordedRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("AGENTBUS_STATE_ROOT", filepath.Join(tmp, "current-agentbus"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(tmp, "xdg-state"))
-	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	params := testSubmitParams(t, "delegate-88888888888888888888888888888888", "correct the report", nil)
-	params.TaskSpec.Policy, err = policy.ResolveTurnPolicy(policy.Flags{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	params.TaskSpec.Tags[reportCorrectionTag] = "true"
-	params.TaskSpec.Tags[reportCorrectionOfTag] = "job_original_report"
-	intent := testSubmissionIntent(params, recordedRoot)
-	intent.Phase = submissionPhaseInFlight
-	if err := saveSubmissionIntent(stateDir, intent); err != nil {
-		t.Fatal(err)
-	}
-	badReport := malformedDelegateReport()
-	fake := &fakeAgentbusClient{
-		hello: helloWithCapabilities(),
-		submitResult: client.JobSubmitResult{
-			JobID: "job_recovered_correction",
-			State: engine.StateCompleted,
-		},
-		result: reportJobResult("job_recovered_correction", badReport),
-	}
-	oldConnect := connectAgentbus
-	oldLookPath := lookPath
-	oldCommandOutput := commandOutput
-	connectAgentbus = func(context.Context, client.Options) (agentbusClient, error) {
-		return fake, nil
-	}
-	lookPath = func(string) (string, error) { return "", exec.ErrNotFound }
-	commandOutput = func(string, ...string) ([]byte, error) { return nil, errors.New("unexpected agentbus version call") }
-	defer func() {
-		connectAgentbus = oldConnect
-		lookPath = oldLookPath
-		commandOutput = oldCommandOutput
-	}()
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"task", "--recover-request", params.RequestID, "--json"}, nil, &stdout, &stderr)
-	if want := engine.ExitCodeForState(engine.StateCompletedNoncompliant); code != want {
-		t.Fatalf("recover code=%d want %d stderr=%q stdout=%q", code, want, stderr.String(), stdout.String())
-	}
-	if len(fake.submits) != 1 {
-		t.Fatalf("JobSubmit calls = %d, want recovered correction only", len(fake.submits))
-	}
-	meta, found, err := loadJobMetadata(stateDir, "job_recovered_correction")
-	if err != nil || !found {
-		t.Fatalf("metadata found=%v err=%v", found, err)
-	}
-	if meta.ReportCorrectionOf != "job_original_report" {
-		t.Fatalf("ReportCorrectionOf = %q, want original provenance", meta.ReportCorrectionOf)
-	}
-	if meta.ReportCorrectionJobID != "" {
-		t.Fatalf("ReportCorrectionJobID = %q, want no recursive correction", meta.ReportCorrectionJobID)
-	}
-}
-
 func testSubmitParams(t *testing.T, requestID, prompt string, timeout *int64) client.JobSubmitParams {
 	t.Helper()
 	workspace := t.TempDir()
@@ -1182,7 +1032,6 @@ func testSubmissionIntent(params client.JobSubmitParams, root string) submission
 		AgentbusStateRoot: root,
 		Params:            params,
 		Kind:              taskKind,
-		ContractKind:      contractKindShape,
 		Phase:             submissionPhasePrepared,
 		CreatedAt:         time.Unix(1, 0).UTC(),
 		UpdatedAt:         time.Unix(1, 0).UTC(),

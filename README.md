@@ -2,7 +2,7 @@
 
 `delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.8.1 ships `task`, rescue, sanitized review, adversarial-review, job-control workflows, and parent-session audit linkage.
 
-agentbus owns execution, supervision, and generic policy enforcement. delegate owns the delegation-specific data and decisions it passes to agentbus: the bundled `delegate-report` contract, the delegate-contract digest, policy tiers, handoff lifecycle, skill matrix, and result envelopes.
+agentbus owns execution, supervision, and policy enforcement. delegate owns the delegation-specific handoff lifecycle, skill matrix, and result envelopes it passes through from agentbus.
 
 ## Install
 
@@ -37,14 +37,14 @@ delegate handoff create --json
 
 delegate task --backend claude|codex|cursor [--background|--wait] [--json] [--cwd <abs>]
               [--model <model>] [--effort <effort>]
-              [--strict-model] [--timeout <duration>] [--write] [--strict-contract|--no-contract]
+              [--strict-model] [--timeout <duration>] [--write]
               [--output-schema-file <path>] [--origin <skill>] [--parent-client <client>] [--parent-session <id>] [prompt source]
 delegate task --recover-request <request-id> [--background|--wait] [--json]
 
 delegate review|adversarial-review --backend claude|codex|cursor [--background|--wait] [--json] [--cwd <abs>]
               [--base <ref>] [--scope auto|working-tree|branch] [--allow-live-repo-read]
               [--model <model>] [--effort <effort>] [--timeout <duration>]
-              [--strict-contract] [--origin <skill>] [--parent-client <client>] [--parent-session <id>]
+              [--origin <skill>] [--parent-client <client>] [--parent-session <id>]
 
 delegate status [--job <id>] [--wait] [--json]
 delegate result --job <id> [--wait] [--json]
@@ -55,7 +55,7 @@ For `task`, `review`, and `adversarial-review`, `--timeout 0` leaves the deadlin
 
 Prompt sources are mutually exclusive: `--prompt`, `--prompt-file`, `--prompt-stdin`, `--handoff-prompt-file`, or positional text. `--prompt` and positional text are visible in process arguments and shell history; use stdin, a prompt file, or a handoff file for sensitive input.
 
-For `delegate task`, `--output-schema-file <path>` reads a JSON Schema output contract from a file. Violations return as `<json-pointer>: <message>` with one corrective retry.
+For `delegate task`, `--output-schema-file <path>` reads a JSON Schema output contract from a file. A supplied schema receives one Agentbus corrective retry; any violation is reported by Agentbus as `<json-pointer>: <message>`.
 
 Delegate connects through `agentbus/client`, requires `admission.strictContainment` plus the policy capabilities used by the selected contract, persists a durable request identity before submission, and returns a launch envelope unless `--wait` is set.
 
@@ -111,19 +111,13 @@ The source directories escape `:` as `__colon__`; the installer decodes the name
 | Claude Code (`~/.claude/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor`, `delegate:status`, `delegate:result`, `delegate:cancel`, `delegate:config` | Launch any managed backend (claude, codex, cursor) and control any delegated job. |
 | Codex (`${CODEX_HOME:-~/.codex}/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor`, `delegate:status`, `delegate:result`, `delegate:cancel`, `delegate:config` | Launch any managed backend (claude, codex, cursor) and control any delegated job. |
 
-Launch skills preflight shared filesystem and state access, no-fork execution, and executable availability. Delegate enforces the selected backend and required Agentbus capabilities at submission time. Rescue skills launch through `delegate task`; review skills launch through the sanitized `delegate review` commands. All return the launch envelope verbatim and never add `--no-contract`. Job-control skills use the same status, result, cancellation, evidence-preservation, and no-substitute-answer discipline. Review prose requires findings ordered by severity, preservation of evidence labels, and no automatic fixes after review.
+Launch skills preflight shared filesystem and state access, no-fork execution, and executable availability. Delegate enforces the selected backend and required Agentbus capabilities at submission time. Rescue skills launch through `delegate task`; review skills launch through the sanitized `delegate review` commands. All return the launch envelope verbatim. Job-control skills use the same status, result, cancellation, evidence-preservation, and no-substitute-answer discipline. Review prose requires findings ordered by severity, preservation of evidence labels, and no automatic fixes after review.
 
 v0.8.1 retains the breaking namespace rename. On install or upgrade, the managed installer removes the legacy `codex:{rescue,review,adversarial-review,status,result,cancel}` names from Claude Code and the corresponding `claude:{...}` names from Codex; `--plan --json`, `--install --json`, and `--uninstall --json` report them in each target's additive `removed` array (entries of `{"path": ...}`); the `files` array contains only installed skill files.
 
 ## Contract tiers
 
-`delegate-report` is structural validation, not proof that the task is correct or complete.
-
-| Invocation | Contract result | Retry behavior |
-| --- | --- | --- |
-| Default delegate-report task | Inject digest, append the generated output format, validate, stamp | At most one corrective retry. The retry is always read-only and instructs the backend to emit only the corrected report and make no further changes. |
-| `--write` or `--strict-contract` | Same delegate-report contract behavior | `--write` controls backend write permission; `--strict-contract` is retained for compatibility. |
-| `--no-contract` | Enforcement disabled | No retry; terminal envelope has `contract.status: "disabled"` and `reason: "no_contract_flag"`. This is for direct CLI use only, never managed skills. |
+Tasks submit a nil policy unless the caller supplies a JSON Schema with `--output-schema`, `--output-schema-file`, or `--output-schema-stdin`. In that case Delegate passes the source bytes as `Contract.JSONSchema` and requests one Agentbus corrective retry. There is no default Markdown report contract. Review commands submit a nil policy. Delegate forwards an Agentbus contract stamp when returned and omits the `contract` block otherwise.
 
 ## State Roots And Recovery
 
@@ -167,7 +161,6 @@ The terminal envelope shape:
   "request_id": "delegate-0123456789abcdef0123456789abcdef",
   "status": "completed",
   "kind": "task",
-  "contractKind": "shape",
   "cleanup_disposition": "verified_absent",
   "late_finalization": false,
   "agentbus_warnings": [],
@@ -194,7 +187,7 @@ The terminal envelope shape:
 }
 ```
 
-Possible contract statuses are `compliant`, `retried`, `noncompliant`, `skipped`, and `disabled`. `contract.retrySkipReason`, when present, explains why Delegate's report-format correction did not complete: `disabled_by_no_contract_flag`, `no_report_to_revalidate`, `terminal_state_not_correctable`, `attempted_and_exhausted`, or `unknown`. It is absent when no correction was needed or a correction succeeded. `kind` is `task`, `review`, or `adversarial_review`. `orphaned` is a first-class terminal state with exit code 14; it does not fabricate a result, and `result_unavailable_reason` explains the missing result.
+The optional `contract` block is Agentbus's returned contract stamp. Delegate does not synthesize a contract verdict, terminal state, or retry-skip reason. `kind` is `task`, `review`, or `adversarial_review`. `orphaned` is a first-class terminal state with exit code 14; it does not fabricate a result, and `result_unavailable_reason` explains the missing result.
 
 For `failed`, `interrupted`, and `quarantined` terminals, Agentbus may also supply a redacted, length-bounded `failure_reason` and closed-set `failure_class`. They answer what went wrong and are independent of `result_unavailable_reason`, which only explains why no result is present. They are omitted when Agentbus supplies neither. `delegate status --json` exposes the same metadata within each JobStatus using Agentbus's `failureReason` and `failureClass` names; terminal envelopes use Delegate's snake_case names. Launch and terminal envelopes carry `timeout` as requested/effective/source: a daemon-resolved deadline is authoritative, an explicit positive flag is `flag`-sourced, and an older daemon that supplies no resolution is `{"source":"unknown"}` without an invented duration. Terminal envelopes likewise expose the complete FINAL-attempt pair as `final_attempt_started_at` and `final_attempt_ended_at`; callers can subtract them when needed, but Delegate does not emit a derived duration.
 
