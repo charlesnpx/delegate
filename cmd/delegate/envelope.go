@@ -15,10 +15,6 @@ const (
 	taskKind              = "task"
 	reviewKind            = "review"
 	adversarialReviewKind = "adversarial_review"
-
-	contractKindShape      = "shape"
-	contractKindJSONSchema = "jsonSchema"
-	contractKindNone       = "none"
 )
 
 // LaunchEnvelope is the schema returned when delegate has launched a job.
@@ -48,8 +44,7 @@ type TerminalEnvelope struct {
 	AgentbusWarnings               []string                   `json:"agentbus_warnings,omitempty"`
 	LocalArtifactsRetained         bool                       `json:"local_artifacts_retained,omitempty"`
 	Kind                           string                     `json:"kind"`
-	ContractKind                   string                     `json:"contractKind"`
-	Contract                       engine.ContractStamp       `json:"contract"`
+	Contract                       *engine.ContractStamp      `json:"contract,omitempty"`
 	ResultSHA256                   *string                    `json:"result_sha256"`
 	ResultPath                     string                     `json:"result_path,omitempty"`
 	ResultUnavailableReason        string                     `json:"result_unavailable_reason,omitempty"`
@@ -69,7 +64,6 @@ type TerminalEnvelope struct {
 	FinalAttemptStartedAt          *time.Time                 `json:"final_attempt_started_at,omitempty"`
 	FinalAttemptEndedAt            *time.Time                 `json:"final_attempt_ended_at,omitempty"`
 	Origin                         *envelopeOrigin            `json:"origin,omitempty"`
-	retrySkipReason                reportRetrySkipReason
 }
 
 type terminalEnvelopeOptions struct {
@@ -95,7 +89,6 @@ type terminalEnvelopeOptions struct {
 	FinalAttemptEndedAt    *time.Time
 	FailureReason          string
 	FailureClass           engine.FailureClass
-	RetrySkipReason        reportRetrySkipReason
 }
 
 type launchEnvelopeOptions struct {
@@ -120,8 +113,7 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		AgentbusWarnings               []string                   `json:"agentbus_warnings,omitempty"`
 		LocalArtifactsRetained         bool                       `json:"local_artifacts_retained,omitempty"`
 		Kind                           string                     `json:"kind"`
-		ContractKind                   string                     `json:"contractKind"`
-		Contract                       map[string]any             `json:"contract"`
+		Contract                       *engine.ContractStamp      `json:"contract,omitempty"`
 		ResultSHA256                   *string                    `json:"result_sha256"`
 		ResultPath                     string                     `json:"result_path,omitempty"`
 		ResultUnavailableReason        string                     `json:"result_unavailable_reason,omitempty"`
@@ -153,8 +145,7 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		AgentbusWarnings:               e.AgentbusWarnings,
 		LocalArtifactsRetained:         e.LocalArtifactsRetained,
 		Kind:                           e.Kind,
-		ContractKind:                   e.ContractKind,
-		Contract:                       contractStampEnvelopeValue(e.Contract, e.retrySkipReason),
+		Contract:                       e.Contract,
 		ResultSHA256:                   e.ResultSHA256,
 		ResultPath:                     e.ResultPath,
 		ResultUnavailableReason:        e.ResultUnavailableReason,
@@ -175,30 +166,6 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		FinalAttemptEndedAt:            finalAttemptEndedAt,
 		Origin:                         e.Origin,
 	})
-}
-
-func contractStampEnvelopeValue(stamp engine.ContractStamp, retrySkipReason reportRetrySkipReason) map[string]any {
-	stamp = normalizeContractStamp(stamp)
-	out := map[string]any{
-		"status":    stamp.Status,
-		"missing":   stamp.Missing,
-		"reason":    stamp.Reason,
-		"attempts":  stamp.Attempts,
-		"retryUsed": stamp.RetryUsed,
-	}
-	if retrySkipReason != "" {
-		out["retrySkipReason"] = retrySkipReason
-	}
-	if stamp.ContractName != "" {
-		out["contractName"] = stamp.ContractName
-	}
-	if stamp.ContractSHA256 != "" {
-		out["contractSha256"] = stamp.ContractSHA256
-	}
-	if !stamp.ValidatedAt.IsZero() {
-		out["validatedAt"] = stamp.ValidatedAt
-	}
-	return out
 }
 
 func newLaunchEnvelope(jobID string, state engine.JobState, resolutions ...config.ModelEffortResolution) (LaunchEnvelope, error) {
@@ -229,8 +196,7 @@ func newLaunchEnvelopeWithOptions(jobID string, state engine.JobState, option la
 	return env, nil
 }
 
-func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind string, stamp engine.ContractStamp, resultSHA256, backendError string, options ...terminalEnvelopeOptions) (TerminalEnvelope, error) {
-	stamp = normalizeContractStamp(stamp)
+func newTerminalEnvelope(jobID string, state engine.JobState, kind string, stamp *engine.ContractStamp, resultSHA256, backendError string, options ...terminalEnvelopeOptions) (TerminalEnvelope, error) {
 	option := terminalEnvelopeOptions{}
 	if len(options) > 0 {
 		option = options[0]
@@ -248,11 +214,9 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind, contractKind
 		AgentbusWarnings:               append([]string(nil), option.AgentbusWarnings...),
 		LocalArtifactsRetained:         option.LocalArtifactsRetained,
 		Kind:                           kind,
-		ContractKind:                   contractKind,
 		Contract:                       stamp,
 		FailureReason:                  option.FailureReason,
 		FailureClass:                   option.FailureClass,
-		retrySkipReason:                option.RetrySkipReason,
 		BackendError:                   backendError,
 		Model:                          modelEffort.Model,
 		Effort:                         modelEffort.Effort,
@@ -372,13 +336,6 @@ func modelReportedUnavailableReason(capable bool, modelReported string) string {
 
 func launchStatus(state engine.JobState) string {
 	return string(state)
-}
-
-func normalizeContractStamp(stamp engine.ContractStamp) engine.ContractStamp {
-	if stamp.Missing == nil {
-		stamp.Missing = []string{}
-	}
-	return stamp
 }
 
 func writeJSONLine(w io.Writer, v any) error {

@@ -74,9 +74,9 @@ func TestAgentbusPinnedBinaryIntegrationSmoke(t *testing.T) {
 	})
 	waitForSmokeAgentbusReady(t, stateRoot, serveDone, &serveStdout, &serveStderr)
 
-	// The default task-policy tests assert that Delegate does not require
-	// policy.shape. This smoke verifies that the pinned Agentbus daemon advertises
-	// strict containment while retaining policy.shape=false.
+	// Delegate's JSON Schema policy path does not use Shape. This smoke verifies
+	// that the pinned Agentbus daemon advertises strict containment while leaving
+	// the identity-only Shape capability disabled.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	smokeClient, err := client.Connect(ctx, client.Options{StateRoot: stateRoot, DisableAutoStart: true})
@@ -96,8 +96,8 @@ func TestAgentbusPinnedBinaryIntegrationSmoke(t *testing.T) {
 
 // agentbusPinnedSmokeBinary builds the EXACT agentbus commit delegate's go.mod
 // pins, not a release tag. agentbus main still reports version 0.6.0, so a
-// version string cannot distinguish the post-relocation build (policy.shape=false)
-// from the old v0.6.0 tag — building the pinned commit guarantees the smoke
+// version string cannot distinguish this policy-capability build
+// (policy.shape=false) from the old v0.6.0 tag — building the pinned commit guarantees the smoke
 // exercises the code delegate actually compiles against.
 func agentbusPinnedSmokeBinary(t *testing.T) (string, string) {
 	t.Helper()
@@ -209,9 +209,8 @@ func waitForSmokeAgentbusReady(t *testing.T, stateRoot string, done <-chan error
 			if hello.ProtocolVersion != 2 || !hello.Capabilities["admission.strictContainment"] {
 				t.Fatalf("agentbus hello=%#v, want protocol 2 strict containment", hello)
 			}
-			// Prove this is the post-relocation build: shape validation moved to
-			// delegate, so agentbus advertises policy.shape=false. This is the exact
-			// capability whose stale client-side requirement blocked the normal path.
+			// Shape contracts are identity-only, so Delegate must not require this
+			// capability for its normal JSON Schema policy path.
 			if hello.Capabilities["policy.shape"] {
 				t.Fatalf("agentbus hello advertises policy.shape=true; want false for the post-relocation pinned build")
 			}

@@ -2,20 +2,16 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 	"time"
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
 	"github.com/charlesnpx/delegate/internal/config"
-	"github.com/charlesnpx/delegate/internal/policy"
 )
 
 const (
@@ -270,7 +266,16 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 	cleanupWarnings := newLocalCleanupWarnings(stderr)
 	var terminalJob terminalJobResult
 	if *wait {
-		terminalJob, err = waitForTerminalJobResult(ctx, c, "", *jobID, cleanupWarnings)
+		var status client.JobStatusResult
+		status, err = waitForJobStatus(ctx, c, "", *jobID, cleanupWarnings)
+		if err == nil {
+			job, found := findJobStatus(status, *jobID)
+			if !found {
+				err = fmt.Errorf("agentbus did not return requested job %q while waiting for its terminal status", *jobID)
+			} else {
+				terminalJob, err = terminalJobFromTerminalStatus(ctx, c, "", job, cleanupWarnings)
+			}
+		}
 	} else {
 		result, resultErr := c.JobResult(ctx, client.JobResultParams{JobID: *jobID})
 		err = resultErr
@@ -290,18 +295,8 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 		}
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
 	}
-	var correctionWarnings []string
-	var retrySkipReason reportRetrySkipReason
-	terminalJob, c, hello, retrySkipReason, correctionWarnings, err = maybeCorrectDelegateReport(ctx, c, hello, "", terminalJob, cleanupWarnings)
-	if err != nil {
-		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
-	}
-	if err := writeWarnings(stderr, correctionWarnings); err != nil {
-		return 0, err
-	}
 	env, err := terminalEnvelopeFromJobResultWithOptions("", terminalJob.result, terminalJob.envelopeOptions(terminalEnvelopeOptions{
 		ModelsReportedCapable: hello.Capabilities["models.reported"],
-		RetrySkipReason:       retrySkipReason,
 	}))
 	if err != nil {
 		return 0, err
@@ -767,13 +762,9 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 		cleanupDisposition = result.CleanupDisposition
 	}
 	kind := taskKind
-	contractKind := contractKindShape
 	if found {
 		if meta.Kind != "" {
 			kind = meta.Kind
-		}
-		if meta.ContractKind != "" {
-			contractKind = meta.ContractKind
 		}
 		if cleanupDisposition == "" {
 			cleanupDisposition = meta.CleanupDisposition
@@ -781,25 +772,6 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 		if localArtifactsRetainedFromMetadata(meta, result.State, cleanupDisposition) {
 			option.LocalArtifactsRetained = true
 		}
-	}
-	stamp := skippedDelegateContractStamp(engine.SkipResultUnavailable)
-	shapeStampAuthoritative := false
-	if found && meta.NoContract {
-		stamp = policy.DisabledStamp()
-		contractKind = contractKindNone
-	} else if contractKind == contractKindNone {
-		stamp = policy.DisabledStamp()
-	} else if found && contractKind == contractKindShape {
-		if reconstructed, ok := localReconstructedContractStamp(result, contractKind, found, reportValidationAttempts(meta)); ok {
-			// delegate owns delegate-report shape semantics. agentbus may be old
-			// enough to validate shape itself or new enough to pass the contract
-			// identity through without a verdict; either way the local body verdict is
-			// authoritative for managed delegate-report shape jobs.
-			stamp = reconstructed
-			shapeStampAuthoritative = true
-		}
-	} else if result.Contract != nil {
-		stamp = *result.Contract
 	}
 	resultSHA256 := ""
 	if result.Result != nil {
@@ -834,9 +806,6 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 			option.DeduplicatedSet = true
 		}
 	}
-	if result.Result == nil && backendError != "" && !(found && meta.NoContract) {
-		stamp = skippedDelegateContractStamp(engine.SkipBackendError)
-	}
 	option.ModelEffort = modelEffort
 	option.BackendProfile = backendProfile
 	option.ModelReported = result.ModelReported
@@ -865,8 +834,7 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 	if result.Result != nil {
 		option.ResultPath = result.Result.ResultPath
 	}
-	state := terminalStateForLocalShapeVerdict(result.State, stamp, shapeStampAuthoritative)
-	return newTerminalEnvelope(result.JobID, state, kind, contractKind, stamp, resultSHA256, backendError, option)
+	return newTerminalEnvelope(result.JobID, result.State, kind, result.Contract, resultSHA256, backendError, option)
 }
 
 // timeoutMetadataFallback returns a daemon-captured timeout only from
@@ -882,152 +850,4 @@ func timeoutMetadataFallback(meta jobMetadata) config.DimensionResolution {
 
 func localArtifactsRetainedFromMetadata(meta jobMetadata, state engine.JobState, _ string) bool {
 	return engine.IsTerminal(state) && (meta.JobInputPath != "" || meta.ReviewWorkspace != "")
-}
-
-// localReconstructedContractStamp derives the authoritative delegate-report
-// shape verdict from a present result body. Managed shape jobs no longer trust
-// an agentbus-side shape stamp: delegate owns the bundled markdown report
-// semantics and validates the final text itself. Only the shape contract can be
-// reconstructed locally; JSON Schema contract verdicts remain agentbus-stamped
-// because their schema text is not retained in job metadata.
-func localReconstructedContractStamp(result client.JobResult, contractKind string, found bool, attempt reportValidationAttempt) (engine.ContractStamp, bool) {
-	// Reconstruct only with positive shape provenance: local metadata present AND
-	// recording the delegate-report shape. Without metadata the contract kind is
-	// unknown (it defaults to shape), and validating a JSON Schema / no-contract
-	// body against the shape spec would fabricate a wrong verdict.
-	if !found || contractKind != contractKindShape {
-		return engine.ContractStamp{}, false
-	}
-	if result.Result == nil || result.Result.Bytes < 0 {
-		return engine.ContractStamp{}, false
-	}
-	text, ok := resultBodyText(result.Result)
-	if !ok {
-		return engine.ContractStamp{}, false
-	}
-	stamp, err := delegateReportContractStampFromText(text, attempt)
-	if err != nil {
-		return engine.ContractStamp{}, false
-	}
-	return stamp, true
-}
-
-type reportValidationAttempt struct {
-	attempts  int
-	retryUsed bool
-}
-
-func reportValidationAttempts(meta jobMetadata) reportValidationAttempt {
-	if meta.ReportCorrectionOf != "" {
-		return reportValidationAttempt{attempts: 2, retryUsed: true}
-	}
-	return reportValidationAttempt{attempts: 1}
-}
-
-func delegateReportContractStampFromText(text string, attempt reportValidationAttempt) (engine.ContractStamp, error) {
-	spec, err := policy.DelegateReportSpec()
-	if err != nil {
-		return engine.ContractStamp{}, err
-	}
-	validation, err := policy.ValidateShape(text, spec)
-	if err != nil {
-		return engine.ContractStamp{}, err
-	}
-	hash, err := engine.ContractSHA256(spec)
-	if err != nil {
-		return engine.ContractStamp{}, err
-	}
-	status := engine.ContractCompliant
-	reason := ""
-	if attempt.retryUsed && validation.Compliant {
-		status = engine.ContractRetried
-		reason = "initial response missed structural requirements; retry satisfied contract"
-	} else if !validation.Compliant {
-		status = engine.ContractNoncompliant
-		reason = "response missed structural requirements"
-	}
-	// A zero ValidatedAt keeps the reconstructed stamp deterministic (the
-	// envelope omits validatedAt when zero); the verdict, missing sections, and
-	// contract hash are the load-bearing fields. The empty contract name mirrors
-	// the inline shape spec delegate submits (ResolveTurnPolicy uses no name).
-	return engine.ContractStamp{
-		Status:         status,
-		Missing:        append([]string(nil), validation.Violations...),
-		Reason:         reason,
-		ContractSHA256: hash,
-		Attempts:       attempt.attempts,
-		RetryUsed:      attempt.retryUsed,
-		ValidatedAt:    time.Time{},
-	}, nil
-}
-
-func terminalStateForLocalShapeVerdict(state engine.JobState, stamp engine.ContractStamp, authoritative bool) engine.JobState {
-	if !authoritative || (state != engine.StateCompleted && state != engine.StateCompletedNoncompliant) {
-		return state
-	}
-	switch stamp.Status {
-	case engine.ContractNoncompliant:
-		return engine.StateCompletedNoncompliant
-	case engine.ContractCompliant, engine.ContractRetried:
-		return engine.StateCompleted
-	default:
-		return state
-	}
-}
-
-// resultBodyText returns the certified result text: the inline Text when
-// agentbus provided it, otherwise a bounded read of ResultPath verified against
-// the certified byte count and sha256. agentbus elides inline Text for results
-// at/above its inline cap, but the on-disk body remains authoritative, so a
-// consumer must never treat an empty inline Text as an absent result.
-func resultBodyText(info *engine.ResultInfo) (string, bool) {
-	if info == nil {
-		return "", false
-	}
-	if info.Text != "" {
-		return info.Text, true
-	}
-	// A hash-certified zero-byte result is a present (empty) body, not an absent
-	// one; treat it as available so an empty result validates as noncompliant
-	// rather than falling through to result_unavailable.
-	if info.Bytes == 0 {
-		if info.SHA256 != "" {
-			sum := sha256.Sum256(nil)
-			if hex.EncodeToString(sum[:]) != info.SHA256 {
-				return "", false
-			}
-		}
-		return "", true
-	}
-	if info.ResultPath == "" || info.Bytes < 0 {
-		return "", false
-	}
-	f, err := os.Open(info.ResultPath)
-	if err != nil {
-		return "", false
-	}
-	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, info.Bytes+1))
-	if err != nil || int64(len(raw)) != info.Bytes {
-		return "", false
-	}
-	if info.SHA256 != "" {
-		sum := sha256.Sum256(raw)
-		if hex.EncodeToString(sum[:]) != info.SHA256 {
-			return "", false
-		}
-	}
-	return string(raw), true
-}
-
-func skippedDelegateContractStamp(reason engine.SkippedReason) engine.ContractStamp {
-	spec, err := policy.DelegateReportSpec()
-	if err != nil {
-		return engine.SkippedContractStamp(reason, 0, false, "", "")
-	}
-	hash, err := engine.ContractSHA256(spec)
-	if err != nil {
-		return engine.SkippedContractStamp(reason, 0, false, "", "")
-	}
-	return engine.SkippedContractStamp(reason, 0, false, "", hash)
 }

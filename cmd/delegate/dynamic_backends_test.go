@@ -29,11 +29,11 @@ func TestTerminalEnvelopeWithoutResultAcrossTerminalStates(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.state), func(t *testing.T) {
-			env, err := newTerminalEnvelope("job_terminal", tc.state, taskKind, contractKindShape, skippedDelegateContractStamp(engine.SkipResultUnavailable), "", "")
+			env, err := newTerminalEnvelope("job_terminal", tc.state, taskKind, nil, "", "")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if env.ResultSHA256 != nil || env.ResultUnavailableReason != tc.reason || env.Contract.Status != engine.ContractSkipped {
+			if env.ResultSHA256 != nil || env.ResultUnavailableReason != tc.reason || env.Contract != nil {
 				t.Fatalf("terminal envelope = %#v", env)
 			}
 			raw, err := json.Marshal(env)
@@ -43,6 +43,9 @@ func TestTerminalEnvelopeWithoutResultAcrossTerminalStates(t *testing.T) {
 			var fields map[string]json.RawMessage
 			if err := json.Unmarshal(raw, &fields); err != nil {
 				t.Fatal(err)
+			}
+			if _, found := fields["contract"]; found {
+				t.Fatalf("terminal envelope JSON=%s unexpectedly contains a contract block", raw)
 			}
 			for _, field := range []string{"failure_reason", "failure_class"} {
 				if _, found := fields[field]; found {
@@ -54,11 +57,11 @@ func TestTerminalEnvelopeWithoutResultAcrossTerminalStates(t *testing.T) {
 }
 
 func TestResultUnavailableReasonDiffersByTerminalState(t *testing.T) {
-	orphaned, err := newTerminalEnvelope("job_orphaned", engine.StateOrphaned, taskKind, contractKindShape, skippedDelegateContractStamp(engine.SkipResultUnavailable), "", "")
+	orphaned, err := newTerminalEnvelope("job_orphaned", engine.StateOrphaned, taskKind, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	canceled, err := newTerminalEnvelope("job_canceled", engine.StateCanceled, taskKind, contractKindShape, skippedDelegateContractStamp(engine.SkipResultUnavailable), "", "")
+	canceled, err := newTerminalEnvelope("job_canceled", engine.StateCanceled, taskKind, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +79,7 @@ func TestCaptureBackendErrorPersistsAndSurfacesStderr(t *testing.T) {
 	if err := os.WriteFile(stderrPath, []byte("launch failed: credential helper unavailable\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveJobMetadata(stateDir, jobMetadata{JobID: "job_backend_error", Kind: reviewKind, ContractKind: contractKindShape}); err != nil {
+	if err := saveJobMetadata(stateDir, jobMetadata{JobID: "job_backend_error", Kind: reviewKind}); err != nil {
 		t.Fatal(err)
 	}
 	if err := captureBackendError(stateDir, client.JobStatus{JobID: "job_backend_error", State: engine.StateFailed, LogPaths: &engine.LogPaths{Stderr: stderrPath}}); err != nil {
@@ -91,7 +94,7 @@ func TestCaptureBackendErrorPersistsAndSurfacesStderr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if env.BackendError != "launch failed: credential helper unavailable" || env.Contract.Reason != string(engine.SkipBackendError) || env.ResultSHA256 != nil || env.ResultUnavailableReason != "failed_without_result" || env.FailureReason != "credential helper unavailable" || env.FailureClass != engine.FailureClassBackendError {
+	if env.BackendError != "launch failed: credential helper unavailable" || env.Contract != nil || env.ResultSHA256 != nil || env.ResultUnavailableReason != "failed_without_result" || env.FailureReason != "credential helper unavailable" || env.FailureClass != engine.FailureClassBackendError {
 		t.Fatalf("backend error envelope = %#v", env)
 	}
 	raw, err := json.Marshal(env)
@@ -125,7 +128,7 @@ func TestCaptureBackendErrorSanitizesPromptSecretsAndBoundsDiagnostic(t *testing
 	if err := os.WriteFile(stderrPath, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveJobMetadata(stateDir, jobMetadata{JobID: "job_sanitized", Kind: taskKind, ContractKind: contractKindShape, JobInputPath: promptPath}); err != nil {
+	if err := saveJobMetadata(stateDir, jobMetadata{JobID: "job_sanitized", Kind: taskKind, JobInputPath: promptPath}); err != nil {
 		t.Fatal(err)
 	}
 	job := client.JobStatus{JobID: "job_sanitized", State: engine.StateFailed, LogPaths: &engine.LogPaths{Stderr: stderrPath}}
@@ -185,7 +188,7 @@ func TestTerminalEnvelopeAndCleanupIgnoreCorruptLocalMetadata(t *testing.T) {
 	if env.JobID != jobID || env.Status != engine.StateCompleted || engine.ExitCodeForState(env.Status) != 0 {
 		t.Fatalf("terminal envelope=%#v, want completed authoritative result", env)
 	}
-	if env.Kind != taskKind || env.ContractKind != contractKindShape || env.ResultSHA256 == nil || *env.ResultSHA256 != resultSHA {
+	if env.Kind != taskKind || env.Contract != nil || env.ResultSHA256 == nil || *env.ResultSHA256 != resultSHA {
 		t.Fatalf("terminal enrichment/result fields=%#v, want defaults with result sha %s", env, resultSHA)
 	}
 }

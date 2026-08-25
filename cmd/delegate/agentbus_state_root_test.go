@@ -180,7 +180,6 @@ func TestStatusRoutingUsesRecordedRootForJobAndCurrentRootForAll(t *testing.T) {
 			metadata: &jobMetadata{
 				JobID:             "job_recorded_root",
 				Kind:              taskKind,
-				ContractKind:      contractKindShape,
 				AgentbusStateRoot: "RECORDED",
 			},
 			wantRoot: func(_, recordedRoot string) string { return recordedRoot },
@@ -199,7 +198,7 @@ func TestStatusRoutingUsesRecordedRootForJobAndCurrentRootForAll(t *testing.T) {
 		{
 			name:     "all current root only",
 			args:     []string{"status", "--json"},
-			metadata: &jobMetadata{JobID: "job_other_root", Kind: taskKind, ContractKind: contractKindShape, AgentbusStateRoot: "RECORDED"},
+			metadata: &jobMetadata{JobID: "job_other_root", Kind: taskKind, AgentbusStateRoot: "RECORDED"},
 			wantRoot: func(currentRoot, _ string) string { return currentRoot },
 			wantStatus: client.JobStatusParams{
 				All: true,
@@ -292,7 +291,6 @@ func TestAgentbusStateRootForJobUsesRecordedRootBeforeCurrentEnv(t *testing.T) {
 	if err := saveJobMetadata("", jobMetadata{
 		JobID:             jobID,
 		Kind:              taskKind,
-		ContractKind:      contractKindShape,
 		AgentbusStateRoot: recordedRootRaw,
 	}); err != nil {
 		t.Fatal(err)
@@ -406,7 +404,6 @@ func TestAgentbusStateRootForJobUncanonicalizableRecordedRootFallsBackWithWarnin
 	if err := saveJobMetadata(stateDir, jobMetadata{
 		JobID:             jobID,
 		Kind:              taskKind,
-		ContractKind:      contractKindShape,
 		AgentbusStateRoot: "relative-agentbus",
 	}); err != nil {
 		t.Fatal(err)
@@ -438,7 +435,6 @@ func TestAgentbusStateRootForJobValidRecordedRootReturnsRecordedWithoutWarning(t
 	if err := saveJobMetadata(stateDir, jobMetadata{
 		JobID:             jobID,
 		Kind:              taskKind,
-		ContractKind:      contractKindShape,
 		AgentbusStateRoot: recordedRootRaw,
 	}); err != nil {
 		t.Fatal(err)

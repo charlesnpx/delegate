@@ -32,8 +32,6 @@ type submissionIntent struct {
 	AgentbusStateRoot  string                     `json:"agentbus_state_root"`
 	Params             client.JobSubmitParams     `json:"params"`
 	Kind               string                     `json:"kind"`
-	ContractKind       string                     `json:"contractKind"`
-	NoContract         bool                       `json:"no_contract,omitempty"`
 	HandoffSource      bool                       `json:"handoff_source,omitempty"`
 	HandoffPayloadPath string                     `json:"handoff_payload_path,omitempty"`
 	Model              config.DimensionResolution `json:"model,omitempty"`

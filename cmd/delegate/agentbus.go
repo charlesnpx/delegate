@@ -267,11 +267,6 @@ func requireCapabilities(hello client.HelloResult, version string, required []st
 func requiredCapabilitiesForPolicy(policy *engine.TurnPolicy) []string {
 	required := []string{"admission.strictContainment"}
 	if policy != nil && policy.Contract != nil {
-		// No policy.shape requirement: delegate owns report-shape validation and
-		// the one client-side corrective retry. agentbus accepts, stores, and
-		// stamps a shape contract as opaque identity regardless of the
-		// (informational) policy.shape capability flag, so requiring it here would
-		// wrongly reject the normal managed path against a post-relocation agentbus.
 		if policy.Contract.JSONSchema != nil {
 			required = append(required, "policy.jsonSchema")
 		}
@@ -286,9 +281,8 @@ func requiredCapabilitiesForPolicy(policy *engine.TurnPolicy) []string {
 }
 
 func setupRequiredCapabilities() []string {
-	// Strict containment is the only capability delegate strictly needs: shape
-	// validation is now client-side, and JSON-Schema/named/retry are required only
-	// when a job actually uses them (see requiredCapabilitiesForPolicy).
+	// Strict containment is the only capability required for every task;
+	// JSON Schema and retry are required only when a task supplies a schema.
 	return []string{"admission.strictContainment"}
 }
 

@@ -139,7 +139,7 @@ func TestTerminalEnvelopeModelReportedFallbackReasons(t *testing.T) {
 		{name: "capability missing", wantReason: "agentbus_capability_missing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			env, err := newTerminalEnvelope("job_model", engine.StateCompleted, taskKind, contractKindShape, engine.ContractStamp{}, "", "", terminalEnvelopeOptions{ModelEffort: modelEffort, ModelReported: tc.reported, ModelsReportedCapable: tc.capable})
+			env, err := newTerminalEnvelope("job_model", engine.StateCompleted, taskKind, nil, "", "", terminalEnvelopeOptions{ModelEffort: modelEffort, ModelReported: tc.reported, ModelsReportedCapable: tc.capable})
 			if err != nil {
 				t.Fatal(err)
 			}
