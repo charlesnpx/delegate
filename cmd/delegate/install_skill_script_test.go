@@ -113,8 +113,8 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 		t.Fatalf("staged install warning = %#v, want no staged-root warning", installed.Warnings)
 	}
 	codexTarget := installed.Targets["codex"]
-	if len(codexTarget.Files) != 13 {
-		t.Fatalf("codex files = %d, want 13: %#v", len(codexTarget.Files), codexTarget.Files)
+	if len(codexTarget.Files) != 10 {
+		t.Fatalf("codex files = %d, want 10: %#v", len(codexTarget.Files), codexTarget.Files)
 	}
 	if len(codexTarget.Removed) != 6 {
 		t.Fatalf("codex removed = %d, want 6: %#v", len(codexTarget.Removed), codexTarget.Removed)
@@ -165,7 +165,7 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 	}
 
 	uninstalled := runDelegatedInstallerScript(t, []string{"--uninstall", "--target", "codex", "--json", "--install-root", root}, env)
-	if len(uninstalled.Targets["codex"].Files) != 13 {
+	if len(uninstalled.Targets["codex"].Files) != 10 {
 		t.Fatalf("uninstall files = %#v", uninstalled.Targets["codex"].Files)
 	}
 	if len(uninstalled.Targets["codex"].Removed) != 6 {
@@ -181,7 +181,7 @@ func TestDelegatedInstallerPlanShowsLegacyRemovals(t *testing.T) {
 	codexHome := filepath.Join(root, "codex-home")
 	result := runDelegatedInstallerScript(t, []string{"--plan", "--target", "codex", "--json", "--install-root", root}, []string{"CODEX_HOME=" + codexHome})
 	files := result.Targets["codex"].Files
-	if len(files) != 13 {
+	if len(files) != 10 {
 		t.Fatalf("plan files = %#v", files)
 	}
 	removed := result.Targets["codex"].Removed

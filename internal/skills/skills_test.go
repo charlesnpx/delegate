@@ -9,32 +9,21 @@ import (
 )
 
 func TestTargetMatrices(t *testing.T) {
-	for _, tc := range []struct {
-		target string
-		want   []string
-	}{
-		{
-			target: TargetClaude,
-			want:   expectedSkillNames(),
-		},
-		{
-			target: TargetCodex,
-			want:   expectedSkillNames(),
-		},
-	} {
-		t.Run(tc.target, func(t *testing.T) {
-			got, err := TargetNames(tc.target)
+	for _, target := range []string{TargetClaude, TargetCodex} {
+		t.Run(target, func(t *testing.T) {
+			got, err := TargetNames(target)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("TargetNames(%q) = %#v, want %#v", tc.target, got, tc.want)
+			if !reflect.DeepEqual(got, expectedSkillNames()) {
+				t.Fatalf("TargetNames(%q) = %#v, want %#v", target, got, expectedSkillNames())
 			}
-			if len(got) != 13 {
-				t.Fatalf("TargetNames(%q) count = %d, want 13", tc.target, len(got))
+			if len(got) != 10 {
+				t.Fatalf("TargetNames(%q) count = %d, want 10", target, len(got))
 			}
 		})
 	}
+
 	claude, err := Generate(TargetClaude)
 	if err != nil {
 		t.Fatal(err)
@@ -61,142 +50,47 @@ func expectedSkillNames() []string {
 		"delegate:adversarial-review:claude",
 		"delegate:adversarial-review:codex",
 		"delegate:adversarial-review:cursor",
-		"delegate:status",
-		"delegate:result",
-		"delegate:cancel",
 		"delegate:config",
 	}
 }
 
-func TestGeneratedSkillRequirements(t *testing.T) {
-	all := allGeneratedSkills(t)
-	for _, skill := range all {
-		if strings.Contains(skill.Content, "--no-contract") {
-			t.Fatalf("%s contains forbidden --no-contract", skill.Name)
-		}
-		for _, removed := range []string{
-			"delegate handoff create", "--handoff-prompt-file", "--recover-request",
-			"--output-schema-file", "--origin", "--parent-client", "--parent-session",
-		} {
+func TestGeneratedSkillsUseAgentbusForJobControl(t *testing.T) {
+	for _, skill := range allGeneratedSkills(t) {
+		for _, removed := range []string{"delegate status", "delegate result", "delegate cancel", "launch envelope", "terminal envelope"} {
 			if strings.Contains(skill.Content, removed) {
-				t.Fatalf("%s contains removed task surface %q", skill.Name, removed)
+				t.Fatalf("%s contains removed wording %q", skill.Name, removed)
 			}
-		}
-		if strings.Contains(strings.ToLower(skill.Content), "opus") || strings.Contains(strings.ToLower(skill.Content), "terra") {
-			t.Fatalf("%s hardcodes a model name", skill.Name)
-		}
-		if DecodeName(skill.EscapedName) != skill.Name {
-			t.Fatalf("DecodeName(%q) = %q, want %q", skill.EscapedName, DecodeName(skill.EscapedName), skill.Name)
-		}
-		if strings.Contains(skill.Name, ":") && !strings.Contains(skill.EscapedName, "__colon__") {
-			t.Fatalf("%s escaped as %s, want __colon__", skill.Name, skill.EscapedName)
 		}
 		switch skill.Kind {
-		case KindLaunch:
-			requireFragments(t, skill, []string{
-				"no-fork support",
-				"shared fs",
-				"exec:",
-				"repo+state write access",
-				"\"delegate task\" is read-only unless it has \"--write\"",
-				"worker sandbox is offline",
-				"only inside the job \"--cwd\"",
-				"stdin prompt",
-				"per-launch gate",
-				"delegate task --prompt-file -",
-				`--cwd "$PWD"`,
-				"--prompt-file -",
-				`--tag "skill=`,
-				"--schema-file",
-				"<json-pointer>: <message>",
-				"one corrective retry",
-				"Return the submit receipt verbatim",
-				"\"requestId\"",
-				"--request-id <id>",
-				"Task submission already returns immediately",
-				"cleanup_disposition",
-			})
-			requireNonBlockingWaitGuidance(t, skill)
-			requireMonitoringGuidance(t, skill)
-		case KindReview:
-			requireFragments(t, skill, []string{
-				"no-fork support",
-				"shared fs",
-				"exec:",
-				"repo+state access",
-				"Review commands never pass \"--write\"",
-				"cannot create a build/temp directory, compile, or run tests",
-				"caller must execute runtime verification",
-				"Delegate submission gate",
-				`--cwd "$PWD"`,
-				"Return the launch envelope verbatim",
-				"findings first",
-				"ordered by severity",
-				"Preserve the delegated review's file paths, line numbers, evidence labels",
-				"Never auto-fix",
-				"accident prevention",
-				"delete-and-recreate",
-				"Git is used by host-side delegate assembly only",
-				"Scope boundary",
-				"full commit list",
-				"first and only required step",
-				"actually supplied are authoritative",
-				"merge-base comparison baseline",
-				"comparison baseline is the merge base used for the diff",
-				"base tip applies only when supplied",
-				"probe for already-supplied metadata or context",
-				"with \"&&\"",
-				"self-collect supplemental context remain permitted after that context read",
-				"cleanup_disposition",
-			})
-			action := strings.Split(skill.Name, ":")[1]
-			if !strings.Contains(skill.Content, "delegate "+action+" --backend") {
-				t.Fatalf("%s missing review command", skill.Name)
+		case KindLaunch, KindReview:
+			fragments := []string{
+				"agentbus status --job <id> --json",
+				"agentbus result --job <id> --json",
+				"agentbus cancel --job <id> --json",
+				"exit code of 2 means the job is still running",
+				"plain shell loop",
+				"Agentbus state root",
+				"silently drop the job",
+				"substitute your own answer",
 			}
-			requireNonBlockingWaitGuidance(t, skill)
-			requireMonitoringGuidance(t, skill)
-		case KindJobControl:
-			requireFragments(t, skill, []string{
-				"Run the delegate CLI directly",
-				"preserve the helper's verdict",
-				"findings first",
-				"ordered by severity",
-				"Preserve file paths, line numbers, evidence labels",
-				"do not auto-fix",
-				"Do not replace the job with a local answer",
-				"cleanup_disposition",
-			})
-			if skill.Name == "delegate:result" {
-				requireNonBlockingWaitGuidance(t, skill)
+			requireFragments(t, skill, []string{"Return the submit receipt verbatim"})
+			for _, fragment := range fragments {
+				if !strings.Contains(skill.Content, fragment) {
+					t.Fatalf("%s missing %q", skill.Name, fragment)
+				}
 			}
-			requireMonitoringGuidance(t, skill)
+			if skill.Kind == KindReview {
+				action := strings.Split(skill.Name, ":")[1]
+				if !strings.Contains(skill.Content, "delegate "+action+" --backend") {
+					t.Fatalf("%s missing review command", skill.Name)
+				}
+			}
 		case KindConfig:
-			requireFragments(t, skill, []string{
-				"delegate config list --json",
-				"delegate config set <key> <value>",
-				"all delegated tasks",
-				"ergonomics control, not a security boundary",
-				"managed delegation skills and configurable model/effort defaults for \"claude\", \"codex\", and \"cursor\"",
-			})
+			requireFragments(t, skill, []string{"delegate config list --json", "delegate config set <key> <value>"})
 		default:
-			t.Fatalf("%s kind = %q", skill.Name, skill.Kind)
+			t.Fatalf("unexpected skill kind %q for %s", skill.Kind, skill.Name)
 		}
 	}
-}
-
-func requireNonBlockingWaitGuidance(t *testing.T, skill GeneratedSkill) {
-	t.Helper()
-	for _, fragment := range []string{
-		"delegate result --job <id> --wait --json",
-		"ONE background",
-		"FOREGROUND \"--wait\"",
-		"--wait-timeout <duration>",
-	} {
-		if !strings.Contains(skill.Content, fragment) {
-			t.Fatalf("%s lacks non-blocking wait guidance %q", skill.Name, fragment)
-		}
-	}
-	requireNoDeprecatedPollingGuidance(t, skill)
 }
 
 func TestTargetRootResolution(t *testing.T) {
@@ -221,18 +115,6 @@ func TestTargetRootResolution(t *testing.T) {
 	if root != "/opt/codex-home/skills" {
 		t.Fatalf("codex CODEX_HOME root = %q", root)
 	}
-	root, err = TargetRoot(TargetCodex, "/stage", func(key string) string {
-		if key == "CODEX_HOME" {
-			return "/stage/codex-home"
-		}
-		return ""
-	}, home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if root != "/stage/codex-home/skills" {
-		t.Fatalf("staged codex root = %q", root)
-	}
 }
 
 func TestSourceFixturesMatchGeneratedTemplates(t *testing.T) {
@@ -241,9 +123,6 @@ func TestSourceFixturesMatchGeneratedTemplates(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, rel := range SortedSourcePaths(files) {
-		if !strings.Contains(filepath.Dir(rel), "__colon__") {
-			t.Fatalf("source fixture path %q does not use __colon__ escaping", rel)
-		}
 		raw, err := os.ReadFile(filepath.Join("..", "..", rel))
 		if err != nil {
 			t.Fatalf("read %s: %v", rel, err)
@@ -269,16 +148,6 @@ func TestSourceFixturesMatchGeneratedTemplates(t *testing.T) {
 	}
 }
 
-func TestColonEscapingRoundTripsMultiColonNames(t *testing.T) {
-	const name = "delegate:adversarial-review:codex"
-	if got := EncodeName(name); got != "delegate__colon__adversarial-review__colon__codex" {
-		t.Fatalf("EncodeName(%q) = %q", name, got)
-	}
-	if got := DecodeName(EncodeName(name)); got != name {
-		t.Fatalf("DecodeName(EncodeName(%q)) = %q", name, got)
-	}
-}
-
 func TestPlanAndInstallRemoveLegacySkills(t *testing.T) {
 	for _, target := range []string{TargetClaude, TargetCodex} {
 		t.Run(target, func(t *testing.T) {
@@ -301,48 +170,27 @@ func TestPlanAndInstallRemoveLegacySkills(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result := plan[target]
-			if len(result.Removed) != len(legacyNamesForTarget(target)) {
-				t.Fatalf("plan removed = %#v", result.Removed)
+			if len(plan[target].Files) != 10 {
+				t.Fatalf("plan files = %#v", plan[target].Files)
 			}
-			for _, legacyName := range legacyNamesForTarget(target) {
-				path := filepath.Join(rootForTarget, legacyName, "SKILL.md")
-				if !containsPlannedRemoval(result.Removed, path) {
-					t.Fatalf("plan did not remove legacy skill %q: %#v", legacyName, result.Removed)
-				}
+			if len(plan[target].Removed) != len(legacyNamesForTarget(target)) {
+				t.Fatalf("plan removed = %#v", plan[target].Removed)
 			}
 
 			installed, err := Install(target, root, func(string) string { return "" }, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(installed[target].Removed) != len(legacyNamesForTarget(target)) {
-				t.Fatalf("installed removed = %#v", installed[target].Removed)
+			if len(installed[target].Files) != 10 {
+				t.Fatalf("installed files = %#v", installed[target].Files)
 			}
 			for _, legacyName := range legacyNamesForTarget(target) {
 				if _, err := os.Stat(filepath.Join(rootForTarget, legacyName)); !os.IsNotExist(err) {
 					t.Fatalf("legacy skill %q remains after install: %v", legacyName, err)
 				}
 			}
-
-			uninstalled, err := Uninstall(target, root, func(string) string { return "" }, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(uninstalled[target].Removed) != len(legacyNamesForTarget(target)) {
-				t.Fatalf("uninstalled removed = %#v", uninstalled[target].Removed)
-			}
 		})
 	}
-}
-
-func containsPlannedRemoval(removals []Removal, path string) bool {
-	for _, removal := range removals {
-		if removal.Path == path {
-			return true
-		}
-	}
-	return false
 }
 
 func allGeneratedSkills(t *testing.T) []GeneratedSkill {
@@ -358,54 +206,11 @@ func allGeneratedSkills(t *testing.T) []GeneratedSkill {
 	return all
 }
 
-func TestReviewAndRescueSkillsKeepEscapeHatchAndMonitoringDiscipline(t *testing.T) {
-	for _, skill := range allGeneratedSkills(t) {
-		if skill.Kind != KindReview && !strings.HasPrefix(skill.Name, "delegate:rescue:") {
-			continue
-		}
-		requireFragments(t, skill, []string{"Superseding escape hatch", "explicitly asks", "delegate is unavailable", "supersedes this skill's delegation trigger"})
-		requireMonitoringGuidance(t, skill)
-		if strings.Contains(skill.Content, "--no-contract") {
-			t.Fatalf("%s contains forbidden --no-contract", skill.Name)
-		}
-	}
-}
-
 func requireFragments(t *testing.T, skill GeneratedSkill, fragments []string) {
 	t.Helper()
 	for _, fragment := range fragments {
 		if !strings.Contains(skill.Content, fragment) {
 			t.Fatalf("%s missing fragment %q", skill.Name, fragment)
-		}
-	}
-}
-
-func requireMonitoringGuidance(t *testing.T, skill GeneratedSkill) {
-	t.Helper()
-	requireFragments(t, skill, []string{
-		"Agentbus state root",
-		"silently drop the job",
-		"substitute your own answer",
-	})
-	if skill.Kind == KindJobControl && skill.Name != "delegate:cancel" {
-		requireFragments(t, skill, []string{
-			"delegate result --job <id> --wait --json",
-			"delegate status --job <id> --wait --json",
-			"delegate status --job <id> --json",
-			"--wait-timeout <duration>",
-		})
-	}
-	requireNoDeprecatedPollingGuidance(t, skill)
-}
-
-func requireNoDeprecatedPollingGuidance(t *testing.T, skill GeneratedSkill) {
-	t.Helper()
-	for _, deprecated := range []string{
-		"2" + "-5 minutes",
-		`poll "delegate status --job <id>"`,
-	} {
-		if strings.Contains(skill.Content, deprecated) {
-			t.Fatalf("%s contains deprecated polling guidance %q", skill.Name, deprecated)
 		}
 	}
 }

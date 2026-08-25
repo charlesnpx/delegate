@@ -1,12 +1,12 @@
 ---
 name: delegate:adversarial-review:codex
-description: Delegate a refute-first adversarial code review to codex through sanitized delegate review context and return the launch envelope verbatim.
+description: Delegate a refute-first adversarial code review to codex through sanitized delegate review context and return the submit receipt verbatim.
 version: v0.9.1
 ---
 
 # delegate:adversarial-review:codex
 
-Use this when an orchestrator should delegate a read-only refute-first adversarial code review to the codex backend through delegate's sanitized review-context pipeline and return immediately with the launch envelope.
+Use this when an orchestrator should delegate a read-only refute-first adversarial code review to the codex backend through delegate's sanitized review-context pipeline and return immediately with the submit receipt.
 
 ## Preflight
 
@@ -26,7 +26,7 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
-Review commands never pass "--write" and intentionally run the backend read-only. A read-only review worker cannot create a build/temp directory, compile, or run tests, so the caller must execute runtime verification and gates. The launch and terminal envelope's "backend_profile" reports the effective Agentbus sandbox mode as "read-only" or "workspace-write"; use it to route runtime gates.
+Review commands never pass "--write" and intentionally run the backend read-only. A read-only review worker cannot create a build/temp directory, compile, or run tests, so the caller must execute runtime verification and gates.
 
 When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id, job record, contract stamps, and read-only profile.
 
@@ -45,15 +45,15 @@ Reading the assembled context is the first and only required step. Do not instru
 Spawn the no-fork delegated review exactly through the CLI. Add "--base" or "--scope" only when the requested review scope requires it:
 
 ~~~bash
-delegate adversarial-review --backend codex --cwd "$PWD" --background --json
+delegate adversarial-review --backend codex --cwd "$PWD"
 ~~~
 
-Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "backend_profile", "timeout", or "result_sha256" fields.
+Return the submit receipt verbatim. Do not wrap it in prose or rename its "requestId", "jobId", "state", "deduplicated", or "timeout" fields.
 
-Launch with "--background" so the host agent loop stays free. To await the job, start exactly ONE background "delegate result --job <id> --wait --json" task: a background "--wait" is the normal orchestration pattern — it blocks only its own small awaiter process, not a worker slot or the model. A FOREGROUND "--wait" ties up the current host tool call, so use a foreground "--wait" only for a short, explicitly bounded terminal check. Bound long waits with "--wait-timeout <duration>" (on expiry the job keeps running and stays retrievable by id; on a timeout, re-arm one background waiter or fetch the terminal result once it is ready — do not abandon the job). Do NOT write shell polling loops, and never locate results by scanning the Agentbus state root (for example ~/.local/state/agentbus): that storage layout is private implementation detail, and filesystem salvage is an operator-only emergency after a confirmed CLI defect, not a supported path. Use one-shot "delegate status --job <id> --json" only for on-demand progress (for example when the user asks what the job is doing). Never silently drop the job or substitute your own answer for the delegated review.
+Review submission already returns immediately. Use Agentbus directly for job control: "agentbus status --job <id> --json", "agentbus result --job <id> --json", and "agentbus cancel --job <id> --json". A status or result exit code of 2 means the job is still running; callers that need completion use a plain shell loop around the Agentbus command. Never locate results by scanning the Agentbus state root (for example ~/.local/state/agentbus): that storage layout is private implementation detail. Never silently drop the job or substitute your own answer for the delegated review.
 
 ## Review Result Discipline
 
-Present findings first and keep them ordered by severity. Preserve the delegated review's file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Distinguish observed evidence from inferred risk and assumptions. Terminal envelopes carry the same "timeout" resolution as launch envelopes and may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If there are no findings, say so explicitly and keep residual risk brief. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing or substituting a local review.
+Present findings first and keep them ordered by severity. Preserve the delegated review's file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Distinguish observed evidence from inferred risk and assumptions. If there are no findings, say so explicitly and keep residual risk brief. If the run failed or returned malformed output, show the actionable Agentbus failure and stop instead of guessing or substituting a local review.
 
 Never auto-fix after presenting review findings. Ask the user which issues, if any, they want addressed.

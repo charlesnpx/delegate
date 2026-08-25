@@ -51,6 +51,10 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	if !strings.HasSuffix(stdout.String(), "\n") {
 		t.Fatalf("stdout=%q, want one JSON line", stdout.String())
 	}
+	const wantReceipt = "{\"requestId\":\"automation/retry-1\",\"jobId\":\"job_receipt\",\"state\":\"queued\",\"deduplicated\":false,\"model\":\"unadvertised-model\",\"effort\":\"unadvertised-effort\",\"timeout\":{\"effectiveMs\":1800000,\"source\":\"daemon_default\"}}\n"
+	if got := stdout.String(); got != wantReceipt {
+		t.Fatalf("receipt bytes=%q, want %q", got, wantReceipt)
+	}
 	var receipt taskSubmitReceipt
 	if err := json.Unmarshal(stdout.Bytes(), &receipt); err != nil {
 		t.Fatalf("stdout is not receipt JSON: %v; raw=%q", err, stdout.String())

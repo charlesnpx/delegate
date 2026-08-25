@@ -14,14 +14,8 @@ import (
 // skills: task receives a private prompt through stdin and returns a receipt.
 func TestRescueSmokeFixture(t *testing.T) {
 	prompt := "Investigate the small rescue task and report the result."
-	report := testResultText()
 	bus := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
-		result: client.JobResult{
-			JobID:  "job_smoke",
-			State:  engine.StateCompleted,
-			Result: &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-		},
 		submitResult: client.JobSubmitResult{
 			JobID:   "job_smoke",
 			State:   engine.StateQueued,
@@ -44,17 +38,5 @@ func TestRescueSmokeFixture(t *testing.T) {
 	}
 	if len(bus.submits) != 1 || bus.submits[0].TaskSpec.Prompt != prompt || bus.submits[0].TaskSpec.Tags["skill"] != "delegate:rescue:codex" {
 		t.Fatalf("submitted=%#v", bus.submits)
-	}
-
-	var resultOut, resultErr bytes.Buffer
-	if code := run([]string{"result", "--job", receipt.JobID, "--json"}, nil, &resultOut, &resultErr); code != 0 {
-		t.Fatalf("result code=%d stderr=%q", code, resultErr.String())
-	}
-	var terminal TerminalEnvelope
-	if err := json.Unmarshal(resultOut.Bytes(), &terminal); err != nil {
-		t.Fatal(err)
-	}
-	if terminal.Status != engine.StateCompleted || terminal.ResultSHA256 == nil || *terminal.ResultSHA256 != rawSHA256(report) {
-		t.Fatalf("terminal=%#v", terminal)
 	}
 }
