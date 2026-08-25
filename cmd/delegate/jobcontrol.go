@@ -299,7 +299,7 @@ func runResult(args []string, stdout, stderr io.Writer) (int, error) {
 	if err := writeWarnings(stderr, correctionWarnings); err != nil {
 		return 0, err
 	}
-	env, err := terminalEnvelopeFromJobResultWithOptions("", terminalJob.result, terminalJob.envelopeOptions(c, terminalEnvelopeOptions{
+	env, err := terminalEnvelopeFromJobResultWithOptions("", terminalJob.result, terminalJob.envelopeOptions(terminalEnvelopeOptions{
 		ModelsReportedCapable: hello.Capabilities["models.reported"],
 		RetrySkipReason:       retrySkipReason,
 	}))
@@ -346,7 +346,7 @@ func runCancel(args []string, stdout, stderr io.Writer) (int, error) {
 		return agentbusCommandErrorResult(*jsonOut, stdout, agentbusOperationError(err))
 	}
 	if result.terminal != nil {
-		env, err := terminalEnvelopeFromJobResultWithOptions("", result.terminal.result, result.terminal.envelopeOptions(c, terminalEnvelopeOptions{ModelsReportedCapable: hello.Capabilities["models.reported"]}))
+		env, err := terminalEnvelopeFromJobResultWithOptions("", result.terminal.result, result.terminal.envelopeOptions(terminalEnvelopeOptions{ModelsReportedCapable: hello.Capabilities["models.reported"]}))
 		if err != nil {
 			return 0, err
 		}
@@ -420,22 +420,12 @@ func terminalJobResultFromResultAndStatus(result client.JobResult, statusJob cli
 	return terminalJobResult{result: result, statusJob: statusJob, statusFound: statusFound}
 }
 
-func timeoutResolutionForTerminal(c agentbusClient, result client.JobResult, statusJob client.JobStatus, statusFound bool) (config.DimensionResolution, bool) {
-	if provider, supported := c.(daemonTimeoutResolutionProvider); supported {
-		if resolution, ok := provider.resultTimeoutResolution(result.JobID); ok {
-			return resolution, true
-		}
-		if statusFound {
-			if resolution, ok := provider.statusTimeoutResolution(statusJob.JobID); ok {
-				return resolution, true
-			}
-		}
-	}
-	if resolution, ok := daemonTimeoutResolution(result); ok {
+func timeoutResolutionForTerminal(result client.JobResult, statusJob client.JobStatus, statusFound bool) (config.DimensionResolution, bool) {
+	if resolution, ok := timeoutResolutionFromAgentbus(result.Timeout); ok {
 		return resolution, true
 	}
 	if statusFound {
-		return daemonTimeoutResolution(statusJob)
+		return timeoutResolutionFromAgentbus(statusJob.Timeout)
 	}
 	return config.DimensionResolution{}, false
 }
@@ -444,12 +434,12 @@ func terminalJobResultFromStatus(job client.JobStatus) terminalJobResult {
 	return terminalJobResultFromResultAndStatus(terminalJobResultEnvelopeInputFromStatus(job), job, true)
 }
 
-func (result terminalJobResult) envelopeOptions(c agentbusClient, option terminalEnvelopeOptions) terminalEnvelopeOptions {
+func (result terminalJobResult) envelopeOptions(option terminalEnvelopeOptions) terminalEnvelopeOptions {
 	if option.CleanupDisposition == "" {
 		option.CleanupDisposition = result.result.CleanupDisposition
 	}
 	option.LateFinalization = option.LateFinalization || result.result.LateFinalization
-	if resolution, ok := timeoutResolutionForTerminal(c, result.result, result.statusJob, result.statusFound); ok {
+	if resolution, ok := timeoutResolutionForTerminal(result.result, result.statusJob, result.statusFound); ok {
 		if option.Timeout.Requested != "" {
 			resolution.Requested = option.Timeout.Requested
 		}

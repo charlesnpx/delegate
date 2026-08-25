@@ -121,14 +121,17 @@ func TestTimeoutEnvelopeResolution(t *testing.T) {
 		name       string
 		args       []string
 		submit     client.JobSubmitResult
-		timeout    config.DimensionResolution
 		want       config.DimensionResolution
 		wantSubmit *int64
 	}{
 		{
-			name:       "explicit timeout is flag sourced",
-			args:       []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--timeout", "45s", "--background", "--json"},
-			timeout:    config.DimensionResolution{Requested: "45s", Effective: "45s", Source: "flag"},
+			name: "explicit timeout is flag sourced",
+			args: []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "timeout", "--timeout", "45s", "--background", "--json"},
+			submit: client.JobSubmitResult{Timeout: &engine.TimeoutResolution{
+				Requested: int64Pointer(45000),
+				Effective: 45000,
+				Source:    engine.TimeoutSourceClient,
+			}},
 			want:       config.DimensionResolution{Requested: "45s", Effective: "45s", Source: "flag"},
 			wantSubmit: int64Pointer(45000),
 		},
@@ -145,7 +148,7 @@ func TestTimeoutEnvelopeResolution(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &fakeAgentbusClient{hello: helloWithCapabilities(), submitResult: tc.submit, submittedTimeout: tc.timeout}
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities(), submitResult: tc.submit}
 			restore := stubAgentbusGlobals(t, fake)
 			defer restore()
 			var stdout, stderr bytes.Buffer
@@ -168,16 +171,16 @@ func TestTimeoutEnvelopeResolution(t *testing.T) {
 		})
 	}
 
-	t.Run("omitted timeout uses daemon resolution", func(t *testing.T) {
-		resolution := timeoutResolutionForSubmission(0, false, timeoutResponse{Timeout: timeoutResponseValue{Effective: 1800000, Source: "daemon_default"}})
+	t.Run("omitted timeout uses typed daemon resolution", func(t *testing.T) {
+		resolution := timeoutResolutionForSubmission(0, false, client.JobSubmitResult{Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}})
 		want := config.DimensionResolution{Effective: "30m0s", Source: "daemon"}
 		if resolution != want {
 			t.Fatalf("launch timeout=%#v, want %#v", resolution, want)
 		}
 	})
 
-	t.Run("daemon response resolves terminal envelope", func(t *testing.T) {
-		resolution := timeoutResolutionForSubmission(0, false, timeoutResponse{Timeout: timeoutResponseValue{Effective: 1800000, Source: "daemon_default"}})
+	t.Run("typed daemon response resolves terminal envelope", func(t *testing.T) {
+		resolution := timeoutResolutionForSubmission(0, false, client.JobSubmitResult{Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}})
 		terminal, err := newTerminalEnvelope("job_timeout", engine.StateTimedOut, taskKind, contractKindShape, engine.ContractStamp{}, "", "", terminalEnvelopeOptions{Timeout: resolution})
 		if err != nil {
 			t.Fatal(err)
@@ -188,10 +191,8 @@ func TestTimeoutEnvelopeResolution(t *testing.T) {
 		}
 	})
 
-	t.Run("incomplete daemon resolution stays unknown in JSON", func(t *testing.T) {
-		resolution := timeoutResolutionForSubmission(0, false, map[string]any{
-			"timeout": map[string]any{"source": "daemon_default"},
-		})
+	t.Run("absent typed timeout stays unknown in JSON", func(t *testing.T) {
+		resolution := timeoutResolutionForSubmission(0, false, client.JobSubmitResult{})
 		launch, err := newLaunchEnvelopeWithOptions("job_timeout_unknown", engine.StateQueued, launchEnvelopeOptions{Timeout: resolution})
 		if err != nil {
 			t.Fatal(err)
@@ -245,13 +246,16 @@ func TestStatusOnlyTerminalTimeoutPrecedesLaunchMetadata(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeAgentbusClient{statusTimeout: config.DimensionResolution{Effective: "90m0s", Source: "daemon"}}
-	terminal := terminalJobResultFromStatus(client.JobStatus{JobID: jobID, State: engine.StateOrphaned})
-	env, err := terminalEnvelopeFromJobResultWithOptions(stateDir, terminal.result, terminal.envelopeOptions(fake, terminalEnvelopeOptions{}))
+	terminal := terminalJobResultFromStatus(client.JobStatus{
+		JobID:   jobID,
+		State:   engine.StateOrphaned,
+		Timeout: &engine.TimeoutResolution{Effective: int64((90 * time.Minute) / time.Millisecond), Source: engine.TimeoutSourceDaemonDefault},
+	})
+	env, err := terminalEnvelopeFromJobResultWithOptions(stateDir, terminal.result, terminal.envelopeOptions(terminalEnvelopeOptions{}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (config.DimensionResolution{Effective: "90m0s", Source: "daemon"}); env.Timeout != want {
+	if want := (config.DimensionResolution{Effective: "1h30m0s", Source: "daemon"}); env.Timeout != want {
 		t.Fatalf("terminal timeout=%#v, want daemon status resolution %#v", env.Timeout, want)
 	}
 }
@@ -412,15 +416,6 @@ func TestSchemaLessTimeoutMetadataIsSanitizedWhenCleanupRewritesIt(t *testing.T)
 			}
 		})
 	}
-}
-
-type timeoutResponse struct {
-	Timeout timeoutResponseValue `json:"timeout"`
-}
-
-type timeoutResponseValue struct {
-	Effective int64  `json:"effective"`
-	Source    string `json:"source"`
 }
 
 func int64Pointer(value int64) *int64 { return &value }
@@ -1004,18 +999,21 @@ func TestTaskWaitCorrectionFailureFallsBackToOriginalResult(t *testing.T) {
 func TestTaskWaitCorrectionResolvesTerminalFieldsFromCorrectionJob(t *testing.T) {
 	goodReport := compliantReport()
 	badReport := malformedDelegateReport()
+	correctionResult := reportJobResult("job_report_2", goodReport)
+	correctionResult.Timeout = &engine.TimeoutResolution{Effective: int64((30 * time.Minute) / time.Millisecond), Source: engine.TimeoutSourceDaemonDefault}
 	fake := &reportCorrectionRoundTripClient{
 		hello:  helloWithCapabilities(),
 		jobIDs: []string{"job_report_1", "job_report_2"},
+		submitResults: []client.JobSubmitResult{{
+			Timeout: &engine.TimeoutResolution{
+				Requested: int64Pointer(45000),
+				Effective: 45000,
+				Source:    engine.TimeoutSourceClient,
+			},
+		}},
 		resultsByJobID: map[string]client.JobResult{
 			"job_report_1": reportJobResult("job_report_1", badReport),
-			"job_report_2": reportJobResult("job_report_2", goodReport),
-		},
-		submittedTimeoutByJobID: map[string]config.DimensionResolution{
-			"job_report_1": {Effective: "45s", Source: "flag"},
-		},
-		resultTimeoutByJobID: map[string]config.DimensionResolution{
-			"job_report_2": {Effective: "30m0s", Source: "daemon"},
+			"job_report_2": correctionResult,
 		},
 	}
 	restore := stubAgentbusClientGlobals(t, fake)
@@ -1973,34 +1971,29 @@ func helloWithCapabilities() client.HelloResult {
 }
 
 type fakeAgentbusClient struct {
-	hello            client.HelloResult
-	submits          []client.JobSubmitParams
-	submitResult     client.JobSubmitResult
-	submittedTimeout config.DimensionResolution
-	resultTimeout    config.DimensionResolution
-	statusTimeout    config.DimensionResolution
-	submitErr        error
-	statuses         []client.JobStatusParams
-	statusErr        error
-	status           client.JobStatusResult
-	results          []client.JobResultParams
-	result           client.JobResult
-	resultErr        error
-	cancels          []client.JobCancelParams
-	cancel           client.JobCancelResult
-	cancelErr        error
+	hello        client.HelloResult
+	submits      []client.JobSubmitParams
+	submitResult client.JobSubmitResult
+	submitErr    error
+	statuses     []client.JobStatusParams
+	statusErr    error
+	status       client.JobStatusResult
+	results      []client.JobResultParams
+	result       client.JobResult
+	resultErr    error
+	cancels      []client.JobCancelParams
+	cancel       client.JobCancelResult
+	cancelErr    error
 }
 
 type reportCorrectionRoundTripClient struct {
-	hello                   client.HelloResult
-	jobIDs                  []string
-	resultsByJobID          map[string]client.JobResult
-	submittedTimeoutByJobID map[string]config.DimensionResolution
-	resultTimeoutByJobID    map[string]config.DimensionResolution
-	statusTimeoutByJobID    map[string]config.DimensionResolution
-	submits                 []client.JobSubmitParams
-	statuses                []client.JobStatusParams
-	results                 []client.JobResultParams
+	hello          client.HelloResult
+	jobIDs         []string
+	submitResults  []client.JobSubmitResult
+	resultsByJobID map[string]client.JobResult
+	submits        []client.JobSubmitParams
+	statuses       []client.JobStatusParams
+	results        []client.JobResultParams
 }
 
 func (f *reportCorrectionRoundTripClient) Close() error { return nil }
@@ -2009,10 +2002,21 @@ func (f *reportCorrectionRoundTripClient) HelloResult() client.HelloResult { ret
 
 func (f *reportCorrectionRoundTripClient) JobSubmit(_ context.Context, params client.JobSubmitParams) (client.JobSubmitResult, error) {
 	f.submits = append(f.submits, params)
-	if len(f.submits) > len(f.jobIDs) {
+	index := len(f.submits) - 1
+	if index >= len(f.jobIDs) {
 		return client.JobSubmitResult{}, fmt.Errorf("unexpected JobSubmit call %d", len(f.submits))
 	}
-	return client.JobSubmitResult{JobID: f.jobIDs[len(f.submits)-1], State: engine.StateQueued}, nil
+	result := client.JobSubmitResult{JobID: f.jobIDs[index], State: engine.StateQueued}
+	if index < len(f.submitResults) {
+		result = f.submitResults[index]
+		if result.JobID == "" {
+			result.JobID = f.jobIDs[index]
+		}
+		if result.State == "" {
+			result.State = engine.StateQueued
+		}
+	}
+	return result, nil
 }
 
 func (f *reportCorrectionRoundTripClient) JobStatus(_ context.Context, params client.JobStatusParams) (client.JobStatusResult, error) {
@@ -2024,6 +2028,7 @@ func (f *reportCorrectionRoundTripClient) JobStatus(_ context.Context, params cl
 	return client.JobStatusResult{Jobs: []client.JobStatus{{
 		JobID:              result.JobID,
 		SessionID:          result.SessionID,
+		Timeout:            result.Timeout,
 		State:              result.State,
 		CleanupDisposition: result.CleanupDisposition,
 		ModelReported:      result.ModelReported,
@@ -2043,21 +2048,6 @@ func (f *reportCorrectionRoundTripClient) JobCancel(context.Context, client.JobC
 	return client.JobCancelResult{}, errors.New("unexpected JobCancel")
 }
 
-func (f *reportCorrectionRoundTripClient) submittedTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
-	resolution, ok := f.submittedTimeoutByJobID[jobID]
-	return resolution, ok && timeoutResolutionIsResolved(resolution)
-}
-
-func (f *reportCorrectionRoundTripClient) resultTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
-	resolution, ok := f.resultTimeoutByJobID[jobID]
-	return resolution, ok && timeoutResolutionIsResolved(resolution)
-}
-
-func (f *reportCorrectionRoundTripClient) statusTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
-	resolution, ok := f.statusTimeoutByJobID[jobID]
-	return resolution, ok && timeoutResolutionIsResolved(resolution)
-}
-
 func (f *fakeAgentbusClient) Close() error { return nil }
 
 func (f *fakeAgentbusClient) HelloResult() client.HelloResult { return f.hello }
@@ -2071,7 +2061,7 @@ func (f *fakeAgentbusClient) JobSubmit(_ context.Context, params client.JobSubmi
 	if f.result.JobID != "" {
 		jobID = f.result.JobID
 	}
-	if f.submitResult.JobID != "" || f.submitResult.State != "" || f.submitResult.Deduplicated {
+	if f.submitResult.JobID != "" || f.submitResult.State != "" || f.submitResult.Deduplicated || f.submitResult.Timeout != nil {
 		submitted := f.submitResult
 		if submitted.JobID == "" {
 			submitted.JobID = jobID
@@ -2098,6 +2088,7 @@ func (f *fakeAgentbusClient) JobStatus(_ context.Context, params client.JobStatu
 	return client.JobStatusResult{Jobs: []client.JobStatus{{
 		JobID:              f.result.JobID,
 		SessionID:          f.result.SessionID,
+		Timeout:            f.result.Timeout,
 		State:              f.result.State,
 		CleanupDisposition: f.result.CleanupDisposition,
 		ModelReported:      f.result.ModelReported,
@@ -2124,18 +2115,6 @@ func (f *fakeAgentbusClient) JobCancel(_ context.Context, params client.JobCance
 		return f.cancel, nil
 	}
 	return client.JobCancelResult{}, errors.New("unexpected JobCancel")
-}
-
-func (f *fakeAgentbusClient) submittedTimeoutResolution(string) (config.DimensionResolution, bool) {
-	return f.submittedTimeout, timeoutResolutionIsResolved(f.submittedTimeout)
-}
-
-func (f *fakeAgentbusClient) resultTimeoutResolution(string) (config.DimensionResolution, bool) {
-	return f.resultTimeout, timeoutResolutionIsResolved(f.resultTimeout)
-}
-
-func (f *fakeAgentbusClient) statusTimeoutResolution(string) (config.DimensionResolution, bool) {
-	return f.statusTimeout, timeoutResolutionIsResolved(f.statusTimeout)
 }
 
 func compliantReport() string {
