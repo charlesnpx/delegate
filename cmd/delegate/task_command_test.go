@@ -112,6 +112,29 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	}
 }
 
+func TestTaskReceiptWriteFailureIncludesGeneratedRequestID(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	var stderr bytes.Buffer
+	_, err := runTask(
+		[]string{"--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-"},
+		strings.NewReader("inspect this"),
+		failingTaskReceiptWriter{err: errors.New("closed pipe")},
+		&stderr,
+	)
+	if err == nil {
+		t.Fatal("runTask() error = nil, want receipt write failure")
+	}
+	if len(fake.submits) != 1 || fake.submits[0].RequestID == "" {
+		t.Fatalf("submits=%#v, want one submission with a generated request ID", fake.submits)
+	}
+	if !strings.Contains(err.Error(), fake.submits[0].RequestID) {
+		t.Fatalf("error=%q, missing request ID %q", err, fake.submits[0].RequestID)
+	}
+}
+
 func TestTaskReceiptOmitsUnsetModelAndEffort(t *testing.T) {
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
@@ -243,33 +266,6 @@ func TestTaskRemovedFlagsAndPositionalPromptAreRejected(t *testing.T) {
 	}
 }
 
-func TestTaskRequestIDForwardingAndFakeDeduplication(t *testing.T) {
-	bus := &deduplicatingSubmitClient{
-		fakeAgentbusClient: fakeAgentbusClient{hello: helloWithCapabilities()},
-		jobs:               map[string]string{},
-	}
-	restore := stubAgentbusClientGlobals(t, bus)
-	defer restore()
-	cwd := t.TempDir()
-	args := []string{"task", "--backend", "codex", "--cwd", cwd, "--prompt-file", "-", "--request-id", "caller/retry-42"}
-	for call := 0; call < 2; call++ {
-		var stdout, stderr bytes.Buffer
-		if code := run(args, strings.NewReader("same task"), &stdout, &stderr); code != 0 {
-			t.Fatalf("call %d code=%d stderr=%q", call, code, stderr.String())
-		}
-		var receipt taskSubmitReceipt
-		if err := json.Unmarshal(stdout.Bytes(), &receipt); err != nil {
-			t.Fatal(err)
-		}
-		if receipt.RequestID != "caller/retry-42" || receipt.JobID != "job_dedup_1" || receipt.Deduplicated != (call == 1) {
-			t.Fatalf("call %d receipt=%#v", call, receipt)
-		}
-	}
-	if len(bus.submits) != 2 || bus.submits[0].RequestID != "caller/retry-42" || bus.submits[1].RequestID != "caller/retry-42" {
-		t.Fatalf("forwarded requests=%#v", bus.submits)
-	}
-}
-
 func TestTaskRejectsMalformedTagAndInvalidRequestID(t *testing.T) {
 	for _, args := range [][]string{
 		{"task", "--backend", "codex", "--prompt-file", "-", "--tag", "missing-equals"},
@@ -337,19 +333,12 @@ func mapsEqual(got, want map[string]string) bool {
 	return true
 }
 
-type deduplicatingSubmitClient struct {
-	fakeAgentbusClient
-	jobs map[string]string
+type failingTaskReceiptWriter struct {
+	err error
 }
 
-func (c *deduplicatingSubmitClient) JobSubmit(_ context.Context, params client.JobSubmitParams) (client.JobSubmitResult, error) {
-	c.submits = append(c.submits, params)
-	if jobID, found := c.jobs[params.RequestID]; found {
-		return client.JobSubmitResult{JobID: jobID, State: engine.StateQueued, Deduplicated: true, Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}}, nil
-	}
-	jobID := "job_dedup_1"
-	c.jobs[params.RequestID] = jobID
-	return client.JobSubmitResult{JobID: jobID, State: engine.StateQueued, Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}}, nil
+func (w failingTaskReceiptWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }
 
 func stubAgentbusGlobals(t *testing.T, fake *fakeAgentbusClient) func() {

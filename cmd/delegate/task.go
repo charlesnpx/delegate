@@ -142,7 +142,7 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 	}
 	defer func() { _ = c.Close() }()
 
-	return 0, writeJSONLine(stdout, taskSubmitReceipt{
+	if err := writeJSONLine(stdout, taskSubmitReceipt{
 		RequestID:    opts.RequestID,
 		JobID:        submitted.JobID,
 		State:        submitted.State,
@@ -150,7 +150,10 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 		Model:        opts.Model,
 		Effort:       opts.Effort,
 		Timeout:      taskSubmitTimeoutFromAgentbus(submitted.Timeout),
-	})
+	}); err != nil {
+		return 0, submissionError(opts.RequestID, err)
+	}
+	return 0, nil
 }
 
 func taskSubmitTimeoutFromAgentbus(timeout *engine.TimeoutResolution) *taskSubmitTimeout {
@@ -279,6 +282,20 @@ func submissionError(requestID string, err error) error {
 	return fmt.Errorf("submission failed for requestId %s: %w", requestID, err)
 }
 
+// submissionUnresolvedError marks a JobSubmit failure whose request may have
+// been accepted by Agentbus before its acknowledgement was lost.
+type submissionUnresolvedError struct {
+	Err error
+}
+
+func (err submissionUnresolvedError) Error() string {
+	return err.Err.Error()
+}
+
+func (err submissionUnresolvedError) Unwrap() error {
+	return err.Err
+}
+
 // submitTask is the one-shot Agentbus admission primitive shared by task and
 // review. It deliberately does no retry, polling, persistence, or cleanup.
 func submitTask(ctx context.Context, opts *taskOptions, prompt string, turnPolicy *engine.TurnPolicy) (client.JobSubmitResult, agentbusClient, client.HelloResult, error) {
@@ -321,7 +338,7 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, turnPolic
 	submitted, err := c.JobSubmit(ctx, params)
 	if err != nil {
 		_ = c.Close()
-		return client.JobSubmitResult{}, nil, client.HelloResult{}, submissionError(opts.RequestID, agentbusOperationError(err))
+		return client.JobSubmitResult{}, nil, client.HelloResult{}, submissionError(opts.RequestID, submissionUnresolvedError{Err: agentbusOperationError(err)})
 	}
 	opts.AgentbusStateRoot = stateRoot
 	opts.WorkspaceKey = workspaceKey

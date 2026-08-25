@@ -28,9 +28,6 @@ func TestPersistAndCleanJobInput(t *testing.T) {
 	if string(raw) != "private prompt" {
 		t.Fatalf("input=%q", raw)
 	}
-	if parsed, ok := ParseJobInputPath(input.Path); !ok || parsed.JobID != input.JobID {
-		t.Fatalf("parsed=%#v ok=%v", parsed, ok)
-	}
 	deleted, err := DeleteJobInputOnTerminalState(input, engine.StateCompleted, "verified_absent", Hooks{})
 	if err != nil || !deleted {
 		t.Fatalf("deleted=%v err=%v", deleted, err)

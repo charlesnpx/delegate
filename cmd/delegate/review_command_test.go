@@ -121,6 +121,31 @@ func TestReviewCommandsRejectRemovedContractFlags(t *testing.T) {
 	}
 }
 
+func TestReviewAmbiguousSubmissionFailureKeepsWorkspace(t *testing.T) {
+	repo := newCommandGitFixture(t)
+	writeCommandFixture(t, repo, "visible.txt", "change\n")
+	fake := &fakeAgentbusClient{
+		hello:     helloWithCapabilities(),
+		submitErr: errors.New("lost submission acknowledgement"),
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--json"}, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("review code=%d stdout=%q stderr=%q, want submission failure", code, stdout.String(), stderr.String())
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("JobSubmit calls=%d, want 1", len(fake.submits))
+	}
+	workspace := fake.submits[0].TaskSpec.CWD
+	if info, err := os.Stat(workspace); err != nil || !info.IsDir() {
+		t.Fatalf("ambiguous submission removed review workspace: info=%v err=%v", info, err)
+	}
+}
+
 func TestReviewWaitCleanupUsesStatusDispositionWhenResultOmitsIt(t *testing.T) {
 	repo := newCommandGitFixture(t)
 	writeCommandFixture(t, repo, "visible.txt", "change\n")

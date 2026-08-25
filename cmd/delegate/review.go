@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -79,6 +80,9 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		ownsWorkspace = false
 	}
 	if err != nil {
+		if submissionErrorPreservesReviewWorkspace(err) {
+			ownsWorkspace = false
+		}
 		return agentbusCommandErrorResult(opts.JSON, stdout, err)
 	}
 	if result.Launch != nil {
@@ -160,4 +164,9 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 		opts.CWD = cwd
 	}
 	return opts, nil
+}
+
+func submissionErrorPreservesReviewWorkspace(err error) bool {
+	var unresolved submissionUnresolvedError
+	return errors.As(err, &unresolved)
 }
