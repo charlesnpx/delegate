@@ -30,6 +30,9 @@ func TestTargetMatrices(t *testing.T) {
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("TargetNames(%q) = %#v, want %#v", tc.target, got, tc.want)
 			}
+			if len(got) != 13 {
+				t.Fatalf("TargetNames(%q) count = %d, want 13", tc.target, len(got))
+			}
 		})
 	}
 	claude, err := Generate(TargetClaude)
@@ -61,7 +64,6 @@ func expectedSkillNames() []string {
 		"delegate:status",
 		"delegate:result",
 		"delegate:cancel",
-		"delegate:setup",
 		"delegate:config",
 	}
 }
@@ -160,17 +162,6 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				requireNonBlockingWaitGuidance(t, skill)
 			}
 			requireMonitoringGuidance(t, skill)
-		case KindSetup:
-			requireFragments(t, skill, []string{
-				"delegate setup --json",
-				"admission.strictContainment",
-				"agentbusAutostartLockRoot",
-				"pendingSubmissionIntentCount",
-				"pendingSubmissionIntents",
-				"ageSeconds",
-				"stale",
-				"unresolvedCleanupArtifactCount",
-			})
 		case KindConfig:
 			requireFragments(t, skill, []string{
 				"delegate config list --json",

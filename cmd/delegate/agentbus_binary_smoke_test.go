@@ -7,7 +7,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,8 +31,7 @@ func TestAgentbusPinnedBinaryIntegrationSmoke(t *testing.T) {
 	stateRoot := filepath.Join(base, "agentbus")
 	delegateState := filepath.Join(base, "state")
 	codexHome := filepath.Join(base, "codex-home")
-	workspace := filepath.Join(base, "workspace")
-	for _, dir := range []string{binDir, stateRoot, delegateState, codexHome, workspace} {
+	for _, dir := range []string{binDir, stateRoot, delegateState, codexHome} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -76,43 +74,22 @@ func TestAgentbusPinnedBinaryIntegrationSmoke(t *testing.T) {
 	})
 	waitForSmokeAgentbusReady(t, stateRoot, serveDone, &serveStdout, &serveStderr)
 
-	restore := useRealAgentbusBinaryForDelegate(t, agentbusPath)
-	defer restore()
-	t.Setenv("AGENTBUS_STATE_ROOT", stateRoot)
-	t.Setenv("XDG_STATE_HOME", delegateState)
-	t.Setenv("CODEX_HOME", codexHome)
-	t.Setenv("PATH", smokePath)
-
-	// Prove the capability-negotiation path that regressed: the compat fix is about
-	// delegate NOT rejecting the normal managed path at connect/Hello time, which
-	// happens before any backend turn. `delegate setup` runs the exact
-	// setupRequiredCapabilities gate against the real pinned binary. It must report
-	// ready with capabilities OK even though the pinned agentbus advertises
-	// policy.shape=false — the failure mode this whole fix addresses. This is
-	// deliberately backend-turn-free so it is independent of the codex app-server
-	// protocol and of result-handoff behavior.
-	_ = workspace
-	var setupOut, setupErr bytes.Buffer
-	code := run([]string{"setup", "--json"}, nil, &setupOut, &setupErr)
-	if code != 0 {
-		t.Fatalf("delegate setup against pinned agentbus failed with code %d stdout=%q stderr=%q serveStderr=%q", code, setupOut.String(), setupErr.String(), serveStderr.String())
+	// The default task-policy tests assert that Delegate does not require
+	// policy.shape. This smoke verifies that the pinned Agentbus daemon advertises
+	// strict containment while retaining policy.shape=false.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	smokeClient, err := client.Connect(ctx, client.Options{StateRoot: stateRoot, DisableAutoStart: true})
+	if err != nil {
+		t.Fatalf("connect to pinned agentbus %s from %s: %v; serveStderr=%q", agentbusPath, source, err, serveStderr.String())
 	}
-	var setup setupJSON
-	if err := json.Unmarshal(bytes.TrimSpace(setupOut.Bytes()), &setup); err != nil {
-		t.Fatalf("setup JSON invalid: %v; raw=%q", err, setupOut.String())
+	t.Cleanup(func() { _ = smokeClient.Close() })
+	hello := smokeClient.HelloResult()
+	if !hello.Capabilities["admission.strictContainment"] {
+		t.Fatalf("pinned agentbus capabilities=%#v, want admission.strictContainment", hello.Capabilities)
 	}
-	if !setup.AdmissionStrictContainment || !setup.Agentbus.CapabilitiesOK {
-		t.Fatalf("setup=%#v, want strict containment + capabilities OK against pinned agentbus", setup)
-	}
-	// The regression was requiring policy.shape: it must not be required or missing,
-	// and the real pinned binary must advertise it as false.
-	if setup.Agentbus.Capabilities["policy.shape"] {
+	if hello.Capabilities["policy.shape"] {
 		t.Fatalf("pinned agentbus advertised policy.shape=true; want false (post-relocation build)")
-	}
-	for _, capName := range append(setup.Agentbus.Required, setup.Agentbus.Missing...) {
-		if capName == "policy.shape" {
-			t.Fatalf("policy.shape must not be required/missing; required=%#v missing=%#v", setup.Agentbus.Required, setup.Agentbus.Missing)
-		}
 	}
 	t.Logf("agentbus pinned smoke ran using %s (%s)", agentbusPath, source)
 }
@@ -193,8 +170,8 @@ func agentbusPinnedCommit(t *testing.T) string {
 
 func writeSmokeCodexCLI(t *testing.T, path string) {
 	t.Helper()
-	// A minimal codex stub is enough: the smoke asserts capability negotiation via
-	// `delegate setup` (backend discovery calls --version/--help), and runs no turn.
+	// A minimal codex stub is enough for the pinned Agentbus daemon to discover the
+	// backend without running a turn.
 	script := `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.143.0"; exit 0; fi
 if [ "$1" = "--help" ]; then echo "codex help"; exit 0; fi

@@ -25,7 +25,6 @@ const (
 	KindLaunch     = "launch"
 	KindReview     = "review"
 	KindJobControl = "job-control"
-	KindSetup      = "setup"
 	KindConfig     = "config"
 )
 
@@ -100,7 +99,6 @@ var (
 	launchTemplate = template.Must(template.New("launch").Parse(strings.TrimSpace(launchSkillTemplate) + "\n"))
 	reviewTemplate = template.Must(template.New("review").Parse(strings.TrimSpace(reviewSkillTemplate) + "\n"))
 	jobTemplate    = template.Must(template.New("job").Parse(strings.TrimSpace(jobControlSkillTemplate) + "\n"))
-	setupTemplate  = template.Must(template.New("setup").Parse(strings.TrimSpace(setupSkillTemplate) + "\n"))
 	configTemplate = template.Must(template.New("config").Parse(strings.TrimSpace(configSkillTemplate) + "\n"))
 )
 
@@ -330,7 +328,7 @@ func expandTargets(target string) ([]string, error) {
 }
 
 func namespaceSpecs(target string) []skillSpec {
-	specs := make([]skillSpec, 0, len(supportedBackends)*3+5)
+	specs := make([]skillSpec, 0, len(supportedBackends)*3+4)
 	for _, backend := range supportedBackends {
 		specs = append(specs, launchSpec(target, backend))
 	}
@@ -344,7 +342,6 @@ func namespaceSpecs(target string) []skillSpec {
 		jobSpec(target, "status", "Check a delegated job status", `delegate status --job "$JOB_ID" --json`),
 		jobSpec(target, "result", "Fetch and present a delegated job result", `delegate result --job "$JOB_ID" --json`),
 		jobSpec(target, "cancel", "Cancel a delegated job after an explicit operator decision", `delegate cancel --job "$JOB_ID" --json`),
-		setupSpec(target),
 		configSpec(target),
 	)
 	return specs
@@ -387,16 +384,6 @@ func jobSpec(target, action, description, command string) skillSpec {
 	}
 }
 
-func setupSpec(target string) skillSpec {
-	return skillSpec{
-		Name:         "delegate:setup",
-		Kind:         KindSetup,
-		Description:  "Verify delegate, agentbus, and backend availability.",
-		Command:      "delegate setup --json",
-		SourceTarget: target,
-	}
-}
-
 func configSpec(target string) skillSpec {
 	return skillSpec{
 		Name:         "delegate:config",
@@ -424,8 +411,6 @@ func render(spec skillSpec) (string, error) {
 		tmpl = reviewTemplate
 	case KindJobControl:
 		tmpl = jobTemplate
-	case KindSetup:
-		tmpl = setupTemplate
 	case KindConfig:
 		tmpl = configTemplate
 	default:
@@ -482,7 +467,7 @@ Superseding escape hatch: if the requester explicitly asks you to perform the ta
 - exec: "delegate", "agentbus", and the {{.Backend}} backend executable are runnable.
 - repo+state write access: the target repo and delegate/agentbus state roots are writable when the task needs writes.
 - stdin handoff: sensitive prompt text can be piped to "delegate handoff create --json".
-- backend reachability: "delegate setup --json --backend {{.Backend}}" shows agentbus capabilities and {{.Backend}} backend availability without unrelated backend model catalogues.
+- backend reachability: "agentbus setup --json" shows agentbus capabilities and {{.Backend}} backend availability without unrelated backend model catalogues.
 
 "delegate task" is read-only unless it has "--write". The worker sandbox is offline, and a write turn can write only inside the job "--cwd"; use it for repo-local edits/builds/tests and point "GOCACHE" and "GOMODCACHE" under that cwd. Route module downloads, other network work, and Git commits to the caller/orchestrator. The launch and terminal envelope's "backend_profile" reports the effective Agentbus sandbox mode as "read-only" or "workspace-write"; use it to route runtime gates.
 
@@ -541,7 +526,7 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 - exec: "delegate", "agentbus", "git", and the {{.Backend}} backend executable are runnable. Git is used by host-side delegate assembly only; it is not a review-worker preflight or input source.
 - repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate applies path/history redaction and a final content scan to every assembled inline or spilled diff payload.
 - cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
-- backend reachability: "delegate setup --json --backend {{.Backend}}" shows agentbus capabilities and {{.Backend}} backend availability without unrelated backend model catalogues.
+- backend reachability: "agentbus setup --json" shows agentbus capabilities and {{.Backend}} backend availability without unrelated backend model catalogues.
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
@@ -619,26 +604,6 @@ Never scan the Agentbus state root to find results — that layout is private im
 ## Operating Discipline
 
 Use repo-discipline and stuck-protocol habits: verify paths and writable state before acting, classify denied/transient/ambiguous failures, preserve evidence boundaries, and report scope boundaries.`
-
-const setupSkillTemplate = `---
-name: {{.Name}}
-description: {{.Description}}
-version: {{.Version}}
----
-
-# {{.Name}}
-
-Run:
-
-~~~bash
-{{.Command}}
-~~~
-
-Use this before launching delegated work. Confirm that "delegate" and "agentbus" are executable, agentbus reports "admission.strictContainment" plus the policy capabilities delegate requires, the intended backend is available, the repo and delegate state are writable when needed, and stdin handoff through "delegate handoff create --json" is viable. Use "delegate setup --json --backend <name>" to focus the per-backend detail on one advertised backend; global readiness fields and capabilities remain complete.
-
-Report these setup fields when they are relevant: "agentbusStateRoot", "agentbusStateRootWritable", "agentbusAutostartLockRoot", "agentbusAutostartLockRootWritable", "pendingSubmissionIntentCount", "pendingSubmissionIntents", "unresolvedCleanupArtifactCount", "admissionStrictContainment", and "ready". "pendingSubmissionIntents" contains up to 20 oldest pending intents (oldest first), each with "ageSeconds" and "stale"; "ageSeconds" is derived from "created_at", while a later "updated_at" is reported and used as the staleness basis. Use "stale" and "ageSeconds" before deciding whether recovery is appropriate; reporting staleness neither expires an intent nor changes "ready". Its request IDs can be passed to "delegate task --recover-request <request_id> --json". "pendingSubmissionIntentCount" remains the authoritative total when that array is capped. A nonzero "unresolvedCleanupArtifactCount" means Delegate retained local artifacts because Agentbus did not prove backend absence.
-
-If setup fails, report the failing prerequisite and stop. Do not improvise alternate auth, install, or execution flows.`
 
 const configSkillTemplate = `---
 name: {{.Name}}

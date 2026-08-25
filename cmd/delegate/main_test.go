@@ -90,6 +90,25 @@ func TestRunUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestRunSetupIsUnknownAndAbsentFromHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"setup"}, nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("run(setup) code = %d, want 2; stderr=%q", code, stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte(`unknown command "setup"`)) {
+		t.Fatalf("stderr = %q, want unknown setup command", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"--help"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("run(--help) code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if bytes.Contains(stdout.Bytes(), []byte("setup")) {
+		t.Fatalf("help = %q, must not list setup", stdout.String())
+	}
+}
+
 func TestRunHandoffCreateRejectsPositional(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"handoff", "create", "--json", "extra"}, nil, &stdout, &stderr)

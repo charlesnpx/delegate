@@ -13,7 +13,6 @@ mise-en-place install agentbus
 mise-en-place install delegate
 
 agentbus setup --json
-delegate setup --json
 ```
 
 The delegated installers build from source, so Go must be on `PATH`. `delegate` installs its binary in `~/.local/bin` and its managed skills for the selected target. The installer reports the prerequisite explicitly in its JSON plan:
@@ -24,7 +23,7 @@ The delegated installers build from source, so Go must be on `PATH`. `delegate` 
 ./install-skill.sh --uninstall --target all --json --install-root /tmp/delegate-stage
 ```
 
-`agentbus` must be installed before using delegate skills; installing it first also ensures that `delegate setup --json` can discover its binary and validate required capabilities.
+`agentbus` must be installed before using delegate skills; run `agentbus setup --json` to validate its available backends and capabilities before delegating work.
 
 On a live Codex install, delegate minimally updates `${CODEX_HOME:-~/.codex}/config.toml` so the default `workspace-write` sandbox can write the resolved Agentbus state root, the narrow Agentbus cache subtree used for autostart locks, and the Delegate state root. It adds only missing values under `[sandbox_workspace_write].writable_roots`, preserving unrelated TOML text and comments. The Agentbus state root is `AGENTBUS_STATE_ROOT` when set, otherwise `${XDG_STATE_HOME:-~/.local/state}/agentbus`; the cache root is `<UserCacheDir>/agentbus`, not the whole user cache; the Delegate state root is `${XDG_STATE_HOME:-~/.local/state}/delegate`. `--plan` reports the intended change without writing it; staged `--install-root` invocations do not touch the live Codex config. Uninstall intentionally leaves these security settings in place rather than trying to remove possibly user-managed entries.
 
@@ -32,7 +31,6 @@ On a live Codex install, delegate minimally updates `${CODEX_HOME:-~/.codex}/con
 
 ```text
 delegate version [--json]
-delegate setup [--json] [--backend <name>]
 delegate install-skills [--plan|--install|--uninstall] [--target claude|codex|all] [--json] [--install-root <abs>]
 
 delegate handoff create --json
@@ -110,8 +108,8 @@ The source directories escape `:` as `__colon__`; the installer decodes the name
 
 | Installed for | Skill names | Purpose |
 | --- | --- | --- |
-| Claude Code (`~/.claude/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor`, `delegate:status`, `delegate:result`, `delegate:cancel`, `delegate:setup`, `delegate:config` | Launch any managed backend (claude, codex, cursor) and control any delegated job. |
-| Codex (`${CODEX_HOME:-~/.codex}/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor`, `delegate:status`, `delegate:result`, `delegate:cancel`, `delegate:setup`, `delegate:config` | Launch any managed backend (claude, codex, cursor) and control any delegated job. |
+| Claude Code (`~/.claude/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor`, `delegate:status`, `delegate:result`, `delegate:cancel`, `delegate:config` | Launch any managed backend (claude, codex, cursor) and control any delegated job. |
+| Codex (`${CODEX_HOME:-~/.codex}/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor`, `delegate:status`, `delegate:result`, `delegate:cancel`, `delegate:config` | Launch any managed backend (claude, codex, cursor) and control any delegated job. |
 
 Launch skills preflight shared filesystem and state access, no-fork execution, agentbus capabilities, and target-backend reachability. Rescue skills launch through `delegate task`; review skills launch through the sanitized `delegate review` commands. All return the launch envelope verbatim and never add `--no-contract`. Job-control skills use the same status, result, cancellation, evidence-preservation, and no-substitute-answer discipline. Review prose requires findings ordered by severity, preservation of evidence labels, and no automatic fixes after review.
 
@@ -129,7 +127,7 @@ v0.8.1 retains the breaking namespace rename. On install or upgrade, the managed
 
 ## State Roots And Recovery
 
-Delegate resolves Agentbus state with the same rule for setup, launch, recovery, status, result, cancel, and Codex sandbox configuration: `AGENTBUS_STATE_ROOT` when set, otherwise `${XDG_STATE_HOME:-~/.local/state}/agentbus`. The resolved root is persisted in submission intents and acknowledged job metadata. `delegate task --recover-request <request-id>` reconnects to the request's recorded root and resubmits the exact persisted `job.submit` parameters; it does not reconstruct prompts, timeouts, policy, model, effort, or tags from current flags.
+Delegate resolves Agentbus state with the same rule for launch, recovery, status, result, cancel, and Codex sandbox configuration: `AGENTBUS_STATE_ROOT` when set, otherwise `${XDG_STATE_HOME:-~/.local/state}/agentbus`. The resolved root is persisted in submission intents and acknowledged job metadata. `delegate task --recover-request <request-id>` reconnects to the request's recorded root and resubmits the exact persisted `job.submit` parameters; it does not reconstruct prompts, timeouts, policy, model, effort, or tags from current flags.
 
 `status`, `result`, and `cancel` use the job metadata's recorded Agentbus root when available and otherwise use the current resolved root. Running `delegate status` without `--job` lists all jobs from only the current resolved root. Delegate never scans arbitrary roots and never performs Agentbus admission recovery, reset, seal, or fail-stop clearing automatically.
 
@@ -212,19 +210,7 @@ Agentbus reports terminal outcome and cleanup proof separately. Delegate removes
 
 ## Setup And Monitoring
 
-`delegate setup --json` reports:
-
-- Agentbus discovery (`found`, path, version, protocol, advertised backends, backend metadata);
-- the full capability map, required delegate capabilities, missing capabilities, `capabilitiesOK`, and explicit `admissionStrictContainment`;
-- resolved `agentbusStateRoot` plus `agentbusStateRootWritable`;
-- resolved `agentbusAutostartLockRoot` (`<UserCacheDir>/agentbus/start-locks`) plus `agentbusAutostartLockRootWritable`;
-- `pendingSubmissionIntentCount` for the total prepared, in-flight, and blocked local submission intents, plus `pendingSubmissionIntents`: up to 20 oldest pending intents (oldest first), each with its `request_id`, phase, creation time, `ageSeconds`, `stale`, backend, and recorded origin when available. `ageSeconds` is derived from `created_at`; when a later `updated_at` exists, setup reports it and uses it as the staleness basis. The count remains authoritative when the array is capped; use `stale` and `ageSeconds` before deciding whether to recover a listed request with `delegate task --recover-request <request_id> --json`. Setup reports staleness only: it neither expires an intent nor changes `ready`;
-- `unresolvedCleanupArtifactCount` for retained terminal local artifacts whose cleanup is not proven safe;
-- `stateRootWritable`, `daemonReachable`, `ready`, and managed skill statuses.
-
-Pass `--backend <name>` to limit `agentbus.backends`, backend metadata (including model lists), and per-backend config defaults to one advertised backend. Setup still completes the full Agentbus handshake and reports all global readiness fields and capabilities. An unavailable backend name is an error; omitting the flag preserves the existing JSON exactly.
-
-Missing `admission.strictContainment` makes setup not ready and returns nonzero.
+Use `agentbus setup --json` as the preflight for Agentbus availability, backends, configuration, and sandbox diagnostics. `delegate task` reports Delegate-specific connection and backend errors directly.
 
 Launch with `--background` so the host agent loop stays free. For an outstanding job, start exactly ONE background `delegate result --job <id> --wait --json` task: a background `--wait` blocks only its small awaiter process, not a worker slot or the model. A foreground `--wait` blocks the current host tool call, so reserve it for a short, explicitly bounded terminal check. Bound long waits with `--wait-timeout <duration>`; on expiry the job keeps running and stays retrievable by id; on a timeout, re-arm one background waiter or fetch the terminal result once it is ready — do not abandon the job. Do not write shell polling loops or scan the Agentbus state root for results: that storage layout is a private implementation detail, and filesystem salvage is an operator-only emergency after a confirmed CLI defect, not a supported path.
 

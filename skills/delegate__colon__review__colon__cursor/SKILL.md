@@ -19,7 +19,7 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 - exec: "delegate", "agentbus", "git", and the cursor backend executable are runnable. Git is used by host-side delegate assembly only; it is not a review-worker preflight or input source.
 - repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate applies path/history redaction and a final content scan to every assembled inline or spilled diff payload.
 - cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
-- backend reachability: "delegate setup --json --backend cursor" shows agentbus capabilities and cursor backend availability without unrelated backend model catalogues.
+- backend reachability: "agentbus setup --json" shows agentbus capabilities and cursor backend availability without unrelated backend model catalogues.
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
