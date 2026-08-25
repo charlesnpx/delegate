@@ -471,120 +471,6 @@ func TestJSONSchemaTerminalEnvelopePreservesContractStamp(t *testing.T) {
 	}
 }
 
-func TestSetupCapabilityGateReportsMissingStrictContainment(t *testing.T) {
-	hello := helloWithCapabilities()
-	delete(hello.Capabilities, "admission.strictContainment")
-	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: hello})
-	defer restore()
-	t.Setenv("HOME", t.TempDir())
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("setup succeeded, want strict-containment capability failure")
-	}
-	var result setupJSON
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
-		t.Fatalf("setup JSON invalid: %v; raw=%q", err, stdout.String())
-	}
-	if result.Ready || result.Agentbus.CapabilitiesOK || result.AdmissionStrictContainment {
-		t.Fatalf("setup result=%#v, want not-ready strict containment failure", result)
-	}
-	if len(result.Agentbus.Missing) == 0 || result.Agentbus.Missing[0] != "admission.strictContainment" {
-		t.Fatalf("missing capabilities=%#v, want strict containment first", result.Agentbus.Missing)
-	}
-	want := "agentbus " + minimumSupportedAgentbusVersion + " lacks capability `admission.strictContainment`; run mise-en-place install agentbus"
-	if !strings.Contains(stderr.String(), want) {
-		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
-	}
-}
-
-func TestSetupOutputIncludesReadinessFields(t *testing.T) {
-	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
-	defer restore()
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
-	setupTestPreflightDirectories(t)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"setup"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "agentbus models.reported: true") || !strings.Contains(stdout.String(), "config file:") || !strings.Contains(stdout.String(), "config overridable: true") {
-		t.Fatalf("setup stdout = %q, want model-reporting and config lines", stdout.String())
-	}
-	for _, line := range []string{"stateRootWritable: true", "agentbusStateRootWritable: true", "daemonReachable: true"} {
-		if !strings.Contains(stdout.String(), line) {
-			t.Fatalf("setup stdout = %q, want %q", stdout.String(), line)
-		}
-	}
-	for _, line := range []string{"agentbus minimum supported version: " + minimumSupportedAgentbusVersion, "agentbus version status: supported", "agentbusStateRoot:", "agentbusAutostartLockRoot:", "agentbusAutostartLockRootWritable: true", "admission.strictContainment: true", "pendingSubmissionIntentCount: 0", "unresolvedCleanupArtifactCount: 0", "ready: true"} {
-		if !strings.Contains(stdout.String(), line) {
-			t.Fatalf("setup stdout = %q, want %q", stdout.String(), line)
-		}
-	}
-}
-
-func TestSetupJSONReportsAgentbusCapabilitiesAndEverySkill(t *testing.T) {
-	restore := stubAgentbusGlobals(t, &fakeAgentbusClient{hello: helloWithCapabilities()})
-	defer restore()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("CODEX_HOME", filepath.Join(home, "codex-home"))
-	setupTestPreflightDirectories(t)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"setup", "--json"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
-	}
-	var result setupJSON
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("setup JSON invalid: %v; raw = %q", err, stdout.String())
-	}
-	if !result.Agentbus.Found || result.Agentbus.Path != "/tmp/agentbus" {
-		t.Fatalf("agentbus discovery = %#v, want found /tmp/agentbus", result.Agentbus)
-	}
-	// Setup must be ready against a post-relocation agentbus that advertises
-	// policy.shape=false: delegate owns shape validation, so that capability is not
-	// required and must not appear in the required/missing sets.
-	if !result.Agentbus.CapabilitiesOK || result.Agentbus.Capabilities["policy.shape"] {
-		t.Fatalf("agentbus capabilities = %#v, want passing with policy.shape not required", result.Agentbus)
-	}
-	for _, capName := range append(result.Agentbus.Required, result.Agentbus.Missing...) {
-		if capName == "policy.shape" {
-			t.Fatalf("policy.shape must not be required/missing; required=%#v missing=%#v", result.Agentbus.Required, result.Agentbus.Missing)
-		}
-	}
-	if !result.Agentbus.Capabilities["models.reported"] || result.Config.Path == "" || !result.Config.Overridable {
-		t.Fatalf("setup config/model capability = %#v / %#v", result.Config, result.Agentbus.Capabilities)
-	}
-	if !result.StateRootWritable || !result.AgentbusStateRootWritable || !result.DaemonReachable {
-		t.Fatalf("setup preflight fields = stateRootWritable=%t agentbusStateRootWritable=%t daemonReachable=%t, want all true", result.StateRootWritable, result.AgentbusStateRootWritable, result.DaemonReachable)
-	}
-	if result.AgentbusStateRoot == "" || result.AgentbusAutostartLockRoot == "" || !result.AgentbusAutostartLockRootWritable || !result.AdmissionStrictContainment || !result.Ready {
-		t.Fatalf("setup D8 fields = root:%q lock:%q lockWritable:%t strict:%t ready:%t", result.AgentbusStateRoot, result.AgentbusAutostartLockRoot, result.AgentbusAutostartLockRootWritable, result.AdmissionStrictContainment, result.Ready)
-	}
-	if result.PendingSubmissionIntentCount == nil || *result.PendingSubmissionIntentCount != 0 || len(result.PendingSubmissionIntents) != 0 || result.UnresolvedCleanupArtifactCount == nil || *result.UnresolvedCleanupArtifactCount != 0 {
-		t.Fatalf("setup pending=%v summaries=%#v unresolved=%v, want clean state", result.PendingSubmissionIntentCount, result.PendingSubmissionIntents, result.UnresolvedCleanupArtifactCount)
-	}
-	if result.PendingSubmissionIntents == nil {
-		t.Fatalf("pendingSubmissionIntents is null, want an empty JSON array for a clean state")
-	}
-	if len(result.Skills) != 28 {
-		t.Fatalf("skill statuses = %d, want 28: %#v", len(result.Skills), result.Skills)
-	}
-	for _, skill := range result.Skills {
-		if skill.Target == "" || skill.Name == "" || skill.Path == "" {
-			t.Fatalf("incomplete skill status: %#v", skill)
-		}
-		if skill.Status != "missing" {
-			t.Fatalf("skill status = %#v, want missing in temporary HOME", skill)
-		}
-	}
-}
-
 func TestTaskPolicyTierWiring(t *testing.T) {
 	schema := `{"type":"object","required":["schema_version"],"properties":{"schema_version":{"const":"1"}}}`
 	for _, tc := range []struct {
@@ -1878,7 +1764,7 @@ func stubAgentbusGlobals(t *testing.T, fake *fakeAgentbusClient) func() {
 func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	setupTestPreflightEnvironment(t)
+	stubAgentbusTestEnvironment(t)
 	oldConnect := connectAgentbus
 	oldLookPath := lookPath
 	oldCommandOutput := commandOutput
@@ -1898,54 +1784,16 @@ func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 	}
 }
 
-// setupTestPreflightEnvironment pins every environment input that setup's
-// state and lock-root resolution can consume. The lock root differs by OS:
+// stubAgentbusTestEnvironment pins environment inputs used by fake-Agentbus
+// command tests. The lock root differs by OS:
 // os.UserCacheDir uses HOME/Library/Caches on Darwin and XDG_CACHE_HOME on
 // Unix, so both HOME and XDG_CACHE_HOME must be isolated.
-func setupTestPreflightEnvironment(t *testing.T) {
+func stubAgentbusTestEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("AGENTBUS_STATE_ROOT", "")
-}
-
-// setupTestPreflightDirectories models the pre-existing autostart behavior of
-// a successful agentbus connection: setup connects before evaluating the
-// preflight fields, so the daemon has already created its state and lock roots.
-// Missing-path behavior is covered separately without a daemon.
-func setupTestPreflightDirectories(t *testing.T) {
-	t.Helper()
-	for _, path := range setupTestPreflightPaths(t) {
-		if _, err := os.Lstat(path); err == nil {
-			continue
-		} else if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("inspect fake-agentbus preflight path %q: %v", path, err)
-		}
-		if err := os.MkdirAll(path, 0o700); err != nil {
-			t.Fatalf("create fake-agentbus preflight directory %q: %v", path, err)
-		}
-	}
-}
-
-// setupTestPreflightPaths resolves the same directories production setup will
-// probe. Tests must use these resolved paths rather than hard-coding one OS's
-// cache layout.
-func setupTestPreflightPaths(t *testing.T) []string {
-	t.Helper()
-	paths := make([]string, 0, 3)
-	for _, resolve := range []func() (string, error){
-		resolveAgentbusStateRoot,
-		func() (string, error) { return handoff.ResolveStateDir(handoff.StateConfig{}) },
-		resolveAgentbusAutostartLockRoot,
-	} {
-		path, err := resolve()
-		if err != nil {
-			t.Fatalf("resolve fake-agentbus preflight path: %v", err)
-		}
-		paths = append(paths, path)
-	}
-	return paths
 }
 
 func agentbusVersionFixtureOutput(version string) string {

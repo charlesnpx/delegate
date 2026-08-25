@@ -30,6 +30,9 @@ func TestTargetMatrices(t *testing.T) {
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("TargetNames(%q) = %#v, want %#v", tc.target, got, tc.want)
 			}
+			if len(got) != 13 {
+				t.Fatalf("TargetNames(%q) count = %d, want 13", tc.target, len(got))
+			}
 		})
 	}
 	claude, err := Generate(TargetClaude)
@@ -61,7 +64,6 @@ func expectedSkillNames() []string {
 		"delegate:status",
 		"delegate:result",
 		"delegate:cancel",
-		"delegate:setup",
 		"delegate:config",
 	}
 }
@@ -94,7 +96,7 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"single-use",
 				"create a new handoff file before a relaunch",
 				"stdin handoff",
-				"backend reachability",
+				"per-launch gate",
 				"delegate handoff create --json",
 				`--cwd "$PWD"`,
 				`--handoff-prompt-file "$HANDOFF_PATH"`,
@@ -116,7 +118,7 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				"Review commands never pass \"--write\"",
 				"cannot create a build/temp directory, compile, or run tests",
 				"caller must execute runtime verification",
-				"backend reachability",
+				"Delegate submission gate",
 				`--cwd "$PWD"`,
 				"Return the launch envelope verbatim",
 				"findings first",
@@ -160,17 +162,6 @@ func TestGeneratedSkillRequirements(t *testing.T) {
 				requireNonBlockingWaitGuidance(t, skill)
 			}
 			requireMonitoringGuidance(t, skill)
-		case KindSetup:
-			requireFragments(t, skill, []string{
-				"delegate setup --json",
-				"admission.strictContainment",
-				"agentbusAutostartLockRoot",
-				"pendingSubmissionIntentCount",
-				"pendingSubmissionIntents",
-				"ageSeconds",
-				"stale",
-				"unresolvedCleanupArtifactCount",
-			})
 		case KindConfig:
 			requireFragments(t, skill, []string{
 				"delegate config list --json",

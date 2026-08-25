@@ -62,15 +62,6 @@ func TestRequiredCapabilitiesForNoContractPolicy(t *testing.T) {
 	}
 }
 
-// TestSetupRequiredCapabilitiesOmitsShape proves delegate setup reports readiness
-// against an agentbus that does not advertise policy.shape.
-func TestSetupRequiredCapabilitiesOmitsShape(t *testing.T) {
-	required := setupRequiredCapabilities()
-	if len(required) != 1 || required[0] != "admission.strictContainment" {
-		t.Fatalf("setup required = %#v, want only admission.strictContainment", required)
-	}
-}
-
 // TestRetryPolicyRequiresRetryCapability guards the retry branch directly.
 func TestRetryPolicyRequiresRetryCapability(t *testing.T) {
 	turnPolicy := &engine.TurnPolicy{Retry: &engine.RetryPolicy{Max: 1}}

@@ -26,9 +26,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return finishCommand(runVersion(args[1:], stdout, stderr), nil, stderr)
 	}
 	switch args[0] {
-	case "setup":
-		code, err := runSetup(args[1:], stdout, stderr)
-		return finishCommand(code, err, stderr)
 	case "config":
 		code, err := runConfig(args[1:], stdout, stderr)
 		return finishCommand(code, err, stderr)
@@ -78,8 +75,6 @@ func printUsage(w io.Writer) {
 
 commands:
   version         print the delegate version (also: --version, -version, -V)
-  setup [--json] [--backend <name>]
-                  verify delegate, agentbus, backends, config, and skills
   config          list/get/set/unset user model and effort defaults
   task            run one backend turn (foreground or --background)
   review          delegate a sanitized code review

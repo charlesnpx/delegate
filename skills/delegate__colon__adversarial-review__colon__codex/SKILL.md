@@ -19,7 +19,10 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 - exec: "delegate", "agentbus", "git", and the codex backend executable are runnable. Git is used by host-side delegate assembly only; it is not a review-worker preflight or input source.
 - repo+state access: delegate can read the target Git repository and write its private state root for sanitized review artifacts. Delegate applies path/history redaction and a final content scan to every assembled inline or spilled diff payload.
 - cwd: resolve and forward the parent repository path as an absolute, quoted "--cwd" value.
-- backend reachability: "delegate setup --json --backend codex" shows agentbus capabilities and codex backend availability without unrelated backend model catalogues.
+
+"agentbus setup --json" is a one-time, installation-time check that every configured backend is usable, not a per-launch prerequisite. It covers all configured backends together and fails if any of them fails, so a failure does not by itself mean the selected codex backend is unusable.
+
+"delegate task" itself enforces the selected backend and required Agentbus capabilities at submission time; this review command uses the same Delegate submission gate. A launch failure reports its own connection or backend error directly.
 
 The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
 
