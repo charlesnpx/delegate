@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
-	"strings"
+	"unicode/utf8"
 )
 
 const workspaceKeyPrefix = "delegate-v1-"
@@ -22,14 +22,13 @@ func randomRequestID() (string, error) {
 }
 
 func validateRequestID(requestID string) error {
-	if !strings.HasPrefix(requestID, "delegate-") || len(requestID) < len("delegate-")+32 || len(requestID) > 160 {
+	if requestID == "" || len(requestID) > 256 || !utf8.ValidString(requestID) {
 		return fmt.Errorf("invalid request id %q", requestID)
 	}
 	for _, r := range requestID {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
-			continue
+		if r <= ' ' || r == 0x7f {
+			return fmt.Errorf("invalid request id %q", requestID)
 		}
-		return fmt.Errorf("invalid request id %q", requestID)
 	}
 	return nil
 }

@@ -132,40 +132,6 @@ func TestConnectAgentbusCommandPassesResolvedStateRoot(t *testing.T) {
 	}
 }
 
-func TestAcknowledgedJobMetadataRecordsAgentbusStateRoot(t *testing.T) {
-	tmp := t.TempDir()
-	rootRaw := filepath.Join(tmp, "agentbus")
-	if err := os.Mkdir(rootRaw, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("AGENTBUS_STATE_ROOT", rootRaw)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(tmp, "xdg-state"))
-	root, err := canonicalizeAgentbusStateRoot("test root", rootRaw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fake := &fakeAgentbusClient{
-		hello:  helloWithCapabilities(),
-		result: client.JobResult{JobID: "job_metadata_root", State: engine.StateRunning},
-	}
-	restore := stubAgentbusGlobals(t, fake)
-	defer restore()
-	t.Setenv("AGENTBUS_STATE_ROOT", rootRaw)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "record root", "--background", "--json"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("task code = %d, stderr = %q", code, stderr.String())
-	}
-	meta, found, err := loadJobMetadata("", "job_metadata_root")
-	if err != nil || !found {
-		t.Fatalf("load metadata found=%v err=%v", found, err)
-	}
-	if meta.AgentbusStateRoot != root {
-		t.Fatalf("metadata AgentbusStateRoot = %q, want %q", meta.AgentbusStateRoot, root)
-	}
-}
-
 func TestStatusRoutingUsesRecordedRootForJobAndCurrentRootForAll(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

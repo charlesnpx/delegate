@@ -21,7 +21,7 @@ const (
 type JobInputOptions struct {
 	StateDir string
 	JobID    string
-	Prompt   ResolvedPrompt
+	Prompt   string
 	Hooks    Hooks
 }
 
@@ -74,7 +74,7 @@ func PersistJobInput(opts JobInputOptions) (JobInput, error) {
 	if err := os.Chmod(path, fileMode); err != nil {
 		return JobInput{}, err
 	}
-	if _, err := file.WriteString(opts.Prompt.Prompt); err != nil {
+	if _, err := file.WriteString(opts.Prompt); err != nil {
 		return JobInput{}, err
 	}
 	if err := syncFile(file, path, opts.Hooks); err != nil {
@@ -85,15 +85,6 @@ func PersistJobInput(opts JobInputOptions) (JobInput, error) {
 	}
 	if err := syncDir(stateDir, opts.Hooks); err != nil {
 		return JobInput{}, err
-	}
-	if opts.Prompt.Source == SourceHandoffPromptFile && opts.Prompt.HandoffPath != "" {
-		handoffPath, err := validateHandoffPromptFile(opts.Prompt.HandoffPath, stateDir)
-		if err != nil {
-			return JobInput{}, err
-		}
-		if _, err := removeFile(handoffPath, opts.Hooks); err != nil {
-			return JobInput{}, err
-		}
 	}
 	cleanup = false
 	return input, nil

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,81 +39,17 @@ type agentbusClient interface {
 	JobCancel(context.Context, client.JobCancelParams) (client.JobCancelResult, error)
 }
 
-type backendValueValidation struct {
-	ModelUnadvertised  bool
-	EffortUnadvertised bool
-}
-
-func validateBackend(hello client.HelloResult, backend, model, effort string, stderr io.Writer) error {
-	_, err := validateBackendValues(hello, backend, model, effort, false, stderr)
-	return err
-}
-
-func validateBackendValues(hello client.HelloResult, backend, model, effort string, strictModel bool, stderr io.Writer) (backendValueValidation, error) {
+// validateBackend checks only that Agentbus advertised the selected backend.
+// Model and effort are caller values that Agentbus/the backend owns.
+func validateBackend(hello client.HelloResult, backend string) error {
 	available := append([]string(nil), hello.Backends...)
 	sort.Strings(available)
-	found := false
 	for _, name := range available {
 		if name == backend {
-			found = true
-			break
+			return nil
 		}
 	}
-	if !found {
-		return backendValueValidation{}, fmt.Errorf("unknown backend %q; available backends: %s", backend, strings.Join(available, ", "))
-	}
-	for _, meta := range hello.BackendMetadata {
-		if meta.Name != backend {
-			continue
-		}
-		validation := backendValueValidation{
-			ModelUnadvertised:  model != "" && len(meta.Models) > 0 && !containsString(meta.Models, model),
-			EffortUnadvertised: effort != "" && len(meta.Efforts) > 0 && !containsString(meta.Efforts, effort),
-		}
-		var strictErrors []error
-		if validation.ModelUnadvertised {
-			if _, err := fmt.Fprintf(stderr, "warning: %s\n", unadvertisedBackendValueWarning("model", model, backend, meta.Models)); err != nil {
-				return backendValueValidation{}, err
-			}
-			if strictModel {
-				strictErrors = append(strictErrors, errors.New(unadvertisedBackendValueRejection("model", model, backend, meta.Models)))
-			}
-		}
-		if validation.EffortUnadvertised {
-			if _, err := fmt.Fprintf(stderr, "warning: %s\n", unadvertisedBackendValueWarning("effort", effort, backend, meta.Efforts)); err != nil {
-				return backendValueValidation{}, err
-			}
-			if strictModel {
-				strictErrors = append(strictErrors, errors.New(unadvertisedBackendValueRejection("effort", effort, backend, meta.Efforts)))
-			}
-		}
-		return validation, errors.Join(strictErrors...)
-	}
-	return backendValueValidation{}, nil
-}
-
-func unadvertisedBackendValueWarning(dimension, value, backend string, advertised []string) string {
-	return fmt.Sprintf("%s; passing through — the backend is authoritative", unadvertisedBackendValue(dimension, value, backend, advertised))
-}
-
-// unadvertisedBackendValueRejection reuses the warning's identifying half but
-// not its "passing through" clause, which would be false under --strict-model:
-// nothing is passed through, because no job is submitted.
-func unadvertisedBackendValueRejection(dimension, value, backend string, advertised []string) string {
-	return fmt.Sprintf("%s; --strict-model rejected it before submission", unadvertisedBackendValue(dimension, value, backend, advertised))
-}
-
-func unadvertisedBackendValue(dimension, value, backend string, advertised []string) string {
-	return fmt.Sprintf("%s %q is not advertised by agentbus for backend %q (advertised: %s)", dimension, value, backend, strings.Join(advertised, ", "))
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return fmt.Errorf("unknown backend %q; available backends: %s", backend, strings.Join(available, ", "))
 }
 
 var connectAgentbus = func(ctx context.Context, opts client.Options) (agentbusClient, error) {

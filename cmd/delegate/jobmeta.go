@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,12 @@ const (
 	cleanupDispositionUnresolvedWarning = "Agentbus reported cleanupDisposition=unresolved; delegate retained local job artifacts because backend absence is unproven"
 )
 
+// encodedStateFilename keeps job metadata filenames opaque while retaining the
+// stable pre-stateless-submitter layout used by status/result/cancel.
+func encodedStateFilename(value string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(value)) + ".json"
+}
+
 var (
 	deleteJobInputOnTerminalState = handoff.DeleteJobInputOnTerminalState
 	cleanupReviewWorkspace        = reviewpkg.CleanupWorkspace
@@ -59,7 +66,6 @@ type jobMetadata struct {
 	Effort             config.DimensionResolution `json:"effort,omitempty"`
 	BackendProfile     config.DimensionResolution `json:"backend_profile,omitempty"`
 	Timeout            config.DimensionResolution `json:"timeout,omitempty"`
-	Origin             *envelopeOrigin            `json:"origin,omitempty"`
 	CreatedAt          time.Time                  `json:"created_at"`
 	UpdatedAt          time.Time                  `json:"updated_at"`
 }

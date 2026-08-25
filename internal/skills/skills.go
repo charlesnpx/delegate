@@ -352,7 +352,7 @@ func launchSpec(target, backend string) skillSpec {
 		Name:         "delegate:rescue:" + backend,
 		Kind:         KindLaunch,
 		Backend:      backend,
-		Description:  fmt.Sprintf("Delegate a rescue task to %s through delegate and return the launch envelope verbatim.", backend),
+		Description:  fmt.Sprintf("Delegate a rescue task to %s through delegate and return the submit receipt verbatim.", backend),
 		SourceTarget: target,
 	}
 }
@@ -454,7 +454,7 @@ version: {{.Version}}
 
 # {{.Name}}
 
-Use this when an orchestrator should delegate a rescue task to the {{.Backend}} backend through "delegate" and return immediately with the launch envelope.
+Use this when an orchestrator should delegate a rescue task to the {{.Backend}} backend through "delegate" and return immediately with the submit receipt.
 
 ## Preflight
 
@@ -466,45 +466,38 @@ Superseding escape hatch: if the requester explicitly asks you to perform the ta
 - shared fs: the parent harness, "delegate", agentbus, and the {{.Backend}} backend can see the same repo path and delegate state.
 - exec: "delegate", "agentbus", and the {{.Backend}} backend executable are runnable.
 - repo+state write access: the target repo and delegate/agentbus state roots are writable when the task needs writes.
-- stdin handoff: sensitive prompt text can be piped to "delegate handoff create --json".
+- stdin prompt: sensitive prompt text can be piped directly to "delegate task --prompt-file -".
 
 "agentbus setup --json" is a one-time, installation-time check that every configured backend is usable, not a per-launch prerequisite. It covers all configured backends together and fails if any of them fails, so a failure does not by itself mean the selected {{.Backend}} backend is unusable.
 
 The per-launch gate is "delegate task": it enforces the selected backend and required Agentbus capabilities at submission time, and a launch failure reports its own connection or backend error directly.
 
-"delegate task" is read-only unless it has "--write". The worker sandbox is offline, and a write turn can write only inside the job "--cwd"; use it for repo-local edits/builds/tests and point "GOCACHE" and "GOMODCACHE" under that cwd. Route module downloads, other network work, and Git commits to the caller/orchestrator. The launch and terminal envelope's "backend_profile" reports the effective Agentbus sandbox mode as "read-only" or "workspace-write"; use it to route runtime gates.
+"delegate task" is read-only unless it has "--write". The worker sandbox is offline, and a write turn can write only inside the job "--cwd"; use it for repo-local edits/builds/tests and point "GOCACHE" and "GOMODCACHE" under that cwd. Route module downloads, other network work, and Git commits to the caller/orchestrator. A read-only task notice is written to stderr; the submit receipt on stdout remains JSON only.
 
-The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted. The "--timeout" flag is optional; omit it or pass "--timeout 0" to leave the deadline to the daemon default, then use the launch envelope's "timeout" field as the authoritative effective value.
+The "--model" and "--effort" flags are optional and are passed directly to Agentbus when supplied; otherwise Agentbus or the backend chooses. The "--timeout" flag is optional; omit it or pass "--timeout 0" to leave the deadline to the daemon default. The submit receipt's "timeout" field is Agentbus's authoritative effective millisecond value and source.
 
-When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id, job record, contract stamps, and read-only profile.
-
-## Parent Audit Linkage
-
-Delegate records the originating skill plus best-effort parent session identity and depth in its job tags and launch/terminal envelopes. If a harness cannot expose a parent identity through its environment, pass "--parent-client <client>" and "--parent-session <id>"; explicit values override automatic capture.
+When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id and job record.
 
 ## Launch
 
 1. Create a prompt for the delegated task. Include the acceptance criteria, repo path, current state, constraints, and what the subagent must report back.
-2. Pipe that prompt into "delegate handoff create --json" and capture the returned "handoff_path" as "HANDOFF_PATH".
-3. Spawn the no-fork delegated job exactly through the CLI:
+2. Pipe that prompt directly into the no-fork delegated job:
 
 ~~~bash
-delegate task --backend {{.Backend}} --origin {{.Name}} --cwd "$PWD" --handoff-prompt-file "$HANDOFF_PATH" --background --json
+printf '%s' "$PROMPT" | delegate task --backend {{.Backend}} --cwd "$PWD" --prompt-file - --tag "skill={{.Name}}"
 ~~~
 
-Each handoff prompt file is single-use: after the task consumes it, create a new handoff file before a relaunch of the same packet.
+When the caller has a machine-readable output schema, pass it with "--schema-file" instead of placing it in prompt prose. Violations return as "<json-pointer>: <message>", and one corrective retry runs automatically.
 
-When the caller has a machine-readable output schema, pass it with "--output-schema-file" instead of placing it in prompt prose. Violations return as "<json-pointer>: <message>", and one corrective retry runs automatically.
+Return the submit receipt verbatim. Do not wrap it in prose, rename fields, or emit non-JSON text on stdout. Its identity and lookup fields are "requestId", "jobId", "state", "deduplicated", and "timeout".
 
-Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "backend_profile", "timeout", or "result_sha256" fields.
+Automation that needs replay safety must supply "--request-id <id>" and retry the same command with the same id after an ambiguous transport result. Delegate stores no local submission state. A manual invocation without "--request-id" receives a generated id in its receipt.
 
-If submission is unresolved after Agentbus accepted or may have accepted the request, preserve the reported "request_id" and run only the exact recovery command "delegate task --recover-request <request_id> --json". Do not create a replacement request unless the user explicitly asks for a new logical task.
-
-Launch with "--background" so the host agent loop stays free. To await the job, start exactly ONE background "delegate result --job <id> --wait --json" task: a background "--wait" is the normal orchestration pattern — it blocks only its own small awaiter process, not a worker slot or the model. A FOREGROUND "--wait" ties up the current host tool call, so use a foreground "--wait" only for a short, explicitly bounded terminal check. Bound long waits with "--wait-timeout <duration>" (on expiry the job keeps running and stays retrievable by id; on a timeout, re-arm one background waiter or fetch the terminal result once it is ready — do not abandon the job). Do NOT write shell polling loops, and never locate results by scanning the Agentbus state root (for example ~/.local/state/agentbus): that storage layout is private implementation detail, and filesystem salvage is an operator-only emergency after a confirmed CLI defect, not a supported path. Use one-shot "delegate status --job <id> --json" only for on-demand progress (for example when the user asks what the job is doing). Never silently drop the job or substitute your own answer for the delegated run.
+Task submission already returns immediately. To await the job, start exactly ONE background "delegate result --job <id> --wait --json" task: a background "--wait" is the normal orchestration pattern — it blocks only its own small awaiter process, not a worker slot or the model. A FOREGROUND "--wait" ties up the current host tool call, so use a foreground "--wait" only for a short, explicitly bounded terminal check. Bound long waits with "--wait-timeout <duration>" (on expiry the job keeps running and stays retrievable by id; on a timeout, re-arm one background waiter or fetch the terminal result once it is ready — do not abandon the job). Do NOT write shell polling loops, and never locate results by scanning the Agentbus state root (for example ~/.local/state/agentbus): that storage layout is private implementation detail, and filesystem salvage is an operator-only emergency after a confirmed CLI defect, not a supported path. Use one-shot "agentbus status --job <id> --json" only for on-demand progress (for example when the user asks what the job is doing). Never silently drop the job or substitute your own answer for the delegated run.
 
 ## Result Discipline
 
-When the delegated run returns, preserve the helper's verdict, summary, findings, and next steps structure. For review-style output, present findings first and keep them ordered by severity. Preserve file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Terminal envelopes carry the same "timeout" resolution as launch envelopes and may include "cleanup_disposition" and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing. After presenting review findings, do not auto-fix; ask the user which issues to address.
+When the delegated run returns, preserve the helper's verdict, summary, findings, and next steps structure. For review-style output, present findings first and keep them ordered by severity. Preserve file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Terminal envelopes may include "timeout", "cleanup_disposition", and "local_artifacts_retained"; when cleanup is "unresolved", local artifacts were intentionally retained because backend absence is unproven, and a successful result remains successful. If the run failed or returned malformed output, show the actionable failure and stop instead of guessing. After presenting review findings, do not auto-fix; ask the user which issues to address.
 
 Use delegate-report discipline in your own handoff: score criteria, label evidence as observed/inferred/assumed, separate changed from verified, state scope boundaries, and report divergences instead of hiding them.`
 
@@ -540,10 +533,6 @@ Review commands never pass "--write" and intentionally run the backend read-only
 
 When the parent uses the same harness as the selected backend, this launches a new supervised Agentbus job rather than a native subagent. It has its own request id, job record, contract stamps, and read-only profile.
 
-## Parent Audit Linkage
-
-Delegate records the originating skill plus best-effort parent session identity and depth in its job tags and launch/terminal envelopes. If a harness cannot expose a parent identity through its environment, pass "--parent-client <client>" and "--parent-session <id>"; explicit values override automatic capture.
-
 Threat model: delegate's review context is accident prevention, not a security boundary against an adversarial repository or history. Deliberate history shuffles such as delete-and-recreate sequences intended to evade the heuristics are out of scope.
 
 Do not add "--allow-live-repo-read" unless the user explicitly requests live-repository access after being told that using the repository as backend cwd makes backend file reads easier. It does not change OS filesystem permissions.
@@ -559,12 +548,10 @@ Reading the assembled context is the first and only required step. Do not instru
 Spawn the no-fork delegated review exactly through the CLI. Add "--base" or "--scope" only when the requested review scope requires it:
 
 ~~~bash
-delegate {{.Command}} --backend {{.Backend}} --origin {{.Name}} --cwd "$PWD" --background --json
+delegate {{.Command}} --backend {{.Backend}} --cwd "$PWD" --background --json
 ~~~
 
 Return the launch envelope verbatim. Do not wrap it in prose, do not rename fields, and do not omit the "job_id", "status", "backend_profile", "timeout", or "result_sha256" fields.
-
-If submission is unresolved after Agentbus accepted or may have accepted the request, preserve the reported "request_id" and run only the exact recovery command "delegate task --recover-request <request_id> --json". Do not create a replacement request unless the user explicitly asks for a new logical review.
 
 Launch with "--background" so the host agent loop stays free. To await the job, start exactly ONE background "delegate result --job <id> --wait --json" task: a background "--wait" is the normal orchestration pattern — it blocks only its own small awaiter process, not a worker slot or the model. A FOREGROUND "--wait" ties up the current host tool call, so use a foreground "--wait" only for a short, explicitly bounded terminal check. Bound long waits with "--wait-timeout <duration>" (on expiry the job keeps running and stays retrievable by id; on a timeout, re-arm one background waiter or fetch the terminal result once it is ready — do not abandon the job). Do NOT write shell polling loops, and never locate results by scanning the Agentbus state root (for example ~/.local/state/agentbus): that storage layout is private implementation detail, and filesystem salvage is an operator-only emergency after a confirmed CLI defect, not a supported path. Use one-shot "delegate status --job <id> --json" only for on-demand progress (for example when the user asks what the job is doing). Never silently drop the job or substitute your own answer for the delegated review.
 

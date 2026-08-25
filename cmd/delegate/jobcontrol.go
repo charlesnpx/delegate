@@ -780,7 +780,6 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 	backendError := ""
 	modelEffort := config.ModelEffortResolution{}
 	backendProfile := option.BackendProfile
-	origin := option.Origin
 	if found {
 		backendError = meta.BackendError
 		modelEffort.Model = meta.Model
@@ -795,9 +794,6 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 				option.Timeout.Requested = requested
 			}
 		}
-		if meta.Origin != nil {
-			origin = *meta.Origin
-		}
 		if option.RequestID == "" {
 			option.RequestID = meta.RequestID
 		}
@@ -809,7 +805,6 @@ func terminalEnvelopeFromJobResultWithOptions(stateDir string, result client.Job
 	option.ModelEffort = modelEffort
 	option.BackendProfile = backendProfile
 	option.ModelReported = result.ModelReported
-	option.Origin = origin
 	option.CleanupDisposition = cleanupDisposition
 	option.LateFinalization = option.LateFinalization || result.LateFinalization
 	if option.FailureReason == "" {

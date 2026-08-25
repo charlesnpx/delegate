@@ -212,49 +212,12 @@ func TestWaitForJobResultSynthesizesEnvelopeInputForOrphanedTerminalState(t *tes
 	}
 }
 
-func TestValidateBackendUsesHelloDiscoveryAndMetadata(t *testing.T) {
+func TestValidateBackendUsesHelloDiscoveryOnly(t *testing.T) {
 	hello := client.HelloResult{Backends: []string{"gemini", "codex"}, BackendMetadata: []client.BackendInfo{{Name: "gemini", Models: []string{"gemini-2.5-pro"}, Efforts: []string{"high"}}}}
-	var stderr bytes.Buffer
-	known, err := validateBackendValues(hello, "gemini", "gemini-2.5-pro", "high", false, &stderr)
-	if err != nil {
+	if err := validateBackend(hello, "gemini"); err != nil {
 		t.Fatal(err)
 	}
-	if known.ModelUnadvertised || known.EffortUnadvertised {
-		t.Fatalf("known catalog validation = %#v", known)
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("known values warning = %q", stderr.String())
-	}
-	if err := validateBackend(hello, "claude", "", "", &stderr); err == nil || !strings.Contains(err.Error(), "available backends: codex, gemini") {
+	if err := validateBackend(hello, "claude"); err == nil || !strings.Contains(err.Error(), "available backends: codex, gemini") {
 		t.Fatalf("unknown backend error = %v", err)
-	}
-	stderr.Reset()
-	unadvertised, err := validateBackendValues(hello, "gemini", "wrong-model", "wrong-effort", false, &stderr)
-	if err != nil {
-		t.Fatalf("unadvertised catalog values error = %v", err)
-	}
-	if !unadvertised.ModelUnadvertised || !unadvertised.EffortUnadvertised {
-		t.Fatalf("unadvertised catalog validation = %#v", unadvertised)
-	}
-	for _, want := range []string{
-		`warning: model "wrong-model" is not advertised by agentbus for backend "gemini" (advertised: gemini-2.5-pro); passing through — the backend is authoritative`,
-		`warning: effort "wrong-effort" is not advertised by agentbus for backend "gemini" (advertised: high); passing through — the backend is authoritative`,
-	} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Fatalf("unadvertised values warning = %q, want substring %q", stderr.String(), want)
-		}
-	}
-
-	stderr.Reset()
-	emptyCatalog := client.HelloResult{Backends: []string{"gemini"}, BackendMetadata: []client.BackendInfo{{Name: "gemini"}}}
-	unknown, err := validateBackendValues(emptyCatalog, "gemini", "unadvertised-model", "unadvertised-effort", false, &stderr)
-	if err != nil {
-		t.Fatalf("empty catalog error = %v", err)
-	}
-	if unknown.ModelUnadvertised || unknown.EffortUnadvertised {
-		t.Fatalf("empty catalog validation = %#v", unknown)
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("empty catalog warning = %q", stderr.String())
 	}
 }

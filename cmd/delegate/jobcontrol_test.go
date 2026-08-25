@@ -783,43 +783,6 @@ func TestSubmittedTerminalJobStatusFallbackRequiresResultlessTerminal(t *testing
 	}
 }
 
-func TestWaitContextCancelReturnsImmediatelyAndPreservesSubmissionIntent(t *testing.T) {
-	jobID := "job_wait_context_cancel"
-	fake := &fakeAgentbusClient{
-		hello:     helloWithCapabilities(),
-		result:    client.JobResult{JobID: jobID},
-		resultErr: context.Canceled,
-	}
-	restore := stubAgentbusGlobals(t, fake)
-	defer restore()
-	oldSleep := jobPollSleep
-	sleepCalls := 0
-	jobPollSleep = func(context.Context, time.Duration) error {
-		sleepCalls++
-		return errors.New("unexpected poll sleep after context cancellation")
-	}
-	defer func() { jobPollSleep = oldSleep }()
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt", "wait context cancel", "--wait", "--json"}, nil, &stdout, &stderr)
-	if code == 0 {
-		t.Fatalf("task unexpectedly succeeded; stdout=%q stderr=%q", stdout.String(), stderr.String())
-	}
-	if sleepCalls != 0 || len(fake.results) != 1 || len(fake.statuses) != 0 {
-		t.Fatalf("poll calls sleep=%d results=%#v statuses=%#v, want immediate context return", sleepCalls, fake.results, fake.statuses)
-	}
-	intents, err := listSubmissionIntents("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(intents) != 1 {
-		t.Fatalf("submission intents=%#v, want one preserved intent", intents)
-	}
-	if intents[0].Phase != submissionPhaseAcknowledged || intents[0].JobID != jobID {
-		t.Fatalf("intent=%#v, want acknowledged preserved job %s", intents[0], jobID)
-	}
-}
-
 type jobResultStep struct {
 	result client.JobResult
 	err    error

@@ -28,15 +28,22 @@ func timeoutResolutionFromAgentbus(timeout *engine.TimeoutResolution) (config.Di
 	return resolution, true
 }
 
-func timeoutResolutionForSubmission(requested time.Duration, requestedSet bool, submitted client.JobSubmitResult) config.DimensionResolution {
+func timeoutResolutionForSubmission(requested time.Duration, submitted client.JobSubmitResult) config.DimensionResolution {
 	resolution, ok := timeoutResolutionFromAgentbus(submitted.Timeout)
 	if ok {
-		if requestedSet {
+		if requested != 0 {
 			resolution.Requested = requested.String()
 		}
 		return resolution
 	}
-	return config.DimensionResolution{Requested: requestedTimeoutValue(requested, requestedSet), Source: "unknown"}
+	return config.DimensionResolution{Requested: requestedTimeoutValue(requested), Source: "unknown"}
+}
+
+func requestedTimeoutValue(timeout time.Duration) string {
+	if timeout == 0 {
+		return ""
+	}
+	return timeout.String()
 }
 
 func timeoutEnvelopeSource(source string) (string, bool) {

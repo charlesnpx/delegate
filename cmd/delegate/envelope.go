@@ -29,7 +29,6 @@ type LaunchEnvelope struct {
 	BackendProfile config.DimensionResolution `json:"backend_profile"`
 	Timeout        config.DimensionResolution `json:"timeout"`
 	ResultSHA256   *string                    `json:"result_sha256"`
-	Origin         *envelopeOrigin            `json:"origin,omitempty"`
 }
 
 // TerminalEnvelope is the schema returned by delegate result and task --wait.
@@ -63,7 +62,6 @@ type TerminalEnvelope struct {
 	HeartbeatAt                    *time.Time                 `json:"heartbeat_at,omitempty"`
 	FinalAttemptStartedAt          *time.Time                 `json:"final_attempt_started_at,omitempty"`
 	FinalAttemptEndedAt            *time.Time                 `json:"final_attempt_ended_at,omitempty"`
-	Origin                         *envelopeOrigin            `json:"origin,omitempty"`
 }
 
 type terminalEnvelopeOptions struct {
@@ -72,7 +70,6 @@ type terminalEnvelopeOptions struct {
 	Timeout                config.DimensionResolution
 	ModelReported          string
 	ModelsReportedCapable  bool
-	Origin                 envelopeOrigin
 	RequestID              string
 	Deduplicated           bool
 	DeduplicatedSet        bool
@@ -95,7 +92,6 @@ type launchEnvelopeOptions struct {
 	ModelEffort    config.ModelEffortResolution
 	BackendProfile config.DimensionResolution
 	Timeout        config.DimensionResolution
-	Origin         envelopeOrigin
 	RequestID      string
 	Deduplicated   bool
 }
@@ -132,7 +128,6 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		HeartbeatAt                    *time.Time                 `json:"heartbeat_at,omitempty"`
 		FinalAttemptStartedAt          *time.Time                 `json:"final_attempt_started_at,omitempty"`
 		FinalAttemptEndedAt            *time.Time                 `json:"final_attempt_ended_at,omitempty"`
-		Origin                         *envelopeOrigin            `json:"origin,omitempty"`
 	}
 	return json.Marshal(terminalEnvelopeJSON{
 		Schema:                         e.Schema,
@@ -164,18 +159,12 @@ func (e TerminalEnvelope) MarshalJSON() ([]byte, error) {
 		HeartbeatAt:                    e.HeartbeatAt,
 		FinalAttemptStartedAt:          finalAttemptStartedAt,
 		FinalAttemptEndedAt:            finalAttemptEndedAt,
-		Origin:                         e.Origin,
 	})
 }
 
 func newLaunchEnvelope(jobID string, state engine.JobState, resolutions ...config.ModelEffortResolution) (LaunchEnvelope, error) {
-	return newLaunchEnvelopeWithOrigin(jobID, state, envelopeOrigin{}, resolutions...)
-}
-
-func newLaunchEnvelopeWithOrigin(jobID string, state engine.JobState, origin envelopeOrigin, resolutions ...config.ModelEffortResolution) (LaunchEnvelope, error) {
 	return newLaunchEnvelopeWithOptions(jobID, state, launchEnvelopeOptions{
 		ModelEffort: normalizedModelEffort(resolutions...),
-		Origin:      origin,
 	})
 }
 
@@ -191,7 +180,6 @@ func newLaunchEnvelopeWithOptions(jobID string, state engine.JobState, option la
 		Effort:         modelEffort.Effort,
 		BackendProfile: normalizedBackendProfile(option.BackendProfile),
 		Timeout:        normalizedTimeout(option.Timeout),
-		Origin:         envelopeOriginPointer(option.Origin),
 	}
 	return env, nil
 }
@@ -231,7 +219,6 @@ func newTerminalEnvelope(jobID string, state engine.JobState, kind string, stamp
 		FinalAttemptStartedAt:          finalAttemptStartedAt,
 		FinalAttemptEndedAt:            finalAttemptEndedAt,
 		ResultPath:                     option.ResultPath,
-		Origin:                         envelopeOriginPointer(option.Origin),
 	}
 	if resultSHA256 != "" {
 		env.ResultSHA256 = &resultSHA256
