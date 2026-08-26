@@ -32,9 +32,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "adversarial-review":
 		code, err := runReview(adversarialReviewKind, args[1:], stdout, stderr)
 		return finishCommand(code, err, stderr)
-	case "install-skills":
-		code, err := runInstallSkills(args[1:], stdout, stderr)
-		return finishCommand(code, err, stderr)
 	case "configure-codex-sandbox":
 		code, err := runConfigureCodexSandbox(args[1:], stdout, stderr)
 		return finishCommand(code, err, stderr)
@@ -56,7 +53,6 @@ commands:
   task            submit one backend turn and return its receipt
   review          delegate a sanitized code review
   adversarial-review  delegate a refute-first review
-  install-skills  plan/install/uninstall the managed skill matrices
 
 run 'delegate <command> -h' for command flags.
 `)

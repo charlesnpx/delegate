@@ -7,7 +7,6 @@ OPERATION=""
 TARGET="all"
 INSTALL_ROOT_ARG=""
 WARNINGS_JSON=""
-CODEX_HOME_IGNORED_WARNING=0
 
 die() {
   printf 'delegate installer: %s\n' "$*" >&2
@@ -169,12 +168,6 @@ codex_requested() {
   [[ "$TARGET" == "codex" || "$TARGET" == "all" ]]
 }
 
-path_inside_root() {
-  local root=$1
-  local path=$2
-  [[ "$path" == "$root" || "$path" == "$root"/* ]]
-}
-
 decode_skill_dir() {
   local name=$1
   printf '%s\n' "${name//__colon__/:}"
@@ -185,23 +178,17 @@ claude_skills_root() {
 }
 
 codex_skills_root() {
+  if [[ -n "$INSTALL_ROOT_ARG" ]]; then
+    printf '%s\n' "$ROOT/.codex/skills"
+    return
+  fi
+
   local codex_home=${CODEX_HOME:-}
   if [[ -n "$codex_home" ]]; then
     [[ "$codex_home" == /* ]] || die "CODEX_HOME must be absolute"
     codex_home=$(trim_trailing_slash "$codex_home")
-    if [[ -n "$INSTALL_ROOT_ARG" ]]; then
-      if path_inside_root "$ROOT" "$codex_home"; then
-        printf '%s\n' "$codex_home/skills"
-        return
-      fi
-      if [[ "$CODEX_HOME_IGNORED_WARNING" -eq 0 ]]; then
-        CODEX_HOME_IGNORED_WARNING=1
-        add_warning "CODEX_HOME is outside --install-root; staged codex skills use .codex under the install root"
-      fi
-    else
-      printf '%s\n' "$codex_home/skills"
-      return
-    fi
+    printf '%s\n' "$codex_home/skills"
+    return
   fi
   printf '%s\n' "$ROOT/.codex/skills"
 }
@@ -210,7 +197,7 @@ set_skill_dirs_for_target() {
   local target=$1
   case "$target" in
     claude|codex)
-      SKILL_DIRS=(delegate__colon__rescue__colon__claude delegate__colon__rescue__colon__codex delegate__colon__rescue__colon__cursor delegate__colon__review__colon__claude delegate__colon__review__colon__codex delegate__colon__review__colon__cursor delegate__colon__adversarial-review__colon__claude delegate__colon__adversarial-review__colon__codex delegate__colon__adversarial-review__colon__cursor)
+      SKILL_DIRS=(delegate)
       ;;
     *)
       die "unsupported skill target $target"
@@ -218,14 +205,30 @@ set_skill_dirs_for_target() {
   esac
 }
 
-set_legacy_skill_dirs_for_target() {
+set_retired_skill_dirs_for_target() {
   local target=$1
+  RETIRED_SKILL_DIRS=(
+    delegate__colon__setup
+    delegate__colon__status
+    delegate__colon__result
+    delegate__colon__cancel
+    delegate__colon__config
+    delegate__colon__rescue__colon__claude
+    delegate__colon__rescue__colon__codex
+    delegate__colon__rescue__colon__cursor
+    delegate__colon__review__colon__claude
+    delegate__colon__review__colon__codex
+    delegate__colon__review__colon__cursor
+    delegate__colon__adversarial-review__colon__claude
+    delegate__colon__adversarial-review__colon__codex
+    delegate__colon__adversarial-review__colon__cursor
+  )
   case "$target" in
     claude)
-      LEGACY_SKILL_DIRS=(codex__colon__rescue codex__colon__review codex__colon__adversarial-review codex__colon__status codex__colon__result codex__colon__cancel)
+      RETIRED_SKILL_DIRS+=(codex__colon__rescue codex__colon__review codex__colon__adversarial-review codex__colon__status codex__colon__result codex__colon__cancel)
       ;;
     codex)
-      LEGACY_SKILL_DIRS=(claude__colon__rescue claude__colon__review claude__colon__adversarial-review claude__colon__status claude__colon__result claude__colon__cancel)
+      RETIRED_SKILL_DIRS+=(claude__colon__rescue claude__colon__review claude__colon__adversarial-review claude__colon__status claude__colon__result claude__colon__cancel)
       ;;
     *)
       die "unsupported skill target $target"
@@ -386,11 +389,11 @@ uninstall_skills_for_target() {
   done
 }
 
-remove_legacy_skills_for_target() {
+remove_retired_skills_for_target() {
   local target=$1
   local escaped path
-  set_legacy_skill_dirs_for_target "$target"
-  for escaped in "${LEGACY_SKILL_DIRS[@]}"; do
+  set_retired_skill_dirs_for_target "$target"
+  for escaped in "${RETIRED_SKILL_DIRS[@]}"; do
     path=$(skill_file_path "$target" "$escaped")
     rm -rf -- "$(dirname -- "$path")"
   done
@@ -410,11 +413,11 @@ case "$OPERATION" in
     fi
     if claude_requested; then
       install_skills_for_target claude
-      remove_legacy_skills_for_target claude
+      remove_retired_skills_for_target claude
     fi
     if codex_requested; then
       install_skills_for_target codex
-      remove_legacy_skills_for_target codex
+      remove_retired_skills_for_target codex
     fi
     if ! command -v agentbus >/dev/null 2>&1; then
       add_warning "agentbus executable not found; install agentbus before using delegate skills"
@@ -426,11 +429,11 @@ case "$OPERATION" in
     fi
     if claude_requested; then
       uninstall_skills_for_target claude
-      remove_legacy_skills_for_target claude
+      remove_retired_skills_for_target claude
     fi
     if codex_requested; then
       uninstall_skills_for_target codex
-      remove_legacy_skills_for_target codex
+      remove_retired_skills_for_target codex
     fi
     ;;
   *)
@@ -480,8 +483,8 @@ print_skill_target() {
   done
   printf '],"removed":['
   first=1
-  set_legacy_skill_dirs_for_target "$target"
-  for escaped in "${LEGACY_SKILL_DIRS[@]}"; do
+  set_retired_skill_dirs_for_target "$target"
+  for escaped in "${RETIRED_SKILL_DIRS[@]}"; do
     path=$(skill_file_path "$target" "$escaped")
     if [[ $first -eq 0 ]]; then
       printf ','

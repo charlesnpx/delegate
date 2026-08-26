@@ -1,8 +1,8 @@
 # delegate
 
-`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.8.1 ships `task`, rescue, sanitized review, and adversarial-review workflows.
+`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and one managed skill for handing work between Claude Code and Codex. Version 0.8.1 ships `task`, sanitized review, and adversarial-review workflows.
 
-agentbus owns execution, supervision, policy enforcement, and job control. delegate owns the delegation CLI surface and skill matrix.
+agentbus owns execution, supervision, policy enforcement, and job control. delegate owns the delegation CLI surface and managed skill.
 
 ## Install
 
@@ -31,7 +31,6 @@ On a live Codex install, delegate minimally updates `${CODEX_HOME:-~/.codex}/con
 
 ```text
 delegate version [--json]
-delegate install-skills [--plan|--install|--uninstall] [--target claude|codex|all] [--json] [--install-root <abs>]
 
 delegate task --backend <name> [--cwd <abs>] [--write] [--model <model>] [--effort <effort>]
               [--timeout <duration>] --prompt-file <path|-> [--schema-file <path>]
@@ -50,14 +49,14 @@ For `delegate task`, `--schema-file <path>` reads a JSON Schema output contract 
 
 Delegate connects through `agentbus/client`, requires `admission.strictContainment` plus the policy capabilities used by the selected contract, forwards model and effort values without local catalog resolution, and always returns after submission with a JSON receipt. Model and effort are per-invocation flags; when omitted, the backend supplies its default. Delegate persists no task submission intent, request cache, or job metadata.
 
-## Rescue workflow
+## Task workflow
 
-The rescue skills pipe the prompt directly to task stdin instead of exposing it in argv:
+The managed skill pipes the prompt directly to task stdin instead of exposing it in argv:
 
 ```sh
 printf '%s' 'Investigate the issue and report evidence.' |
   delegate task --backend codex --cwd "$PWD" --prompt-file - \
-    --tag 'skill=delegate:rescue:codex'
+    --tag 'skill=delegate'
 ```
 
 `task` writes no local submission state. Automation that needs replay safety supplies `--request-id <id>` and retries the same command with the same id after an ambiguous transport result. A manual invocation without that flag receives a generated ID in its receipt.
@@ -66,13 +65,13 @@ printf '%s' 'Investigate the issue and report evidence.' |
 
 The following are Agentbus v0.10.0 worker-sandbox contract rules. These rules are unchanged since v0.9.1; the v0.10.0 label marks the current contract version rather than a sandbox-policy change. Route work accordingly:
 
-- A `--write` task runs as `workspace-write` with only its job `--cwd` writable. Keep task outputs there; a write worker can build and test only when `GOCACHE` and `GOMODCACHE` also point under that cwd, because the usual Go cache locations are outside the worker's writable roots.
+- A `--write` task runs as `workspace-write` with only its job `--cwd` writable. Keep task outputs there; a write worker must point `GOCACHE` under that cwd because Go writes to it. Leave the default `GOMODCACHE` alone: it is read-only from the worker's perspective and already populated, while relocating it breaks builds because the worker has no network to refill it.
 - Write workers have no outbound network (`networkAccess: false`). Run `go get`, proxy-dependent `go mod tidy`, toolchain downloads, and other network-bound work in the orchestrator.
 - A task without `--write` and every review worker run read-only with no network. A read-only worker cannot create a temporary or build directory, so the caller must run compile, test, and other runtime gates for review verification. Submit receipts intentionally have no backend-profile wrapper; route runtime gates from the submitted `--write` choice.
 - Approval policy is `never`, so approval requests are auto-declined. A denied worker write cannot be escalated; change the routing or stop the worker.
 - Writes in `.git` are commonly denied, including index locks. The orchestrator owns commits and other Git metadata changes.
 
-Observed behavior, not an Agentbus guarantee: the OS temporary directory is writable, so ordinary Go builds and tests work with only `GOCACHE` and `GOMODCACHE` relocated under the job cwd. A worker may nevertheless be denied deletion of a temp file; do not treat its cleanup as required or fail a task merely because temp artifacts remain.
+Observed behavior, not an Agentbus guarantee: the OS temporary directory is writable, so ordinary Go builds and tests work with only `GOCACHE` relocated under the job cwd; the default `GOMODCACHE` remains a readable populated cache. A worker may nevertheless be denied deletion of a temp file; do not treat its cleanup as required or fail a task merely because temp artifacts remain.
 
 ## Review workflow and security model
 
@@ -86,20 +85,13 @@ After every diff has been assembled, a final gitleaks-style content gate scans t
 
 Sanitized context for at most 10 files and 256 KiB is included in the prompt. Larger changesets are written to a private `0600` `review.patch` in a per-review `0700` workspace under the Delegate state root that holds sanitized repository content. By default that workspace—not the live repository—is the backend cwd. This only limits the context delegate assembles: a same-user backend can still read repository or other filesystem files itself when its process permissions allow it. Delegate records the workspace with its Agentbus job ID and state root; a later review invocation removes it only after a one-shot Agentbus status read confirms the job is terminal. The most recent review's workspace persists until then.
 
-`--allow-live-repo-read` is an explicit escape hatch. It makes the live repository the backend cwd and permits self-collection, making backend reads of `.env` and other sensitive files easier. Delegate still applies its path/history redaction and final content scan to the context it assembles; the flag does not add or remove OS filesystem permissions. Delegate emits a warning whenever this flag is used. Managed review skills do not add it unless the user explicitly requests it.
+`--allow-live-repo-read` is an explicit escape hatch. It makes the live repository the backend cwd and permits self-collection, making backend reads of `.env` and other sensitive files easier. Delegate still applies its path/history redaction and final content scan to the context it assembles; the flag does not add or remove OS filesystem permissions. Delegate emits a warning whenever this flag is used. The managed skill does not add it unless the user explicitly requests it.
 
 ## Managed skills
 
-The source directories escape `:` as `__colon__`; the installer decodes the names when it writes skills.
+The installer writes one hand-authored skill named `delegate` to each host: `~/.claude/skills/delegate/SKILL.md` for Claude Code and `${CODEX_HOME:-~/.codex}/skills/delegate/SKILL.md` for Codex. It selects a runtime backend with `--backend <name>` instead of encoding backend names in skill identities.
 
-| Installed for | Skill names | Purpose |
-| --- | --- | --- |
-| Claude Code (`~/.claude/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor` | Launch any managed backend (claude, codex, cursor). |
-| Codex (`${CODEX_HOME:-~/.codex}/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor` | Launch any managed backend (claude, codex, cursor). |
-
-Launch skills preflight shared filesystem and state access, no-fork execution, and executable availability. Delegate enforces the selected backend and required Agentbus capabilities at submission time. Rescue and review skills return their submit receipts; callers use Agentbus directly for status, result, and cancellation. Review prose requires findings ordered by severity, preservation of evidence labels, and no automatic fixes after review.
-
-v0.8.1 retains the breaking namespace rename. On install or upgrade, the managed installer removes the legacy `codex:{rescue,review,adversarial-review,status,result,cancel}` names from Claude Code and the corresponding `claude:{...}` names from Codex; `--plan --json`, `--install --json`, and `--uninstall --json` report them in each target's additive `removed` array (entries of `{"path": ...}`); the `files` array contains only installed skill files.
+On install or upgrade, the installer removes retired `delegate:*` skills and the pre-existing cross-namespace legacy names. `--plan --json`, `--install --json`, and `--uninstall --json` report their paths in each target's additive `removed` array; `files` contains only the installed `delegate` skill.
 
 ## Contract tiers
 
