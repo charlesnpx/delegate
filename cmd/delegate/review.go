@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -47,27 +48,39 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	if err != nil {
 		return 0, err
 	}
-	ownsWorkspace := true
-	defer func() {
-		if ownsWorkspace {
-			_ = reviewpkg.Cleanup(assembled)
-		}
-	}()
 
 	for _, sweepErr := range sweepReviewWorkspaces(context.Background(), assembled.StateDir) {
 		if _, err := fmt.Fprintf(stderr, "warning: review workspace sweep: %v\n", sweepErr); err != nil {
+			_ = reviewpkg.Cleanup(assembled)
 			return 0, err
 		}
 	}
 	prompt, err := reviewpkg.ComposePrompt(kind, assembled)
 	if err != nil {
+		_ = reviewpkg.Cleanup(assembled)
 		return 0, err
 	}
 	taskOpts.CWD = assembled.BackendCWD
 	taskOpts.Timeout = opts.Timeout
 	taskOpts.LogicalWorkspace = assembled.RepositoryRoot
 	submitted, c, agentbusStateRoot, err := submitTask(context.Background(), &taskOpts, prompt, nil)
+	var unresolved *submissionUnresolvedError
+	cleanupWorkspace := err != nil && !errors.As(err, &unresolved)
+	if cleanupWorkspace {
+		_ = reviewpkg.Cleanup(assembled)
+	}
 	if err != nil {
+		if !cleanupWorkspace && assembled.Workspace != "" {
+			if jobID := submissionJobID(err); jobID != "" {
+				if recordErr := saveReviewWorkspaceMetadata(assembled.StateDir, reviewWorkspaceMetadata{
+					JobID:             jobID,
+					Workspace:         assembled.Workspace,
+					AgentbusStateRoot: agentbusStateRoot,
+				}); recordErr != nil {
+					return 0, fmt.Errorf("%w; record review workspace for job %s: %v", err, jobID, recordErr)
+				}
+			}
+		}
 		return 0, err
 	}
 	defer func() { _ = c.Close() }()
@@ -80,7 +93,6 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		}); err != nil {
 			return 0, fmt.Errorf("record review workspace for job %s: %w", submitted.JobID, err)
 		}
-		ownsWorkspace = false
 	}
 	if opts.AllowLiveRepoRead {
 		if _, err := fmt.Fprintf(stderr, "warning: %s\n", liveRepoReadWarning); err != nil {

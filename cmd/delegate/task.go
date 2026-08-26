@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -254,7 +255,30 @@ func ensureTaskRequestID(opts *taskOptions) error {
 	return validateRequestID(opts.RequestID)
 }
 
+type submissionUnresolvedError struct {
+	err error
+}
+
+func (err *submissionUnresolvedError) Error() string {
+	return err.err.Error()
+}
+
+func (err *submissionUnresolvedError) Unwrap() error {
+	return err.err
+}
+
+func submissionJobID(err error) string {
+	var rpcErr *client.RPCError
+	if errors.As(err, &rpcErr) && rpcErr != nil {
+		return rpcErr.Object.Data.JobID
+	}
+	return ""
+}
+
 func submissionError(requestID string, err error) error {
+	if jobID := submissionJobID(err); jobID != "" {
+		return fmt.Errorf("submission failed for requestId %s jobId %s: %w", requestID, jobID, err)
+	}
 	return fmt.Errorf("submission failed for requestId %s: %w", requestID, err)
 }
 
@@ -300,7 +324,7 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, turnPolic
 	submitted, err := c.JobSubmit(ctx, params)
 	if err != nil {
 		_ = c.Close()
-		return client.JobSubmitResult{}, nil, "", submissionError(opts.RequestID, err)
+		return client.JobSubmitResult{}, nil, stateRoot, &submissionUnresolvedError{err: submissionError(opts.RequestID, err)}
 	}
 	return submitted, c, stateRoot, nil
 }

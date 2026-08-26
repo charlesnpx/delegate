@@ -93,6 +93,148 @@ func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) 
 	}
 }
 
+func TestReviewAmbiguousSubmissionFailureKeepsWorkspace(t *testing.T) {
+	fake := &fakeAgentbusClient{
+		hello:     helloWithCapabilities(),
+		submitErr: errors.New("lost acknowledgement"),
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	repo := newReviewCommandRepository(t)
+	var stdout, stderr bytes.Buffer
+	_, err := runReview(reviewKind, []string{
+		"--backend", "codex", "--cwd", repo, "--scope", "working-tree",
+		"--model", "review-model", "--effort", "review-effort",
+	}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("runReview() error = nil, want ambiguous submission failure")
+	}
+	if got := len(fake.submits); got != 1 {
+		t.Fatalf("submits=%d, want 1", got)
+	}
+
+	workspaces := reviewWorkspacePaths(t, filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate"))
+	if len(workspaces) != 1 {
+		t.Fatalf("retained workspaces=%q, want one", workspaces)
+	}
+	if _, err := os.Stat(filepath.Join(workspaces[0], "review.patch")); err != nil {
+		t.Fatalf("retained workspace artifact: %v", err)
+	}
+}
+
+func TestReviewMetadataWriteFailureAfterSubmissionKeepsWorkspace(t *testing.T) {
+	fake := &fakeAgentbusClient{
+		hello:        helloWithCapabilities(),
+		submitResult: client.JobSubmitResult{JobID: "job_metadata_failure", State: engine.StateQueued},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate")
+	if err := os.Mkdir(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, reviewWorkspaceMetadataDirectoryName), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := newReviewCommandRepository(t)
+	var stdout, stderr bytes.Buffer
+	_, err := runReview(reviewKind, []string{
+		"--backend", "codex", "--cwd", repo, "--scope", "working-tree",
+		"--model", "review-model", "--effort", "review-effort",
+	}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("runReview() error = nil, want review workspace metadata write failure")
+	}
+	if !strings.Contains(err.Error(), "record review workspace") {
+		t.Fatalf("error=%q, want review workspace metadata context", err)
+	}
+	if got := len(fake.submits); got != 1 {
+		t.Fatalf("submits=%d, want 1", got)
+	}
+	if workspaces := reviewWorkspacePaths(t, stateDir); len(workspaces) != 1 {
+		t.Fatalf("retained workspaces=%q, want one", workspaces)
+	}
+}
+
+func TestReviewPreSubmissionFailureRemovesWorkspace(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+	fake.hello.Backends = []string{"claude"}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	repo := newReviewCommandRepository(t)
+	var stdout, stderr bytes.Buffer
+	_, err := runReview(reviewKind, []string{
+		"--backend", "codex", "--cwd", repo, "--scope", "working-tree",
+		"--model", "review-model", "--effort", "review-effort",
+	}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("runReview() error = nil, want pre-submission backend validation failure")
+	}
+	if got := len(fake.submits); got != 0 {
+		t.Fatalf("submits=%d, want no submission", got)
+	}
+	if workspaces := reviewWorkspacePaths(t, filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate")); len(workspaces) != 0 {
+		t.Fatalf("workspaces=%q, want none after pre-submission failure", workspaces)
+	}
+}
+
+func TestReviewAcceptedRPCErrorReportsIdentityAndKeepsWorkspaceMetadata(t *testing.T) {
+	var rpcErr client.RPCError
+	if err := json.Unmarshal([]byte(`{"Object":{"code":-32000,"message":"admission closing","data":{"code":"backend_unavailable","jobId":"job_accepted_after_error"}}}`), &rpcErr); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAgentbusClient{hello: helloWithCapabilities(), submitErr: &rpcErr}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	repo := newReviewCommandRepository(t)
+	var stdout, stderr bytes.Buffer
+	_, err := runReview(reviewKind, []string{
+		"--backend", "codex", "--cwd", repo, "--scope", "working-tree",
+		"--model", "review-model", "--effort", "review-effort",
+	}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("runReview() error = nil, want post-accept RPC error")
+	}
+	if got := len(fake.submits); got != 1 {
+		t.Fatalf("submits=%d, want 1", got)
+	}
+	if !strings.Contains(err.Error(), fake.submits[0].RequestID) || !strings.Contains(err.Error(), "job_accepted_after_error") {
+		t.Fatalf("error=%q, want request ID %q and accepted job ID", err, fake.submits[0].RequestID)
+	}
+
+	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate")
+	metadata, metadataErrs := loadReviewWorkspaceMetadata(stateDir)
+	if len(metadataErrs) != 0 || len(metadata) != 1 {
+		t.Fatalf("review workspace metadata=%#v errors=%v", metadata, metadataErrs)
+	}
+	if metadata[0].JobID != "job_accepted_after_error" {
+		t.Fatalf("metadata job id=%q, want accepted job id", metadata[0].JobID)
+	}
+	if _, err := os.Stat(metadata[0].Workspace); err != nil {
+		t.Fatalf("retained workspace: %v", err)
+	}
+}
+
+func reviewWorkspacePaths(t *testing.T, stateDir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, entry := range entries {
+		if entry.IsDir() && entry.Name() != reviewWorkspaceMetadataDirectoryName && strings.HasPrefix(entry.Name(), "review-") {
+			paths = append(paths, filepath.Join(stateDir, entry.Name()))
+		}
+	}
+	return paths
+}
+
 func assertTaskReceiptShape(t *testing.T, raw []byte, jobID string) {
 	t.Helper()
 	var receipt taskSubmitReceipt

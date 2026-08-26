@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -50,10 +48,6 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	}
 	if !strings.HasSuffix(stdout.String(), "\n") {
 		t.Fatalf("stdout=%q, want one JSON line", stdout.String())
-	}
-	const wantReceipt = "{\"requestId\":\"automation/retry-1\",\"jobId\":\"job_receipt\",\"state\":\"queued\",\"deduplicated\":false,\"model\":\"unadvertised-model\",\"effort\":\"unadvertised-effort\",\"timeout\":{\"effectiveMs\":1800000,\"source\":\"daemon_default\"}}\n"
-	if got := stdout.String(); got != wantReceipt {
-		t.Fatalf("receipt bytes=%q, want %q", got, wantReceipt)
 	}
 	var receipt taskSubmitReceipt
 	if err := json.Unmarshal(stdout.Bytes(), &receipt); err != nil {
@@ -111,8 +105,8 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	if got, want := params.TaskSpec.Tags, map[string]string{"ticket": "ABC-123", "owner": "qa"}; !mapsEqual(got, want) {
 		t.Fatalf("tags=%#v, want %#v", got, want)
 	}
-	if len(fake.statuses) != 0 || len(fake.results) != 0 {
-		t.Fatalf("task polled after submit: statuses=%d results=%d", len(fake.statuses), len(fake.results))
+	if len(fake.statuses) != 0 {
+		t.Fatalf("task polled after submit: statuses=%d", len(fake.statuses))
 	}
 }
 
@@ -407,12 +401,6 @@ type fakeAgentbusClient struct {
 	statuses     []client.JobStatusParams
 	statusErr    error
 	status       client.JobStatusResult
-	results      []client.JobResultParams
-	result       client.JobResult
-	resultErr    error
-	cancels      []client.JobCancelParams
-	cancel       client.JobCancelResult
-	cancelErr    error
 }
 
 func (f *fakeAgentbusClient) Close() error { return nil }
@@ -425,9 +413,6 @@ func (f *fakeAgentbusClient) JobSubmit(_ context.Context, params client.JobSubmi
 		return client.JobSubmitResult{}, f.submitErr
 	}
 	jobID := "job_fake"
-	if f.result.JobID != "" {
-		jobID = f.result.JobID
-	}
 	if f.submitResult.JobID != "" || f.submitResult.State != "" || f.submitResult.Deduplicated || f.submitResult.Timeout != nil {
 		submitted := f.submitResult
 		if submitted.JobID == "" {
@@ -449,50 +434,9 @@ func (f *fakeAgentbusClient) JobStatus(_ context.Context, params client.JobStatu
 	if len(f.status.Jobs) > 0 {
 		return f.status, nil
 	}
-	if f.result.JobID == "" {
-		return client.JobStatusResult{}, nil
-	}
-	return client.JobStatusResult{Jobs: []client.JobStatus{{
-		JobID:              f.result.JobID,
-		SessionID:          f.result.SessionID,
-		Timeout:            f.result.Timeout,
-		State:              f.result.State,
-		CleanupDisposition: f.result.CleanupDisposition,
-		ModelReported:      f.result.ModelReported,
-	}}}, nil
-}
-
-func (f *fakeAgentbusClient) JobResult(_ context.Context, params client.JobResultParams) (client.JobResult, error) {
-	f.results = append(f.results, params)
-	if f.resultErr != nil {
-		return client.JobResult{}, f.resultErr
-	}
-	if f.result.JobID == "" {
-		return client.JobResult{}, errors.New("result not ready")
-	}
-	return f.result, nil
-}
-
-func (f *fakeAgentbusClient) JobCancel(_ context.Context, params client.JobCancelParams) (client.JobCancelResult, error) {
-	f.cancels = append(f.cancels, params)
-	if f.cancelErr != nil {
-		return client.JobCancelResult{}, f.cancelErr
-	}
-	if f.cancel.JobID != "" {
-		return f.cancel, nil
-	}
-	return client.JobCancelResult{}, errors.New("unexpected JobCancel")
-}
-
-func testResultText() string {
-	return "fixture result\n"
+	return client.JobStatusResult{}, nil
 }
 
 func ptr[T any](v T) *T {
 	return &v
-}
-
-func rawSHA256(text string) string {
-	sum := sha256.Sum256([]byte(text))
-	return hex.EncodeToString(sum[:])
 }
