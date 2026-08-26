@@ -18,8 +18,8 @@ func TestTargetMatrices(t *testing.T) {
 			if !reflect.DeepEqual(got, expectedSkillNames()) {
 				t.Fatalf("TargetNames(%q) = %#v, want %#v", target, got, expectedSkillNames())
 			}
-			if len(got) != 10 {
-				t.Fatalf("TargetNames(%q) count = %d, want 10", target, len(got))
+			if len(got) != 9 {
+				t.Fatalf("TargetNames(%q) count = %d, want 9", target, len(got))
 			}
 		})
 	}
@@ -50,7 +50,6 @@ func expectedSkillNames() []string {
 		"delegate:adversarial-review:claude",
 		"delegate:adversarial-review:codex",
 		"delegate:adversarial-review:cursor",
-		"delegate:config",
 	}
 }
 
@@ -85,8 +84,6 @@ func TestGeneratedSkillsUseAgentbusForJobControl(t *testing.T) {
 					t.Fatalf("%s missing review command", skill.Name)
 				}
 			}
-		case KindConfig:
-			requireFragments(t, skill, []string{"delegate config list --json", "delegate config set <key> <value>"})
 		default:
 			t.Fatalf("unexpected skill kind %q for %s", skill.Kind, skill.Name)
 		}
@@ -170,7 +167,7 @@ func TestPlanAndInstallRemoveLegacySkills(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(plan[target].Files) != 10 {
+			if len(plan[target].Files) != 9 {
 				t.Fatalf("plan files = %#v", plan[target].Files)
 			}
 			if len(plan[target].Removed) != len(legacyNamesForTarget(target)) {
@@ -181,7 +178,7 @@ func TestPlanAndInstallRemoveLegacySkills(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(installed[target].Files) != 10 {
+			if len(installed[target].Files) != 9 {
 				t.Fatalf("installed files = %#v", installed[target].Files)
 			}
 			for _, legacyName := range legacyNamesForTarget(target) {

@@ -23,9 +23,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return finishCommand(runVersion(args[1:], stdout, stderr), nil, stderr)
 	}
 	switch args[0] {
-	case "config":
-		code, err := runConfig(args[1:], stdout, stderr)
-		return finishCommand(code, err, stderr)
 	case "task":
 		code, err := runTask(args[1:], stdin, stdout, stderr)
 		return finishCommand(code, err, stderr)
@@ -56,7 +53,6 @@ func printUsage(w io.Writer) {
 
 commands:
   version         print the delegate version (also: --version, -version, -V)
-  config          list/get/set/unset user model and effort defaults
   task            submit one backend turn and return its receipt
   review          delegate a sanitized code review
   adversarial-review  delegate a refute-first review

@@ -93,6 +93,43 @@ func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) 
 	}
 }
 
+func TestReviewCommandsPassModelAndEffortThrough(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, model, effort string
+	}{
+		{name: "review supplied", command: "review", model: "review-model", effort: "review-effort"},
+		{name: "adversarial review omitted", command: "adversarial-review"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{
+				hello: helloWithCapabilities(),
+				submitResult: client.JobSubmitResult{
+					JobID:   "job_passthrough",
+					State:   engine.StateQueued,
+					Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
+				},
+			}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+
+			args := []string{tc.command, "--backend", "claude", "--cwd", newReviewCommandRepository(t), "--scope", "working-tree"}
+			if tc.model != "" {
+				args = append(args, "--model", tc.model, "--effort", tc.effort)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run(args, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("%s code=%d stderr=%q", tc.command, code, stderr.String())
+			}
+			if len(fake.submits) != 1 {
+				t.Fatalf("submits=%d, want 1", len(fake.submits))
+			}
+			if got := fake.submits[0].TaskSpec; got.Model != tc.model || got.Effort != tc.effort {
+				t.Fatalf("submitted model/effort=%q/%q, want %q/%q", got.Model, got.Effort, tc.model, tc.effort)
+			}
+		})
+	}
+}
+
 func TestReviewAmbiguousSubmissionFailureKeepsWorkspace(t *testing.T) {
 	fake := &fakeAgentbusClient{
 		hello:     helloWithCapabilities(),

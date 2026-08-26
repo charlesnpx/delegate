@@ -24,7 +24,6 @@ const (
 
 	KindLaunch = "launch"
 	KindReview = "review"
-	KindConfig = "config"
 )
 
 // GeneratedSkill is one rendered skill and its source/final naming metadata.
@@ -95,7 +94,6 @@ var legacyNamesByTarget = map[string][]string{
 var (
 	launchTemplate = template.Must(template.New("launch").Parse(strings.TrimSpace(launchSkillTemplate) + "\n"))
 	reviewTemplate = template.Must(template.New("review").Parse(strings.TrimSpace(reviewSkillTemplate) + "\n"))
-	configTemplate = template.Must(template.New("config").Parse(strings.TrimSpace(configSkillTemplate) + "\n"))
 )
 
 // DecodeName decodes source directory escaping used under skills/.
@@ -324,7 +322,7 @@ func expandTargets(target string) ([]string, error) {
 }
 
 func namespaceSpecs(target string) []skillSpec {
-	specs := make([]skillSpec, 0, len(supportedBackends)*3+1)
+	specs := make([]skillSpec, 0, len(supportedBackends)*3)
 	for _, backend := range supportedBackends {
 		specs = append(specs, launchSpec(target, backend))
 	}
@@ -334,7 +332,6 @@ func namespaceSpecs(target string) []skillSpec {
 	for _, backend := range supportedBackends {
 		specs = append(specs, reviewSpec(target, backend, "adversarial-review"))
 	}
-	specs = append(specs, configSpec(target))
 	return specs
 }
 
@@ -363,15 +360,6 @@ func reviewSpec(target, backend, command string) skillSpec {
 	}
 }
 
-func configSpec(target string) skillSpec {
-	return skillSpec{
-		Name:         "delegate:config",
-		Kind:         KindConfig,
-		Description:  "View and change delegate user model and effort defaults.",
-		SourceTarget: target,
-	}
-}
-
 func render(spec skillSpec) (string, error) {
 	data := renderData{
 		Version:     Version,
@@ -387,8 +375,6 @@ func render(spec skillSpec) (string, error) {
 		tmpl = launchTemplate
 	case KindReview:
 		tmpl = reviewTemplate
-	case KindConfig:
-		tmpl = configTemplate
 	default:
 		return "", fmt.Errorf("unsupported skill kind %q", spec.Kind)
 	}
@@ -503,7 +489,7 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 
 "delegate task" itself enforces the selected backend and required Agentbus capabilities at submission time; this review command uses the same Delegate submission gate. A launch failure reports its own connection or backend error directly.
 
-The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
+The "--model" and "--effort" flags are per-invocation and optional. When supplied, they pass directly to Agentbus; when omitted, the backend's default applies.
 
 Review commands never pass "--write" and intentionally run the backend read-only. A read-only review worker cannot create a build/temp directory, compile, or run tests, so the caller must execute runtime verification and gates.
 
@@ -536,31 +522,3 @@ Review submission already returns immediately. Use Agentbus directly for job con
 Present findings first and keep them ordered by severity. Preserve the delegated review's file paths, line numbers, evidence labels, uncertainty labels, and follow-up questions exactly. Distinguish observed evidence from inferred risk and assumptions. If there are no findings, say so explicitly and keep residual risk brief. If the run failed or returned malformed output, show the actionable Agentbus failure and stop instead of guessing or substituting a local review.
 
 Never auto-fix after presenting review findings. Ask the user which issues, if any, they want addressed.`
-
-const configSkillTemplate = `---
-name: {{.Name}}
-description: {{.Description}}
-version: {{.Version}}
----
-
-# {{.Name}}
-
-View the effective user defaults and config path with:
-
-~~~bash
-delegate config list --json
-~~~
-
-Change one supported setting with:
-
-~~~bash
-delegate config set <key> <value>
-~~~
-
-Delegate user-config defaults apply to all delegated tasks. The supported keys are "overridable", "backend.claude.model", "backend.claude.effort", "backend.codex.model", "backend.codex.effort", "backend.cursor.model", and "backend.cursor.effort". Use "delegate config unset <key>" to remove a value.
-
-Delegate ships managed delegation skills and configurable model/effort defaults for "claude", "codex", and "cursor". Delegate also accepts any other backend that agentbus advertises via "delegate task --backend <name>".
-
-When "overridable=false", configured model and effort values pin their respective dimensions against per-task "-model" and "-effort" flags. This is an ergonomics control, not a security boundary: an agent that can run "delegate config set" can change the setting.
-
-Do not pass policy-bypass flags when using this skill.`
