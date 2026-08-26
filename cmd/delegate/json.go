@@ -5,8 +5,6 @@ import (
 	"io"
 )
 
-const commandJSONSchema = 1
-
 func writeJSONLine(w io.Writer, value any) error {
 	raw, err := json.Marshal(value)
 	if err != nil {

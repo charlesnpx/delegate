@@ -10,10 +10,10 @@ import (
 	"github.com/charlesnpx/agentbus/engine"
 )
 
-// TestRescueSmokeFixture exercises the stdin launch shape generated for rescue
-// skills: task receives a private prompt through stdin and returns a receipt.
-func TestRescueSmokeFixture(t *testing.T) {
-	prompt := "Investigate the small rescue task and report the result."
+// TestManagedSkillSmokeFixture exercises the stdin launch shape generated for
+// the managed delegate skill: task receives a private prompt through stdin and returns a receipt.
+func TestManagedSkillSmokeFixture(t *testing.T) {
+	prompt := "Investigate the managed skill task and report the result."
 	bus := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
 		submitResult: client.JobSubmitResult{

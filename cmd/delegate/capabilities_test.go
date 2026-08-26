@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -35,6 +38,46 @@ func TestRetryPolicyRequiresRetryCapability(t *testing.T) {
 	turnPolicy := &engine.TurnPolicy{Retry: &engine.RetryPolicy{Max: 1}}
 	required := requiredCapabilitiesForPolicy(turnPolicy)
 	assertContains(t, required, "policy.retry")
+}
+
+func TestTaskRejectsMissingRequiredCapabilityBeforeSubmission(t *testing.T) {
+	tests := []struct {
+		name    string
+		missing string
+		schema  bool
+	}{
+		{name: "universal strict containment", missing: "admission.strictContainment"},
+		{name: "schema JSON Schema", missing: "policy.jsonSchema", schema: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+			fake.hello.Capabilities[tc.missing] = false
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+
+			cwd := t.TempDir()
+			args := []string{"task", "--backend", "codex", "--cwd", cwd, "--prompt-file", "-"}
+			if tc.schema {
+				schemaPath := filepath.Join(cwd, "schema.json")
+				if err := os.WriteFile(schemaPath, []byte(`{"type":"object"}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				args = append(args, "--schema-file", schemaPath)
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := run(args, strings.NewReader("prompt"), &stdout, &stderr); code == 0 {
+				t.Fatalf("run(%q) unexpectedly succeeded", args)
+			}
+			if !strings.Contains(stderr.String(), "lacks capability `"+tc.missing+"`") {
+				t.Fatalf("stderr=%q, want capability error for %q", stderr.String(), tc.missing)
+			}
+			if len(fake.submits) != 0 {
+				t.Fatalf("JobSubmit calls=%d, want 0", len(fake.submits))
+			}
+		})
+	}
 }
 
 func assertContains(t *testing.T, got []string, want string) {
