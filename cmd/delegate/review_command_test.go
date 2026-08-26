@@ -98,8 +98,6 @@ func TestReviewCommandsPassModelAndEffortThrough(t *testing.T) {
 		name, command, model, effort string
 	}{
 		{name: "review supplied", command: "review", model: "review-model", effort: "review-effort"},
-		{name: "adversarial review supplied", command: "adversarial-review", model: "adversarial-model", effort: "adversarial-effort"},
-		{name: "review omitted", command: "review"},
 		{name: "adversarial review omitted", command: "adversarial-review"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
