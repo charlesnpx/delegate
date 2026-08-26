@@ -24,7 +24,7 @@ Superseding escape hatch: if the requester explicitly asks for a direct local re
 
 "delegate task" itself enforces the selected backend and required Agentbus capabilities at submission time; this review command uses the same Delegate submission gate. A launch failure reports its own connection or backend error directly.
 
-The "-model" and "-effort" flags are optional. User-config defaults apply when those flags are omitted.
+The "--model" and "--effort" flags are per-invocation and optional. When supplied, they pass directly to Agentbus; when omitted, the backend's default applies.
 
 Review commands never pass "--write" and intentionally run the backend read-only. A read-only review worker cannot create a build/temp directory, compile, or run tests, so the caller must execute runtime verification and gates.
 

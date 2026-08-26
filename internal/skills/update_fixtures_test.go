@@ -31,7 +31,7 @@ func TestUpdateSourceFixtures(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"delegate:status", "delegate:result", "delegate:cancel"} {
+	for _, name := range []string{"delegate:status", "delegate:result", "delegate:cancel", "delegate:config"} {
 		if err := os.RemoveAll(filepath.Join("..", "..", "skills", EncodeName(name))); err != nil {
 			t.Fatal(err)
 		}

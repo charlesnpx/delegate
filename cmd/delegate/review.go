@@ -9,7 +9,6 @@ import (
 	"os"
 	"time"
 
-	delegateconfig "github.com/charlesnpx/delegate/internal/config"
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
 )
 
@@ -36,9 +35,6 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		return 0, err
 	}
 	taskOpts := taskOptions{Backend: opts.Backend, Model: opts.Model, Effort: opts.Effort}
-	if err := resolveReviewModelEffort(&taskOpts); err != nil {
-		return 0, err
-	}
 	assembled, err := reviewpkg.Assemble(context.Background(), reviewpkg.Options{
 		CWD:               opts.CWD,
 		Base:              opts.Base,
@@ -103,19 +99,6 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		return 0, submissionError(taskOpts.RequestID, err)
 	}
 	return 0, nil
-}
-
-// Review retains its established user configuration behavior. The public task
-// path intentionally does not call this function.
-func resolveReviewModelEffort(opts *taskOptions) error {
-	cfg, err := delegateconfig.Load()
-	if err != nil {
-		return err
-	}
-	resolved := delegateconfig.ResolveModelEffort(opts.Backend, opts.Model, opts.Effort, cfg)
-	opts.Model = resolved.Model.Effective
-	opts.Effort = resolved.Effort.Effective
-	return nil
 }
 
 func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOptions, error) {

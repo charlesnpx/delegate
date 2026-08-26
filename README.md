@@ -48,7 +48,7 @@ For `task`, `review`, and `adversarial-review`, `--timeout 0` leaves the deadlin
 
 For `delegate task`, `--schema-file <path>` reads a JSON Schema output contract from a file. A supplied schema receives one Agentbus corrective retry; any violation is reported by Agentbus as `<json-pointer>: <message>`. Repeat `--tag key=value` to populate `TaskSpec.Tags`; malformed tags are usage errors.
 
-Delegate connects through `agentbus/client`, requires `admission.strictContainment` plus the policy capabilities used by the selected contract, forwards model and effort values without local catalog resolution, and always returns after submission with a JSON receipt. It persists no task submission intent, request cache, or job metadata.
+Delegate connects through `agentbus/client`, requires `admission.strictContainment` plus the policy capabilities used by the selected contract, forwards model and effort values without local catalog resolution, and always returns after submission with a JSON receipt. Model and effort are per-invocation flags; when omitted, the backend supplies its default. Delegate persists no task submission intent, request cache, or job metadata.
 
 ## Rescue workflow
 
@@ -94,8 +94,8 @@ The source directories escape `:` as `__colon__`; the installer decodes the name
 
 | Installed for | Skill names | Purpose |
 | --- | --- | --- |
-| Claude Code (`~/.claude/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor`, `delegate:config` | Launch any managed backend (claude, codex, cursor). |
-| Codex (`${CODEX_HOME:-~/.codex}/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor`, `delegate:config` | Launch any managed backend (claude, codex, cursor). |
+| Claude Code (`~/.claude/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor` | Launch any managed backend (claude, codex, cursor). |
+| Codex (`${CODEX_HOME:-~/.codex}/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor` | Launch any managed backend (claude, codex, cursor). |
 
 Launch skills preflight shared filesystem and state access, no-fork execution, and executable availability. Delegate enforces the selected backend and required Agentbus capabilities at submission time. Rescue and review skills return their submit receipts; callers use Agentbus directly for status, result, and cancellation. Review prose requires findings ordered by severity, preservation of evidence labels, and no automatic fixes after review.
 

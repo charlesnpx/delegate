@@ -12,7 +12,6 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
-	delegateconfig "github.com/charlesnpx/delegate/internal/config"
 )
 
 func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) {
@@ -28,14 +27,6 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
-	if err := delegateconfig.Save(delegateconfig.Config{
-		Overridable: false,
-		Backend: delegateconfig.Backends{
-			Codex: delegateconfig.Defaults{Model: "configured-model", Effort: "configured-effort"},
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
