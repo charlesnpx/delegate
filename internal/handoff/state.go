@@ -8,10 +8,7 @@ import (
 	"strings"
 )
 
-const (
-	fileMode = 0o600
-	dirMode  = 0o700
-)
+const dirMode = 0o700
 
 // StateConfig controls state directory resolution.
 type StateConfig struct {
@@ -89,17 +86,6 @@ func EnsureStateDir(dir string) error {
 		return fmt.Errorf("state dir %q mode = %o, want %o", dir, got, dirMode)
 	}
 	return nil
-}
-
-func prepareStateDir(dir string) (string, error) {
-	stateDir, err := ResolveStateDir(StateConfig{StateDir: dir})
-	if err != nil {
-		return "", err
-	}
-	if err := EnsureStateDir(stateDir); err != nil {
-		return "", err
-	}
-	return stateDir, nil
 }
 
 func resolveConfiguredStateDir(label, path string) (string, error) {

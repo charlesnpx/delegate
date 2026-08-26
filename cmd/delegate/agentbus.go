@@ -35,8 +35,6 @@ type agentbusClient interface {
 	HelloResult() client.HelloResult
 	JobSubmit(context.Context, client.JobSubmitParams) (client.JobSubmitResult, error)
 	JobStatus(context.Context, client.JobStatusParams) (client.JobStatusResult, error)
-	JobResult(context.Context, client.JobResultParams) (client.JobResult, error)
-	JobCancel(context.Context, client.JobCancelParams) (client.JobCancelResult, error)
 }
 
 // validateBackend checks only that Agentbus advertised the selected backend.
@@ -65,7 +63,7 @@ var commandOutput = func(name string, args ...string) ([]byte, error) {
 func connectCheckedAgentbus(ctx context.Context, opts client.Options, required []string, version string) (agentbusClient, client.HelloResult, error) {
 	c, err := connectAgentbus(ctx, opts)
 	if err != nil {
-		return nil, client.HelloResult{}, agentbusOperationError(err)
+		return nil, client.HelloResult{}, err
 	}
 	hello := c.HelloResult()
 	if err := requireCapabilities(hello, version, required); err != nil {

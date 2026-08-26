@@ -45,6 +45,28 @@ func TestRunUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestRunRetiredJobControlCommandsAreUnknownAndAbsentFromHelp(t *testing.T) {
+	for _, command := range []string{"status", "result", "cancel"} {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{command}, nil, &stdout, &stderr); code != 2 {
+			t.Fatalf("run(%q) code = %d, want 2; stderr=%q", command, code, stderr.String())
+		}
+		if !bytes.Contains(stderr.Bytes(), []byte(`unknown command "`+command+`"`)) {
+			t.Fatalf("run(%q) stderr=%q, want unknown command", command, stderr.String())
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--help"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("run(--help) code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	for _, command := range []string{"status", "result", "cancel"} {
+		if bytes.Contains(stdout.Bytes(), []byte(command)) {
+			t.Fatalf("help=%q, must not list %q", stdout.String(), command)
+		}
+	}
+}
+
 func TestRunSetupIsUnknownAndAbsentFromHelp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"setup"}, nil, &stdout, &stderr); code != 2 {

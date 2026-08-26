@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/charlesnpx/agentbus/client"
-	"github.com/charlesnpx/agentbus/engine"
 	delegateconfig "github.com/charlesnpx/delegate/internal/config"
 )
 
@@ -78,30 +77,5 @@ func TestConfigCommandRoundTrip(t *testing.T) {
 	}
 	if code := run([]string{"config", "set", "backend.claude.modle", "value"}, nil, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "allowed keys") {
 		t.Fatalf("unknown key code=%d stderr=%q", code, stderr.String())
-	}
-}
-
-func TestTerminalEnvelopeModelReportedFallbackReasons(t *testing.T) {
-	modelEffort := delegateconfig.ModelEffortResolution{
-		Model:  delegateconfig.DimensionResolution{Requested: "requested", Effective: "effective", Source: "flag"},
-		Effort: delegateconfig.DimensionResolution{Source: "default"},
-	}
-	for _, tc := range []struct {
-		name, reported, wantReason string
-		capable                    bool
-	}{
-		{name: "reported", capable: true, reported: "backend-model"},
-		{name: "reported model unavailable", capable: true, wantReason: "model_report_unavailable"},
-		{name: "capability missing", wantReason: "agentbus_capability_missing"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			env, err := newTerminalEnvelope("job_model", engine.StateCompleted, taskKind, nil, "", "", terminalEnvelopeOptions{ModelEffort: modelEffort, ModelReported: tc.reported, ModelsReportedCapable: tc.capable})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if env.Model != modelEffort.Model || env.ModelReported != tc.reported || env.ModelReportedUnavailableReason != tc.wantReason {
-				t.Fatalf("envelope = %#v", env)
-			}
-		})
 	}
 }

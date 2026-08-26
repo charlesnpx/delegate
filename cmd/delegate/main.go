@@ -35,15 +35,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "adversarial-review":
 		code, err := runReview(adversarialReviewKind, args[1:], stdout, stderr)
 		return finishCommand(code, err, stderr)
-	case "status":
-		code, err := runStatus(args[1:], stdout, stderr)
-		return finishCommand(code, err, stderr)
-	case "result":
-		code, err := runResult(args[1:], stdout, stderr)
-		return finishCommand(code, err, stderr)
-	case "cancel":
-		code, err := runCancel(args[1:], stdout, stderr)
-		return finishCommand(code, err, stderr)
 	case "install-skills":
 		code, err := runInstallSkills(args[1:], stdout, stderr)
 		return finishCommand(code, err, stderr)
@@ -66,13 +57,10 @@ func printUsage(w io.Writer) {
 commands:
   version         print the delegate version (also: --version, -version, -V)
   config          list/get/set/unset user model and effort defaults
-	  task            submit one backend turn and return its receipt
+  task            submit one backend turn and return its receipt
   review          delegate a sanitized code review
   adversarial-review  delegate a refute-first review
-  status          check a delegated job
-  result          fetch a delegated job result (--wait to block)
-  cancel          cancel a delegated job
-	  install-skills  plan/install/uninstall the managed skill matrices
+  install-skills  plan/install/uninstall the managed skill matrices
 
 run 'delegate <command> -h' for command flags.
 `)

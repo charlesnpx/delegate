@@ -1,8 +1,8 @@
 # delegate
 
-`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.8.1 ships `task`, rescue, sanitized review, adversarial-review, and job-control workflows.
+`delegate` is the first client of [agentbus](https://github.com/charlesnpx/agentbus): a delegation CLI and managed skill matrix for handing work between Claude Code and Codex. Version 0.8.1 ships `task`, rescue, sanitized review, and adversarial-review workflows.
 
-agentbus owns execution, supervision, and policy enforcement. delegate owns the delegation CLI surface, skill matrix, and result envelopes it passes through from agentbus.
+agentbus owns execution, supervision, policy enforcement, and job control. delegate owns the delegation CLI surface and skill matrix.
 
 ## Install
 
@@ -37,16 +37,12 @@ delegate task --backend <name> [--cwd <abs>] [--write] [--model <model>] [--effo
               [--timeout <duration>] --prompt-file <path|-> [--schema-file <path>]
               [--request-id <id>] [--tag <key=value>]...
 
-delegate review|adversarial-review --backend claude|codex|cursor [--background|--wait] [--json] [--cwd <abs>]
+delegate review|adversarial-review --backend claude|codex|cursor [--cwd <abs>]
               [--base <ref>] [--scope auto|working-tree|branch] [--allow-live-repo-read]
               [--model <model>] [--effort <effort>] [--timeout <duration>]
-
-delegate status [--job <id>] [--wait] [--json]
-delegate result --job <id> [--wait] [--json]
-delegate cancel --job <id> [--json]
 ```
 
-For `task`, `review`, and `adversarial-review`, `--timeout 0` leaves the deadline to the daemon default. The task submit receipt carries Agentbus's authoritative millisecond `timeout` resolution; review envelopes retain their existing timeout field.
+For `task`, `review`, and `adversarial-review`, `--timeout 0` leaves the deadline to the daemon default. Their submit receipts carry Agentbus's authoritative millisecond `timeout` resolution.
 
 `task` accepts only `--prompt-file` for prompt input. Use `--prompt-file -` to read stdin, or give a file path. There is no positional prompt, prompt flag, handoff file, or stdin flag alias.
 
@@ -72,7 +68,7 @@ The following are Agentbus v0.10.0 worker-sandbox contract rules. These rules ar
 
 - A `--write` task runs as `workspace-write` with only its job `--cwd` writable. Keep task outputs there; a write worker can build and test only when `GOCACHE` and `GOMODCACHE` also point under that cwd, because the usual Go cache locations are outside the worker's writable roots.
 - Write workers have no outbound network (`networkAccess: false`). Run `go get`, proxy-dependent `go mod tidy`, toolchain downloads, and other network-bound work in the orchestrator.
-- A task without `--write` and every review worker run read-only with no network. A read-only worker cannot create a temporary or build directory, so the caller must run compile, test, and other runtime gates for review verification. The task receipt intentionally has no backend-profile wrapper; route task runtime gates from the submitted `--write` choice. Review envelopes retain their `backend_profile` value.
+- A task without `--write` and every review worker run read-only with no network. A read-only worker cannot create a temporary or build directory, so the caller must run compile, test, and other runtime gates for review verification. Submit receipts intentionally have no backend-profile wrapper; route runtime gates from the submitted `--write` choice.
 - Approval policy is `never`, so approval requests are auto-declined. A denied worker write cannot be escalated; change the routing or stop the worker.
 - Writes in `.git` are commonly denied, including index locks. The orchestrator owns commits and other Git metadata changes.
 
@@ -88,7 +84,7 @@ Before collecting content, delegate applies a case-insensitive secret-path heuri
 
 After every diff has been assembled, a final gitleaks-style content gate scans the shared payload used for both inline prompts and spilled artifacts. It detects AWS access keys, high-entropy API-key/token/secret assignments, private-key headers, JWTs, GitHub and Slack tokens, password-bearing connection strings, and high-entropy base64 or hex assignment values longer than 32 characters. A matching hunk is replaced with `[redacted: secret-like content]` while its path and status remain visible. These path, history, and content heuristics implement the accident-prevention model; they do not expand it into an adversarial security boundary.
 
-Sanitized context for at most 10 files and 256 KiB is included in the prompt. Larger changesets are written to a private `0600` `review.patch` in a per-review `0700` delegate-state workspace. By default that workspace—not the live repository—is the backend cwd. This only limits the context delegate assembles: a same-user backend can still read repository or other filesystem files itself when its process permissions allow it. The workspace and artifact remain available for a background job and are removed only when Agentbus cleanup disposition proves local cleanup is safe.
+Sanitized context for at most 10 files and 256 KiB is included in the prompt. Larger changesets are written to a private `0600` `review.patch` in a per-review `0700` workspace under the Delegate state root that holds sanitized repository content. By default that workspace—not the live repository—is the backend cwd. This only limits the context delegate assembles: a same-user backend can still read repository or other filesystem files itself when its process permissions allow it. Delegate records the workspace with its Agentbus job ID and state root; a later review invocation removes it only after a one-shot Agentbus status read confirms the job is terminal. The most recent review's workspace persists until then.
 
 `--allow-live-repo-read` is an explicit escape hatch. It makes the live repository the backend cwd and permits self-collection, making backend reads of `.env` and other sensitive files easier. Delegate still applies its path/history redaction and final content scan to the context it assembles; the flag does not add or remove OS filesystem permissions. Delegate emits a warning whenever this flag is used. Managed review skills do not add it unless the user explicitly requests it.
 
@@ -98,26 +94,26 @@ The source directories escape `:` as `__colon__`; the installer decodes the name
 
 | Installed for | Skill names | Purpose |
 | --- | --- | --- |
-| Claude Code (`~/.claude/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor`, `delegate:status`, `delegate:result`, `delegate:cancel`, `delegate:config` | Launch any managed backend (claude, codex, cursor) and control any delegated job. |
-| Codex (`${CODEX_HOME:-~/.codex}/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor`, `delegate:status`, `delegate:result`, `delegate:cancel`, `delegate:config` | Launch any managed backend (claude, codex, cursor) and control any delegated job. |
+| Claude Code (`~/.claude/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor`, `delegate:config` | Launch any managed backend (claude, codex, cursor). |
+| Codex (`${CODEX_HOME:-~/.codex}/skills`) | `delegate:rescue:claude`, `delegate:rescue:codex`, `delegate:rescue:cursor`, `delegate:review:claude`, `delegate:review:codex`, `delegate:review:cursor`, `delegate:adversarial-review:claude`, `delegate:adversarial-review:codex`, `delegate:adversarial-review:cursor`, `delegate:config` | Launch any managed backend (claude, codex, cursor). |
 
-Launch skills preflight shared filesystem and state access, no-fork execution, and executable availability. Delegate enforces the selected backend and required Agentbus capabilities at submission time. Rescue skills launch through `delegate task` and return its submit receipt; review skills launch through the sanitized `delegate review` commands and return their launch envelope. Job-control skills use the same status, result, cancellation, evidence-preservation, and no-substitute-answer discipline. Review prose requires findings ordered by severity, preservation of evidence labels, and no automatic fixes after review.
+Launch skills preflight shared filesystem and state access, no-fork execution, and executable availability. Delegate enforces the selected backend and required Agentbus capabilities at submission time. Rescue and review skills return their submit receipts; callers use Agentbus directly for status, result, and cancellation. Review prose requires findings ordered by severity, preservation of evidence labels, and no automatic fixes after review.
 
 v0.8.1 retains the breaking namespace rename. On install or upgrade, the managed installer removes the legacy `codex:{rescue,review,adversarial-review,status,result,cancel}` names from Claude Code and the corresponding `claude:{...}` names from Codex; `--plan --json`, `--install --json`, and `--uninstall --json` report them in each target's additive `removed` array (entries of `{"path": ...}`); the `files` array contains only installed skill files.
 
 ## Contract tiers
 
-Tasks submit a nil policy unless the caller supplies a JSON Schema with `--schema-file`. In that case Delegate passes the source bytes as `Contract.JSONSchema` and requests one Agentbus corrective retry. There is no default Markdown report contract. Review commands submit a nil policy. Delegate forwards an Agentbus contract stamp when returned and omits the `contract` block otherwise.
+Tasks submit a nil policy unless the caller supplies a JSON Schema with `--schema-file`. In that case Delegate passes the source bytes as `Contract.JSONSchema` and requests one Agentbus corrective retry. There is no default Markdown report contract. Review commands submit a nil policy.
 
 ## State Roots And Job Control
 
-Delegate resolves Agentbus state with the same rule for task submission, status, result, cancel, and Codex sandbox configuration: `AGENTBUS_STATE_ROOT` when set, otherwise `${XDG_STATE_HOME:-~/.local/state}/agentbus`. Task uses that root to connect but stores no local submission intent or acknowledgement metadata.
+Delegate resolves Agentbus state with the same rule for task submission, review cleanup checks, and Codex sandbox configuration: `AGENTBUS_STATE_ROOT` when set, otherwise `${XDG_STATE_HOME:-~/.local/state}/agentbus`. Task uses that root to connect but stores no local submission intent or acknowledgement metadata.
 
-`status`, `result`, and `cancel` use the job metadata's recorded Agentbus root when available and otherwise use the current resolved root. Running `delegate status` without `--job` lists all jobs from only the current resolved root. Delegate never scans arbitrary roots and never performs Agentbus admission recovery, reset, seal, or fail-stop clearing automatically.
+Use `agentbus status --job <id> --json`, `agentbus result --job <id> --json`, and `agentbus cancel --job <id> --json` directly. A status or result exit code of `2` means the job is still running, so callers poll with a plain shell loop. Delegate's review cleanup uses only the recorded root for the submitted review job and never performs Agentbus admission recovery, reset, seal, or fail-stop clearing automatically.
 
-## Task submit receipt and envelopes
+## Submit receipts
 
-`delegate task` writes a submit receipt, not a launch envelope. `requestId` is caller-owned when supplied and generated otherwise; `deduplicated` is Agentbus's direct admission value. On a failed submission, the error includes the request ID so the caller can retry with it.
+`delegate task`, `delegate review`, and `delegate adversarial-review` return the same submit receipt. `requestId` is caller-owned when supplied and generated otherwise; `deduplicated` is Agentbus's direct admission value. On a failed submission, the error includes the request ID so the caller can retry with it.
 
 ```json
 {
@@ -136,64 +132,13 @@ Delegate resolves Agentbus state with the same rule for task submission, status,
 
 `model` and `effort` are omitted when their flags were not supplied.
 
-Review launch and terminal envelopes retain `schema: 2`. Terminal envelopes are returned by `delegate result --job <id>`, `cancel`, and a waiting review command. `delegate status --json` is the exception: it always returns a `JobStatusResult` (`{"jobs": [...]}`), for both running and terminal jobs, so a poller sees one stable shape across a job's lifetime. Running admission jobs carry `startedAt`, `heartbeatAt`, and `updatedAt` liveness fields (`heartbeatAt` is the last provider-event time, an activity signal, not a process lease); those liveness fields are absent from terminal status jobs. Terminal status jobs instead may carry the complete `finalAttemptStartedAt`/`finalAttemptEndedAt` pair for the FINAL attempt. That pair is not a whole-job duration, and a retry replaces its start time.
-
-The terminal envelope shape:
-
-```json
-{
-  "schema": 2,
-  "job_id": "opaque-agentbus-id",
-  "request_id": "delegate-0123456789abcdef0123456789abcdef",
-  "status": "completed",
-  "kind": "task",
-  "cleanup_disposition": "verified_absent",
-  "late_finalization": false,
-  "agentbus_warnings": [],
-  "local_artifacts_retained": false,
-  "backend_profile": {
-    "effective": "workspace-write",
-    "source": "flag"
-  },
-  "timeout": {
-    "requested": "45m0s",
-    "effective": "45m0s",
-    "source": "flag"
-  },
-  "contract": {
-    "status": "compliant",
-    "missing": [],
-    "reason": "",
-    "attempts": 1,
-    "retryUsed": false,
-    "contractSha256": "sha256:...",
-    "validatedAt": "2026-01-01T00:00:00Z"
-  },
-  "result_sha256": "..."
-}
-```
-
-The optional `contract` block is Agentbus's returned contract stamp. Delegate does not synthesize a contract verdict, terminal state, or retry-skip reason. `kind` is `task`, `review`, or `adversarial_review`. `orphaned` is a first-class terminal state with exit code 14; it does not fabricate a result, and `result_unavailable_reason` explains the missing result.
-
-For `failed`, `interrupted`, and `quarantined` terminals, Agentbus may also supply a redacted, length-bounded `failure_reason` and closed-set `failure_class`. They answer what went wrong and are independent of `result_unavailable_reason`, which only explains why no result is present. They are omitted when Agentbus supplies neither. `delegate status --json` exposes the same metadata within each JobStatus using Agentbus's `failureReason` and `failureClass` names; terminal envelopes use Delegate's snake_case names. Review launch and terminal envelopes carry `timeout` as requested/effective/source: a daemon-resolved deadline is authoritative, an explicit positive flag is `flag`-sourced, and an older daemon that supplies no resolution is `{"source":"unknown"}` without an invented duration. Terminal envelopes likewise expose the complete FINAL-attempt pair as `final_attempt_started_at` and `final_attempt_ended_at`; callers can subtract them when needed, but Delegate does not emit a derived duration.
-
-- `backend_not_started`: Agentbus could not start backend work, so no backend work was possible.
-- `backend_error`: a launched backend turn failed; work may have happened before it failed.
-- `backend_interrupted`: a backend turn stopped without Agentbus requesting the interruption.
-- `finalization_error`: the backend succeeded and Agentbus lost the result; inspect the worktree and salvage completed work before retrying.
-- `internal_error`: Agentbus has no more specific failure category.
-
-## Cleanup Disposition
-
-Agentbus reports terminal outcome and cleanup proof separately. Delegate removes job inputs and review workspaces only when `cleanup_disposition` is `verified_absent` or `no_execution_possible`. When the disposition is `unresolved` or missing on a terminal job, Delegate retains local artifacts and warns that backend absence is unproven. A successful job remains successful when cleanup is unresolved.
-
 ## Setup And Monitoring
 
 `agentbus setup --json` is a one-time, installation-time check that every configured backend is usable, not a per-launch prerequisite. It covers all configured backends together and fails if any of them fails, so a failure does not by itself mean the selected backend is unusable. The per-launch gate is `delegate task`: it enforces the selected backend and required Agentbus capabilities at submission time, and a launch failure reports its own connection or backend error directly.
 
-Task submission is already asynchronous; it has no `--background` or `--wait` flag. For an outstanding job, start exactly ONE background `delegate result --job <id> --wait --json` task: a background `--wait` blocks only its small awaiter process, not a worker slot or the model. A foreground `--wait` blocks the current host tool call, so reserve it for a short, explicitly bounded terminal check. Bound long waits with `--wait-timeout <duration>`; on expiry the job keeps running and stays retrievable by id; on a timeout, re-arm one background waiter or fetch the terminal result once it is ready — do not abandon the job. Do not write shell polling loops or scan the Agentbus state root for results: that storage layout is a private implementation detail, and filesystem salvage is an operator-only emergency after a confirmed CLI defect, not a supported path.
+All submissions are asynchronous. Delegate has no wait, poll, status, result, or cancel command. For an outstanding job, use Agentbus directly; a status or result exit code of `2` means the job is still running, so callers poll with a plain shell loop. Do not scan the Agentbus state root for results: that layout is a private implementation detail.
 
-The cheap one-shot `delegate status --json --job <id>` request reports a real terminal `state` (`completed`, `completed_noncompliant`, `failed`, ...) once the job finishes — sourced from the durable authority record, not a transient in-memory map — so a watcher keyed on `engine.IsTerminal(state)` observes termination without any separate call. Use it only for on-demand progress. `delegate status --job <id> --wait` (and `delegate result --job <id> --wait --json`) returns only once the job is terminal and exits with the job's status code; it is the terminal-wait primitive. Run a long terminal wait as one background awaiter rather than tying up the host loop.
+Review workspaces are private directories under the Delegate state root that hold sanitized repository content. Delegate records only the job ID, workspace path, and Agentbus state root. On the next `review` or `adversarial-review` invocation, it makes one Agentbus status read for each retained workspace and removes the workspace and its record only after a terminal state. The most recent review's workspace persists until a later review invocation makes that terminal-status check; a running, unreadable, or unreachable recorded state root leaves the workspace for a later invocation. Delegate does not wait or poll.
 
 ## Development and release
 

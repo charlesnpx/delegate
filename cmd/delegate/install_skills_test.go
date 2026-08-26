@@ -24,7 +24,7 @@ func TestInstallSkillsPlanJSONShowsLegacyRemovals(t *testing.T) {
 		t.Fatalf("plan JSON = %q: %v", stdout.String(), err)
 	}
 	files := result.Targets["codex"].Files
-	if len(files) != 13 {
+	if len(files) != 10 {
 		t.Fatalf("plan files = %#v", files)
 	}
 	removed := result.Targets["codex"].Removed
