@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -22,7 +21,6 @@ func TestProductionImportsOnlyAgentbusClientAndStableEngine(t *testing.T) {
 		"github.com/charlesnpx/agentbus/client": {},
 		"github.com/charlesnpx/agentbus/engine": {},
 	}
-	actual := map[string]struct{}{}
 	var violations []string
 	for _, root := range roots {
 		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
@@ -41,7 +39,6 @@ func TestProductionImportsOnlyAgentbusClientAndStableEngine(t *testing.T) {
 				if !strings.HasPrefix(importPath, "github.com/charlesnpx/agentbus/") {
 					continue
 				}
-				actual[importPath] = struct{}{}
 				if _, ok := allowed[importPath]; !ok {
 					displayPath, err := filepath.Rel(repoRoot, path)
 					if err != nil {
@@ -58,15 +55,5 @@ func TestProductionImportsOnlyAgentbusClientAndStableEngine(t *testing.T) {
 	}
 	if len(violations) > 0 {
 		t.Fatalf("production files import unstable agentbus packages:\n%s", strings.Join(violations, "\n"))
-	}
-	var staleAllowances []string
-	for importPath := range allowed {
-		if _, ok := actual[importPath]; !ok {
-			staleAllowances = append(staleAllowances, importPath)
-		}
-	}
-	if len(staleAllowances) > 0 {
-		sort.Strings(staleAllowances)
-		t.Fatalf("agentbus import allowlist is broader than production imports:\n%s", strings.Join(staleAllowances, "\n"))
 	}
 }

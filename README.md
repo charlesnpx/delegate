@@ -75,7 +75,7 @@ Each successful `task`, `review`, or `adversarial-review` submission writes one 
 
 `model` and `effort` are omitted when their flags were not supplied. The timeout values are Agentbus's returned values, not a local interpretation.
 
-For replay safety, supply `--request-id` yourself and reuse that exact value after an ambiguous submission. If it has already been accepted, the replay receipt has `deduplicated: true` and carries the original job ID. Without the flag, Delegate generates an ID and includes it in the receipt. That is convenient for a normal one-off invocation, but it has a deliberate trade-off: if a manually run command is hard-killed before its generated receipt is visible, Delegate has not retained that generated ID for a later replay. Use an explicit request ID whenever replay matters.
+For replay safety, Agentbus's replay key is the pair of request ID and working directory: after an ambiguous submission, reuse that exact `--request-id` and run against the same working directory. If it has already been accepted, the replay receipt has `deduplicated: true` and carries the original job ID. Without the flag, Delegate generates an ID and includes it in the receipt. That is convenient for a normal one-off invocation, but it has a deliberate trade-off: if a manually run command is hard-killed before its generated receipt is visible, Delegate has not retained that generated ID for a later replay. Use an explicit request ID whenever replay matters.
 
 ## Observe jobs with Agentbus
 
@@ -91,9 +91,7 @@ For `status` and `result`, exit code `2` means the job is still running. The rec
 
 ## Worker sandbox rules
 
-With `--write`, the worker has workspace-write access only inside its own `--cwd` and has no network. Put `GOCACHE` under that cwd because Go writes to it; leave the default `GOMODCACHE` alone because it is read-only to the worker and already populated, while a relocated empty cache cannot be refilled without network access. Without `--write`, the worker is read-only, has no network, and cannot create temporary directories.
-
-For a write task that builds Go code, set the cache in the task's prompt or environment to a path inside the working directory, for example `GOCACHE="$PWD/.gocache"`. Do not move `GOMODCACHE`: the worker cannot use the network to repopulate a new module cache.
+With `--write`, workspace-write access only inside its `--cwd` and no network are Codex-specific guarantees; enforcement depends on the selected Agentbus backend: Claude runs without a filesystem or network sandbox, and Cursor uses agent-mode permissions. For Go builds, set `GOCACHE` inside `--cwd` and leave `GOMODCACHE` at its default.
 
 ## Review commands
 
