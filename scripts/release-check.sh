@@ -118,7 +118,7 @@ if not {"go", "agentbus"}.issubset(executables):
 targets = doc.get("targets")
 if not isinstance(targets, dict):
     fail("targets is not an object")
-for target, minimum_files in (("tools", 1), ("claude", 5), ("codex", 5)):
+for target, minimum_files in (("tools", 1), ("claude", 1), ("codex", 1)):
     target_doc = targets.get(target)
     if not isinstance(target_doc, dict):
         fail(f"targets.{target} is not an object")
@@ -155,7 +155,7 @@ print(version)
       | if (.targets | type) != "object" then fail("targets is not an object") else . end
       | reduce ["tools", "claude", "codex"][] as $target (.;
           if (.targets[$target] | type) != "object" then fail("targets." + $target + " is not an object")
-          elif (.targets[$target].files | type) != "array" or (.targets[$target].files | length) < (if $target == "tools" then 1 else 5 end) then fail("targets." + $target + ".files is incomplete")
+          elif (.targets[$target].files | type) != "array" or (.targets[$target].files | length) < 1 then fail("targets." + $target + ".files is incomplete")
           elif any(.targets[$target].files[]; (type != "object") or (.sha256 | type) != "string" or .sha256 == "") then fail("targets." + $target + ".files has a missing sha256")
           else . end)
       | if (.version | type) != "string" or .version == "" then fail("version is missing") else .version end

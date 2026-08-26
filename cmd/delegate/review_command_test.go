@@ -13,458 +13,314 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
-	delegateconfig "github.com/charlesnpx/delegate/internal/config"
-	reviewpkg "github.com/charlesnpx/delegate/internal/review"
 )
 
-func TestReviewCommandsUseReadOnlySanitizedTaskPipelineAndEnvelopeKinds(t *testing.T) {
-	for _, tc := range []struct {
-		command  string
-		wantKind string
-		framing  string
-	}{
-		{command: "review", wantKind: reviewKind, framing: "Perform a read-only code review"},
-		{command: "adversarial-review", wantKind: adversarialReviewKind, framing: "refute-first"},
-	} {
-		t.Run(tc.command, func(t *testing.T) {
-			repo := newCommandGitFixture(t)
-			writeCommandFixture(t, repo, "visible.go", "package visible\n// PUBLIC_CHANGE\n")
-			writeCommandFixture(t, repo, ".env.local", "CLI_TRACKED_SECRET_NEVER\n")
-			gitCommandFixture(t, repo, "add", ".env.local")
-			gitCommandFixture(t, repo, "commit", "-m", "track secret path")
-			writeCommandFixture(t, repo, ".env.local", "CLI_CHANGED_SECRET_NEVER\n")
+func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) {
+	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
+	fake := &fakeAgentbusClient{
+		hello: helloWithCapabilities(),
+		submitResult: client.JobSubmitResult{
+			JobID:   "job_review",
+			State:   engine.StateQueued,
+			Timeout: timeout,
+		},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
 
-			report := compliantReport()
+	repo := newReviewCommandRepository(t)
+	var firstOut, firstErr bytes.Buffer
+	if code := run([]string{
+		"review", "--backend", "claude", "--cwd", repo, "--scope", "working-tree",
+		"--model", "review-model", "--effort", "review-effort",
+	}, nil, &firstOut, &firstErr); code != 0 {
+		t.Fatalf("review code=%d stderr=%q", code, firstErr.String())
+	}
+	assertTaskReceiptShape(t, firstOut.Bytes(), "job_review")
+	if got := len(fake.statuses); got != 0 {
+		t.Fatalf("review status reads=%d, want none before a workspace is retained", got)
+	}
+
+	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate")
+	metadata, errs := loadReviewWorkspaceMetadata(stateDir)
+	if len(errs) != 0 || len(metadata) != 1 {
+		t.Fatalf("first review workspace metadata=%#v errors=%v", metadata, errs)
+	}
+	firstWorkspace := metadata[0].Workspace
+	artifactPath := filepath.Join(firstWorkspace, "review.patch")
+	artifact, err := os.ReadFile(artifactPath)
+	if err != nil {
+		t.Fatalf("read retained review artifact: %v", err)
+	}
+	if !bytes.Contains(artifact, []byte("large review context")) {
+		t.Fatalf("review artifact did not contain the assembled repository content")
+	}
+
+	fake.status = client.JobStatusResult{Jobs: []client.JobStatus{{JobID: "job_review", State: engine.StateCompleted}}}
+	fake.submitResult = client.JobSubmitResult{JobID: "job_adversarial", State: engine.StateQueued, Timeout: timeout}
+	var secondOut, secondErr bytes.Buffer
+	if code := run([]string{
+		"adversarial-review", "--backend", "claude", "--cwd", repo, "--scope", "working-tree",
+		"--model", "review-model", "--effort", "review-effort",
+	}, nil, &secondOut, &secondErr); code != 0 {
+		t.Fatalf("adversarial-review code=%d stderr=%q", code, secondErr.String())
+	}
+	assertTaskReceiptShape(t, secondOut.Bytes(), "job_adversarial")
+	if got := len(fake.statuses); got != 1 {
+		t.Fatalf("later review status reads=%d, want one one-shot cleanup check", got)
+	}
+	if got := fake.statuses[0].JobID; got != "job_review" {
+		t.Fatalf("cleanup status job=%q, want job_review", got)
+	}
+	if _, err := os.Stat(firstWorkspace); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("terminal review workspace still exists or stat failed: %v", err)
+	}
+	if _, err := os.Stat(artifactPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("terminal review artifact still exists or stat failed: %v", err)
+	}
+	metadata, errs = loadReviewWorkspaceMetadata(stateDir)
+	if len(errs) != 0 || len(metadata) != 1 || metadata[0].JobID != "job_adversarial" {
+		t.Fatalf("metadata after later review=%#v errors=%v", metadata, errs)
+	}
+
+	fake.status = client.JobStatusResult{Jobs: []client.JobStatus{{JobID: "job_adversarial", State: engine.StateCompleted}}}
+	if errs := sweepReviewWorkspaces(context.Background(), stateDir); len(errs) != 0 {
+		t.Fatalf("final workspace sweep errors=%v", errs)
+	}
+	metadata, errs = loadReviewWorkspaceMetadata(stateDir)
+	if len(errs) != 0 || len(metadata) != 0 {
+		t.Fatalf("metadata after terminal cleanup=%#v errors=%v", metadata, errs)
+	}
+}
+
+func TestReviewCommandsPassModelAndEffortThrough(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, model, effort string
+	}{
+		{name: "review supplied", command: "review", model: "review-model", effort: "review-effort"},
+		{name: "adversarial review omitted", command: "adversarial-review"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeAgentbusClient{
 				hello: helloWithCapabilities(),
-				result: client.JobResult{
-					JobID:              "job_" + strings.ReplaceAll(tc.command, "-", "_"),
-					SessionID:          "session_review",
-					State:              engine.StateCompleted,
-					CleanupDisposition: cleanupDispositionVerifiedAbsent,
-					Result:             &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-					Contract:           ptr(compliantContractStamp(t, report)),
+				submitResult: client.JobSubmitResult{
+					JobID:   "job_passthrough",
+					State:   engine.StateQueued,
+					Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
 				},
 			}
 			restore := stubAgentbusGlobals(t, fake)
 			defer restore()
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-			if err := delegateconfig.Save(delegateconfig.Config{Overridable: true, Backend: delegateconfig.Backends{Codex: delegateconfig.Defaults{Model: "review-default-model", Effort: "review-default-effort"}}}); err != nil {
-				t.Fatal(err)
-			}
 
-			var stdout, stderr bytes.Buffer
-			code := run([]string{tc.command, "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--wait", "--json"}, nil, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("%s code=%d stderr=%q", tc.command, code, stderr.String())
+			args := []string{tc.command, "--backend", "claude", "--cwd", newReviewCommandRepository(t), "--scope", "working-tree"}
+			if tc.model != "" {
+				args = append(args, "--model", tc.model, "--effort", tc.effort)
 			}
-			if strings.Contains(stderr.String(), readOnlyTaskHint) {
-				t.Fatalf("%s emitted task read-only hint: %q", tc.command, stderr.String())
+			var stdout, stderr bytes.Buffer
+			if code := run(args, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("%s code=%d stderr=%q", tc.command, code, stderr.String())
 			}
 			if len(fake.submits) != 1 {
 				t.Fatalf("submits=%d, want 1", len(fake.submits))
 			}
-			spec := fake.submits[0].TaskSpec
-			if spec.Write {
-				t.Fatal("review TaskSpec.Write=true, want read-only")
-			}
-			if spec.CWD == repo || !strings.Contains(filepath.ToSlash(spec.CWD), "/delegate/review-") {
-				t.Fatalf("safe review cwd=%q, repo=%q", spec.CWD, repo)
-			}
-			if spec.Tags["delegate.kind"] != tc.wantKind {
-				t.Fatalf("delegate.kind=%q, want %q", spec.Tags["delegate.kind"], tc.wantKind)
-			}
-			if spec.Model != "review-default-model" || spec.Effort != "review-default-effort" {
-				t.Fatalf("review defaults model=%q effort=%q", spec.Model, spec.Effort)
-			}
-			for _, required := range []string{tc.framing, "PUBLIC_CHANGE", "REDACTED\tM\t\".env.local\""} {
-				if !strings.Contains(spec.Prompt, required) {
-					t.Fatalf("prompt missing %q: %q", required, spec.Prompt)
-				}
-			}
-			for _, forbidden := range []string{"CLI_TRACKED_SECRET_NEVER", "CLI_CHANGED_SECRET_NEVER", repo} {
-				if strings.Contains(spec.Prompt, forbidden) {
-					t.Fatalf("prompt leaked %q", forbidden)
-				}
-			}
-			var env TerminalEnvelope
-			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
-				t.Fatalf("terminal JSON: %v; raw=%q", err, stdout.String())
-			}
-			if env.Kind != tc.wantKind {
-				t.Fatalf("envelope kind=%q, want %q", env.Kind, tc.wantKind)
-			}
-			if env.Model.Effective != "review-default-model" || env.Model.Source != "config" || env.Effort.Effective != "review-default-effort" || env.Effort.Source != "config" {
-				t.Fatalf("review model/effort envelope model=%#v effort=%#v", env.Model, env.Effort)
-			}
-			if _, err := os.Stat(spec.CWD); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("terminal review workspace still exists or stat failed: %v", err)
+			if got := fake.submits[0].TaskSpec; got.Model != tc.model || got.Effort != tc.effort {
+				t.Fatalf("submitted model/effort=%q/%q, want %q/%q", got.Model, got.Effort, tc.model, tc.effort)
 			}
 		})
 	}
 }
 
-func TestReviewWaitCleanupUsesStatusDispositionWhenResultOmitsIt(t *testing.T) {
-	repo := newCommandGitFixture(t)
-	writeCommandFixture(t, repo, "visible.txt", "change\n")
-	report := compliantReport()
-	jobID := "job_review_wait_status_cleanup"
-	sessionID := "session_review_wait_status_cleanup"
-	fake := &reviewWaitStatusCleanupClient{fakeAgentbusClient: fakeAgentbusClient{
-		hello: helloWithCapabilities(),
-		result: client.JobResult{
-			JobID:     jobID,
-			SessionID: sessionID,
-			State:     engine.StateCompleted,
-			Result:    &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-			Contract:  ptr(compliantContractStamp(t, report)),
-		},
-	}}
-	restore := stubAgentbusClientGlobals(t, fake)
-	defer restore()
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--wait", "--json"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("review code=%d stderr=%q stdout=%q, want success", code, stderr.String(), stdout.String())
-	}
-	if fake.captureErr != nil {
-		t.Fatalf("capture artifacts before status cleanup: %v", fake.captureErr)
-	}
-	if fake.inputPath == "" || fake.workspace == "" {
-		t.Fatalf("captured input=%q workspace=%q, want both paths before cleanup", fake.inputPath, fake.workspace)
-	}
-	assertPathMissing(t, fake.inputPath)
-	assertPathMissing(t, fake.workspace)
-	meta, found, err := loadJobMetadata("", jobID)
-	if err != nil || !found {
-		t.Fatalf("metadata found=%v err=%v", found, err)
-	}
-	if meta.JobInputPath != "" || meta.ReviewWorkspace != "" || meta.CleanupDisposition != cleanupDispositionVerifiedAbsent {
-		t.Fatalf("metadata after cleanup=%#v, want removed artifacts and status fallback disposition", meta)
-	}
-	if strings.Contains(stderr.String(), "retained local job artifacts") {
-		t.Fatalf("stderr=%q, want no retention warning", stderr.String())
-	}
-}
-
-type reviewWaitStatusCleanupClient struct {
-	fakeAgentbusClient
-	inputPath  string
-	workspace  string
-	captureErr error
-}
-
-func (f *reviewWaitStatusCleanupClient) JobStatus(_ context.Context, params client.JobStatusParams) (client.JobStatusResult, error) {
-	f.statuses = append(f.statuses, params)
-	meta, found, err := loadJobMetadata("", params.JobID)
-	if err != nil {
-		f.captureErr = err
-	} else if !found {
-		f.captureErr = errors.New("metadata missing before wait cleanup")
-	} else {
-		f.inputPath = meta.JobInputPath
-		f.workspace = meta.ReviewWorkspace
-		if f.inputPath == "" || f.workspace == "" {
-			f.captureErr = errors.New("metadata missing artifact paths before wait cleanup")
-		} else if _, err := os.Stat(f.inputPath); err != nil {
-			f.captureErr = err
-		} else if _, err := os.Stat(f.workspace); err != nil {
-			f.captureErr = err
-		}
-	}
-	return client.JobStatusResult{Jobs: []client.JobStatus{{
-		JobID:              params.JobID,
-		SessionID:          "session_review_wait_status_cleanup",
-		State:              engine.StateCompleted,
-		CleanupDisposition: cleanupDispositionVerifiedAbsent,
-	}}}, nil
-}
-
-func TestReviewBackgroundArtifactPersistsUntilTerminalResultCleanup(t *testing.T) {
-	repo := newCommandGitFixture(t)
-	writeCommandFixture(t, repo, "large.txt", strings.Repeat("x", reviewpkg.MaxInlineBytes+1))
-	report := compliantReport()
+func TestReviewAmbiguousSubmissionFailureKeepsWorkspace(t *testing.T) {
 	fake := &fakeAgentbusClient{
-		hello: helloWithCapabilities(),
-		result: client.JobResult{
-			JobID:              "job_review_artifact",
-			SessionID:          "session_review_artifact",
-			State:              engine.StateCompleted,
-			CleanupDisposition: cleanupDispositionVerifiedAbsent,
-			Result:             &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-			Contract:           ptr(compliantContractStamp(t, report)),
-		},
+		hello:     helloWithCapabilities(),
+		submitErr: errors.New("lost acknowledgement"),
 	}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
-	var launchOut, launchErr bytes.Buffer
-	code := run([]string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--background", "--json"}, nil, &launchOut, &launchErr)
-	if code != 0 {
-		t.Fatalf("review launch code=%d stderr=%q", code, launchErr.String())
+	repo := newReviewCommandRepository(t)
+	var stdout, stderr bytes.Buffer
+	_, err := runReview(reviewKind, []string{
+		"--backend", "codex", "--cwd", repo, "--scope", "working-tree",
+		"--model", "review-model", "--effort", "review-effort",
+	}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("runReview() error = nil, want ambiguous submission failure")
 	}
-	if len(fake.submits) != 1 {
-		t.Fatalf("submits=%d, want 1", len(fake.submits))
-	}
-	workspace := fake.submits[0].TaskSpec.CWD
-	meta, found, err := loadJobMetadata("", "job_review_artifact")
-	if err != nil || !found {
-		t.Fatalf("load metadata found=%v err=%v", found, err)
-	}
-	if meta.ReviewWorkspace != workspace {
-		t.Fatalf("metadata workspace=%q, want %q", meta.ReviewWorkspace, workspace)
-	}
-	artifact := filepath.Join(workspace, "review.patch")
-	if info, err := os.Stat(artifact); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("artifact before result info=%v err=%v", info, err)
-	}
-	if !strings.Contains(fake.submits[0].TaskSpec.Prompt, `"review.patch"`) || strings.Contains(fake.submits[0].TaskSpec.Prompt, strings.Repeat("x", 100)) {
-		t.Fatalf("spilled prompt did not reference artifact cleanly: %q", fake.submits[0].TaskSpec.Prompt)
+	if got := len(fake.submits); got != 1 {
+		t.Fatalf("submits=%d, want 1", got)
 	}
 
-	var resultOut, resultErr bytes.Buffer
-	code = run([]string{"result", "--job", "job_review_artifact", "--json"}, nil, &resultOut, &resultErr)
-	if code != 0 {
-		t.Fatalf("result code=%d stderr=%q", code, resultErr.String())
+	workspaces := reviewWorkspacePaths(t, filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate"))
+	if len(workspaces) != 1 {
+		t.Fatalf("retained workspaces=%q, want one", workspaces)
 	}
-	var env TerminalEnvelope
-	if err := json.Unmarshal(bytes.TrimSpace(resultOut.Bytes()), &env); err != nil {
-		t.Fatal(err)
-	}
-	if env.Kind != reviewKind {
-		t.Fatalf("result envelope kind=%q, want review", env.Kind)
-	}
-	if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("terminal result left workspace: %v", err)
+	if _, err := os.Stat(filepath.Join(workspaces[0], "review.patch")); err != nil {
+		t.Fatalf("retained workspace artifact: %v", err)
 	}
 }
 
-func TestReviewSubmissionIntentFailureBeforeLaunchAbortsAndCleansWorkspace(t *testing.T) {
-	repo := newCommandGitFixture(t)
-	writeCommandFixture(t, repo, "visible.txt", "change\n")
-	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+func TestReviewMetadataWriteFailureAfterSubmissionKeepsWorkspace(t *testing.T) {
+	fake := &fakeAgentbusClient{
+		hello:        helloWithCapabilities(),
+		submitResult: client.JobSubmitResult{JobID: "job_metadata_failure", State: engine.StateQueued},
+	}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
-	oldSave := saveSubmissionIntent
-	saveSubmissionIntent = func(string, submissionIntent) error {
-		return errors.New("intent store unavailable before launch")
-	}
-	defer func() { saveSubmissionIntent = oldSave }()
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--background", "--json"}, nil, &stdout, &stderr)
-	if code == 0 {
-		t.Fatalf("review code=0, want metadata failure; stdout=%q", stdout.String())
-	}
-	if len(fake.submits) != 0 {
-		t.Fatalf("JobSubmit calls=%d, want 0", len(fake.submits))
-	}
 	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate")
-	workspaces, err := filepath.Glob(filepath.Join(stateDir, "review-*"))
-	if err != nil || len(workspaces) != 0 {
-		t.Fatalf("review workspaces after aborted launch=%#v, %v", workspaces, err)
-	}
-	if !strings.Contains(stderr.String(), "persist submission intent before launch") {
-		t.Fatalf("stderr=%q", stderr.String())
-	}
-}
-
-func TestReviewMetadataFailureAfterLaunchUsesDurableFallbackAndPreservesKind(t *testing.T) {
-	repo := newCommandGitFixture(t)
-	writeCommandFixture(t, repo, "visible.txt", "change\n")
-	report := compliantReport()
-	fake := &fakeAgentbusClient{
-		hello: helloWithCapabilities(),
-		result: client.JobResult{
-			JobID:              "job_review_metadata_fallback",
-			SessionID:          "session_review_metadata_fallback",
-			State:              engine.StateCompleted,
-			CleanupDisposition: cleanupDispositionVerifiedAbsent,
-			Result:             &engine.ResultInfo{Text: report, SHA256: rawSHA256(report), Bytes: int64(len(report))},
-			Contract:           ptr(compliantContractStamp(t, report)),
-		},
-	}
-	restore := stubAgentbusGlobals(t, fake)
-	defer restore()
-	oldSave := saveDelegateJobMetadata
-	saveDelegateJobMetadata = func(string, jobMetadata) error {
-		return errors.New("primary metadata write failed after launch")
-	}
-	defer func() { saveDelegateJobMetadata = oldSave }()
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--wait", "--json"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("review code=%d stderr=%q", code, stderr.String())
-	}
-	if len(fake.submits) != 1 {
-		t.Fatalf("JobSubmit calls=%d, want 1", len(fake.submits))
-	}
-	workspace := fake.submits[0].TaskSpec.CWD
-	var env TerminalEnvelope
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+	if err := os.Mkdir(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if env.Kind != reviewKind {
-		t.Fatalf("terminal envelope kind=%q, want %q", env.Kind, reviewKind)
+	if err := os.WriteFile(filepath.Join(stateDir, reviewWorkspaceMetadataDirectoryName), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("fallback metadata did not reap review workspace: %v", err)
-	}
-	if !strings.Contains(stderr.String(), "durable state-directory fallback") {
-		t.Fatalf("stderr=%q", stderr.String())
-	}
-}
 
-func TestReviewMetadataFailureAfterSubmitReturnsRealJobEnvelopeAndKeepsWorkspace(t *testing.T) {
-	repo := newCommandGitFixture(t)
-	writeCommandFixture(t, repo, "visible.txt", "change\n")
-	fake := &fakeAgentbusClient{
-		hello:  helloWithCapabilities(),
-		result: client.JobResult{JobID: "job_review_metadata_orphan", State: engine.StateRunning},
-	}
-	restore := stubAgentbusGlobals(t, fake)
-	defer restore()
-	oldPrimary := saveDelegateJobMetadata
-	oldFallback := saveLaunchedJobMetadataFallback
-	saveDelegateJobMetadata = func(stateDir string, meta jobMetadata) error {
-		return errors.New("primary metadata unavailable after submit")
-	}
-	saveLaunchedJobMetadataFallback = func(string, jobMetadata) error {
-		return errors.New("fallback metadata unavailable after submit")
-	}
-	defer func() {
-		saveDelegateJobMetadata = oldPrimary
-		saveLaunchedJobMetadataFallback = oldFallback
-	}()
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-
+	repo := newReviewCommandRepository(t)
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--wait", "--json"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("review code=%d stderr=%q", code, stderr.String())
+	_, err := runReview(reviewKind, []string{
+		"--backend", "codex", "--cwd", repo, "--scope", "working-tree",
+		"--model", "review-model", "--effort", "review-effort",
+	}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("runReview() error = nil, want review workspace metadata write failure")
 	}
-	if len(fake.submits) != 1 {
-		t.Fatalf("JobSubmit calls=%d, want 1", len(fake.submits))
+	if !strings.Contains(err.Error(), "record review workspace") {
+		t.Fatalf("error=%q, want review workspace metadata context", err)
 	}
-	var env LaunchEnvelope
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
-		t.Fatalf("launch envelope invalid: %v; raw=%q", err, stdout.String())
+	if got := len(fake.submits); got != 1 {
+		t.Fatalf("submits=%d, want 1", got)
 	}
-	if env.JobID != "job_review_metadata_orphan" || env.Status != string(engine.StateQueued) {
-		t.Fatalf("launch envelope=%#v, want real submitted job", env)
-	}
-	workspace := fake.submits[0].TaskSpec.CWD
-	if info, err := os.Stat(workspace); err != nil || !info.IsDir() {
-		t.Fatalf("review workspace removed after successful submit: info=%v err=%v", info, err)
-	}
-	for _, warning := range []string{"primary metadata unavailable after submit", "fallback metadata unavailable after submit"} {
-		if !strings.Contains(stderr.String(), warning) {
-			t.Fatalf("stderr=%q, want warning %q", stderr.String(), warning)
-		}
-	}
-	requestID := fake.submits[0].RequestID
-	intent, found, err := loadSubmissionIntent("", requestID)
-	if err != nil || !found {
-		t.Fatalf("submission intent found=%v err=%v", found, err)
-	}
-	if intent.Phase != submissionPhaseInFlight || intent.ReviewWorkspace != workspace || intent.JobID != "" {
-		t.Fatalf("submission intent=%#v, want in-flight intent retaining review workspace and no ack job", intent)
-	}
-	if _, found, err := loadJobMetadata("", "job_review_metadata_orphan"); err != nil || found {
-		t.Fatalf("metadata found=%v err=%v, want absent after primary+fallback failure", found, err)
+	if workspaces := reviewWorkspacePaths(t, stateDir); len(workspaces) != 1 {
+		t.Fatalf("retained workspaces=%q, want one", workspaces)
 	}
 }
 
-func TestReviewAllowLiveRepoReadIsExplicitAndWarned(t *testing.T) {
-	repo := newCommandGitFixture(t)
-	writeCommandFixture(t, repo, "visible.txt", "change\n")
+func TestReviewPreSubmissionFailureRemovesWorkspace(t *testing.T) {
 	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+	fake.hello.Backends = []string{"claude"}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
+	repo := newReviewCommandRepository(t)
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"review", "--backend", "claude", "--cwd", repo, "--scope", "working-tree", "--allow-live-repo-read", "--background", "--json"}, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("review code=%d stderr=%q", code, stderr.String())
+	_, err := runReview(reviewKind, []string{
+		"--backend", "codex", "--cwd", repo, "--scope", "working-tree",
+		"--model", "review-model", "--effort", "review-effort",
+	}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("runReview() error = nil, want pre-submission backend validation failure")
 	}
-	if len(fake.submits) != 1 {
-		t.Fatalf("submits=%d, want 1", len(fake.submits))
+	if got := len(fake.submits); got != 0 {
+		t.Fatalf("submits=%d, want no submission", got)
 	}
-	spec := fake.submits[0].TaskSpec
-	canonicalRepo, err := filepath.EvalSymlinks(repo)
+	if workspaces := reviewWorkspacePaths(t, filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate")); len(workspaces) != 0 {
+		t.Fatalf("workspaces=%q, want none after pre-submission failure", workspaces)
+	}
+}
+
+func TestReviewAcceptedRPCErrorReportsIdentityAndKeepsWorkspaceMetadata(t *testing.T) {
+	var rpcErr client.RPCError
+	if err := json.Unmarshal([]byte(`{"Object":{"code":-32000,"message":"admission closing","data":{"code":"backend_unavailable","jobId":"job_accepted_after_error"}}}`), &rpcErr); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAgentbusClient{hello: helloWithCapabilities(), submitErr: &rpcErr}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	repo := newReviewCommandRepository(t)
+	var stdout, stderr bytes.Buffer
+	_, err := runReview(reviewKind, []string{
+		"--backend", "codex", "--cwd", repo, "--scope", "working-tree",
+		"--model", "review-model", "--effort", "review-effort",
+	}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("runReview() error = nil, want post-accept RPC error")
+	}
+	if got := len(fake.submits); got != 1 {
+		t.Fatalf("submits=%d, want 1", got)
+	}
+	if !strings.Contains(err.Error(), fake.submits[0].RequestID) || !strings.Contains(err.Error(), "job_accepted_after_error") {
+		t.Fatalf("error=%q, want request ID %q and accepted job ID", err, fake.submits[0].RequestID)
+	}
+
+	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate")
+	metadata, metadataErrs := loadReviewWorkspaceMetadata(stateDir)
+	if len(metadataErrs) != 0 || len(metadata) != 1 {
+		t.Fatalf("review workspace metadata=%#v errors=%v", metadata, metadataErrs)
+	}
+	if metadata[0].JobID != "job_accepted_after_error" {
+		t.Fatalf("metadata job id=%q, want accepted job id", metadata[0].JobID)
+	}
+	if _, err := os.Stat(metadata[0].Workspace); err != nil {
+		t.Fatalf("retained workspace: %v", err)
+	}
+}
+
+func reviewWorkspacePaths(t *testing.T, stateDir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(stateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spec.CWD != canonicalRepo || spec.Write {
-		t.Fatalf("live review spec cwd=%q write=%v", spec.CWD, spec.Write)
+	var paths []string
+	for _, entry := range entries {
+		if entry.IsDir() && entry.Name() != reviewWorkspaceMetadataDirectoryName && strings.HasPrefix(entry.Name(), "review-") {
+			paths = append(paths, filepath.Join(stateDir, entry.Name()))
+		}
 	}
-	if !strings.Contains(spec.Prompt, "LIVE-REPOSITORY MODE") || !strings.Contains(stderr.String(), liveRepoReadWarning) {
-		t.Fatalf("prompt=%q stderr=%q", spec.Prompt, stderr.String())
-	}
+	return paths
 }
 
-func TestReviewRejectsWriteAndWorkingTreeBaseFlags(t *testing.T) {
-	for _, args := range [][]string{
-		{"review", "--backend", "codex", "--write"},
-		{"review", "--backend", "codex", "--scope", "working-tree", "--base", "main"},
-	} {
-		var stdout, stderr bytes.Buffer
-		if code := run(args, nil, &stdout, &stderr); code == 0 {
-			t.Fatalf("run(%v) code=0", args)
+func assertTaskReceiptShape(t *testing.T, raw []byte, jobID string) {
+	t.Helper()
+	var receipt taskSubmitReceipt
+	if err := json.Unmarshal(raw, &receipt); err != nil {
+		t.Fatalf("receipt JSON invalid: %v; raw=%q", err, string(raw))
+	}
+	if receipt.JobID != jobID || receipt.State != engine.StateQueued || receipt.Timeout == nil {
+		t.Fatalf("receipt=%#v", receipt)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(fields), 7; got != want {
+		t.Fatalf("receipt fields=%#v, want exactly %d", fields, want)
+	}
+	for _, key := range []string{"requestId", "jobId", "state", "deduplicated", "model", "effort", "timeout"} {
+		if _, found := fields[key]; !found {
+			t.Fatalf("receipt fields=%#v, missing %q", fields, key)
+		}
+	}
+	for _, forbidden := range []string{"schema", "kind", "status", "cleanup_disposition"} {
+		if _, found := fields[forbidden]; found {
+			t.Fatalf("receipt fields=%#v, unexpectedly includes %q", fields, forbidden)
 		}
 	}
 }
 
-func TestReviewHelpStatesContextBoundaryAndFilesystemLimits(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	_ = run([]string{"review", "--help"}, nil, &stdout, &stderr)
-	for _, want := range []string{
-		"redacts secret-matched paths and secret-like diff hunks",
-		"does not prevent a same-user backend from reading",
-		"--allow-live-repo-read makes those reads easier",
-		"OS-level isolation requires a container/sandbox profile",
-	} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Fatalf("review help missing %q: %q", want, stderr.String())
-		}
-	}
-}
-
-func newCommandGitFixture(t *testing.T) string {
+func newReviewCommandRepository(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()
-	gitCommandFixture(t, repo, "init", "-b", "main")
-	gitCommandFixture(t, repo, "config", "user.name", "Delegate Test")
-	gitCommandFixture(t, repo, "config", "user.email", "delegate@example.invalid")
-	writeCommandFixture(t, repo, "README.md", "fixture\n")
-	gitCommandFixture(t, repo, "add", "README.md")
-	gitCommandFixture(t, repo, "commit", "-m", "initial")
+	runReviewGit(t, repo, "init")
+	runReviewGit(t, repo, "config", "user.email", "delegate-test@example.invalid")
+	runReviewGit(t, repo, "config", "user.name", "Delegate Test")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runReviewGit(t, repo, "add", "tracked.txt")
+	runReviewGit(t, repo, "commit", "-m", "base")
+	if err := os.WriteFile(filepath.Join(repo, "large.txt"), []byte(strings.Repeat("large review context\n", 16*1024)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return repo
 }
 
-func writeCommandFixture(t *testing.T, repo, name, content string) {
-	t.Helper()
-	path := filepath.Join(repo, filepath.FromSlash(name))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func gitCommandFixture(t *testing.T, repo string, args ...string) {
+func runReviewGit(t *testing.T, repo string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
-	if raw, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, raw)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
 	}
 }

@@ -17,9 +17,9 @@ func TestProductionImportsOnlyAgentbusClientAndStableEngine(t *testing.T) {
 	}
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", ".."))
 	roots := []string{filepath.Join(repoRoot, "cmd/delegate"), filepath.Join(repoRoot, "internal")}
-	allowed := map[string]bool{
-		"github.com/charlesnpx/agentbus/client": true,
-		"github.com/charlesnpx/agentbus/engine": true,
+	allowed := map[string]struct{}{
+		"github.com/charlesnpx/agentbus/client": {},
+		"github.com/charlesnpx/agentbus/engine": {},
 	}
 	var violations []string
 	for _, root := range roots {
@@ -36,7 +36,10 @@ func TestProductionImportsOnlyAgentbusClientAndStableEngine(t *testing.T) {
 			}
 			for _, imp := range file.Imports {
 				importPath := strings.Trim(imp.Path.Value, `"`)
-				if strings.HasPrefix(importPath, "github.com/charlesnpx/agentbus/") && !allowed[importPath] {
+				if !strings.HasPrefix(importPath, "github.com/charlesnpx/agentbus/") {
+					continue
+				}
+				if _, ok := allowed[importPath]; !ok {
 					displayPath, err := filepath.Rel(repoRoot, path)
 					if err != nil {
 						displayPath = path

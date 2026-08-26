@@ -1,488 +1,41 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
-	"github.com/charlesnpx/delegate/internal/config"
 )
-
-// minimumSupportedAgentbusVersion is the oldest installed agentbus binary this
-// delegate build is known to work against. Update it when the
-// github.com/charlesnpx/agentbus requirement in go.mod is bumped.
-const minimumSupportedAgentbusVersion = "v0.10.0"
-
-const (
-	agentbusVersionStatusSupported = "supported"
-	agentbusVersionStatusTooOld    = "too_old"
-	agentbusVersionStatusUnknown   = "unknown"
-)
-
-type agentbusVersionAssessment struct {
-	Status  string
-	Warning string
-}
 
 type agentbusClient interface {
 	Close() error
 	HelloResult() client.HelloResult
 	JobSubmit(context.Context, client.JobSubmitParams) (client.JobSubmitResult, error)
 	JobStatus(context.Context, client.JobStatusParams) (client.JobStatusResult, error)
-	JobResult(context.Context, client.JobResultParams) (client.JobResult, error)
-	JobCancel(context.Context, client.JobCancelParams) (client.JobCancelResult, error)
 }
 
-// timeoutCapturingClient decodes the daemon's additive timeout field beside
-// the pinned Agentbus client's typed response. The pinned response types do
-// not retain that field, so this wrapper owns the full response decode while
-// preserving the existing typed interface for callers.
-type timeoutCapturingClient struct {
-	opts      client.Options
-	conn      net.Conn
-	reader    *bufio.Reader
-	hello     client.HelloResult
-	writeMu   sync.Mutex
-	requestMu sync.Mutex
-	mu        sync.Mutex
-	closed    bool
-	ids       uint64
-
-	submittedTimeouts map[string]config.DimensionResolution
-	resultTimeouts    map[string]config.DimensionResolution
-	statusTimeouts    map[string]config.DimensionResolution
-}
-
-var (
-	connectPinnedAgentbus = func(ctx context.Context, opts client.Options) error {
-		typed, err := client.Connect(ctx, opts)
-		if err != nil {
-			return err
-		}
-		return typed.Close()
-	}
-	dialAgentbusWire = func(ctx context.Context, network, address string) (net.Conn, error) {
-		var dialer net.Dialer
-		return dialer.DialContext(ctx, network, address)
-	}
-)
-
-func newTimeoutCapturingClient(ctx context.Context, opts client.Options) (*timeoutCapturingClient, error) {
-	if opts.StateRoot == "" {
-		stateRoot, err := engine.ResolveStateRoot()
-		if err != nil {
-			return nil, err
-		}
-		opts.StateRoot = stateRoot
-	}
-	c := &timeoutCapturingClient{
-		opts:              opts,
-		submittedTimeouts: make(map[string]config.DimensionResolution),
-		resultTimeouts:    make(map[string]config.DimensionResolution),
-		statusTimeouts:    make(map[string]config.DimensionResolution),
-	}
-	if err := c.reconnect(ctx); err != nil {
-		return nil, err
-	}
-	return c, nil
-}
-
-func (c *timeoutCapturingClient) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return nil
-	}
-	c.closed = true
-	conn := c.conn
-	c.conn = nil
-	c.reader = nil
-	if conn == nil {
-		return nil
-	}
-	return conn.Close()
-}
-
-func (c *timeoutCapturingClient) HelloResult() client.HelloResult { return c.hello }
-
-func (c *timeoutCapturingClient) JobSubmit(ctx context.Context, params client.JobSubmitParams) (client.JobSubmitResult, error) {
-	var response struct {
-		JobID        string          `json:"jobId"`
-		State        engine.JobState `json:"state"`
-		Deduplicated bool            `json:"deduplicated,omitempty"`
-		Timeout      json.RawMessage `json:"timeout,omitempty"`
-	}
-	if err := c.do(ctx, "job.submit", params, &response); err != nil {
-		return client.JobSubmitResult{}, err
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if resolution, ok := timeoutResolutionFromWire(response.Timeout); ok {
-		c.submittedTimeouts[response.JobID] = resolution
-	} else {
-		delete(c.submittedTimeouts, response.JobID)
-	}
-	return client.JobSubmitResult{JobID: response.JobID, State: response.State, Deduplicated: response.Deduplicated}, nil
-}
-
-func (c *timeoutCapturingClient) JobStatus(ctx context.Context, params client.JobStatusParams) (client.JobStatusResult, error) {
-	var response struct {
-		Jobs []struct {
-			client.JobStatus
-			Timeout json.RawMessage `json:"timeout,omitempty"`
-		} `json:"jobs"`
-	}
-	if err := c.do(ctx, "job.status", params, &response); err != nil {
-		return client.JobStatusResult{}, err
-	}
-	result := client.JobStatusResult{Jobs: make([]client.JobStatus, 0, len(response.Jobs))}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, job := range response.Jobs {
-		result.Jobs = append(result.Jobs, job.JobStatus)
-		if resolution, ok := timeoutResolutionFromWire(job.Timeout); ok {
-			c.statusTimeouts[job.JobID] = resolution
-		} else {
-			delete(c.statusTimeouts, job.JobID)
-		}
-	}
-	return result, nil
-}
-
-func (c *timeoutCapturingClient) JobResult(ctx context.Context, params client.JobResultParams) (client.JobResult, error) {
-	var response struct {
-		client.JobResult
-		Timeout json.RawMessage `json:"timeout,omitempty"`
-	}
-	if err := c.do(ctx, "job.result", params, &response); err != nil {
-		return client.JobResult{}, err
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if resolution, ok := timeoutResolutionFromWire(response.Timeout); ok {
-		c.resultTimeouts[response.JobID] = resolution
-	} else {
-		delete(c.resultTimeouts, response.JobID)
-	}
-	return response.JobResult, nil
-}
-
-func (c *timeoutCapturingClient) JobCancel(ctx context.Context, params client.JobCancelParams) (client.JobCancelResult, error) {
-	var response client.JobCancelResult
-	if err := c.do(ctx, "job.cancel", params, &response); err != nil {
-		return client.JobCancelResult{}, err
-	}
-	return response, nil
-}
-
-func (c *timeoutCapturingClient) submittedTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	resolution, ok := c.submittedTimeouts[jobID]
-	return resolution, ok
-}
-
-func (c *timeoutCapturingClient) resultTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	resolution, ok := c.resultTimeouts[jobID]
-	return resolution, ok
-}
-
-func (c *timeoutCapturingClient) statusTimeoutResolution(jobID string) (config.DimensionResolution, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	resolution, ok := c.statusTimeouts[jobID]
-	return resolution, ok
-}
-
-// reconnect preserves the pinned client's reconnect lifecycle: it uses the
-// pinned client to retain its autostart behavior, then opens a fresh wire
-// connection that can capture additive response fields.
-func (c *timeoutCapturingClient) reconnect(ctx context.Context) error {
-	if err := connectPinnedAgentbus(ctx, c.opts); err != nil {
-		return err
-	}
-	return c.connect(ctx)
-}
-
-func (c *timeoutCapturingClient) ensureConnected(ctx context.Context) error {
-	c.mu.Lock()
-	connected := !c.closed && c.conn != nil && c.reader != nil
-	c.mu.Unlock()
-	if connected {
-		return nil
-	}
-	return c.reconnect(ctx)
-}
-
-func (c *timeoutCapturingClient) connect(ctx context.Context) error {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return errors.New("agentbus client is closed")
-	}
-	c.mu.Unlock()
-	socketPath := c.opts.SocketPath
-	if socketPath == "" {
-		socketPath = filepath.Join(c.opts.StateRoot, "agentbus.sock")
-	}
-	conn, err := dialAgentbusWire(ctx, "unix", socketPath)
-	if err != nil {
-		return err
-	}
-	reader := bufio.NewReader(conn)
-	hello, err := c.helloOnConnection(ctx, conn, reader)
-	if err != nil {
-		_ = conn.Close()
-		return err
-	}
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		_ = conn.Close()
-		return errors.New("agentbus client is closed")
-	}
-	old := c.conn
-	c.conn = conn
-	c.reader = reader
-	c.hello = hello
-	c.mu.Unlock()
-	if old != nil {
-		_ = old.Close()
-	}
-	return nil
-}
-
-func (c *timeoutCapturingClient) helloOnConnection(ctx context.Context, conn net.Conn, reader *bufio.Reader) (client.HelloResult, error) {
-	token, err := c.token()
-	if err != nil {
-		return client.HelloResult{}, err
-	}
-	var hello client.HelloResult
-	request := struct {
-		JSONRPC string          `json:"jsonrpc"`
-		ID      json.RawMessage `json:"id"`
-		Method  string          `json:"method"`
-		Params  any             `json:"params,omitempty"`
-	}{JSONRPC: "2.0", ID: json.RawMessage(`"hello"`), Method: "protocol.hello", Params: map[string]any{"clientProtocolVersion": 2, "token": token}}
-	if err := writeAgentbusWireFrame(ctx, conn, request); err != nil {
-		return client.HelloResult{}, err
-	}
-	line, err := readAgentbusWireFrame(ctx, conn, reader)
-	if err != nil {
-		return client.HelloResult{}, err
-	}
-	if err := decodeAgentbusWireResponse(line, &hello); err != nil {
-		return client.HelloResult{}, err
-	}
-	if hello.ProtocolVersion != 2 {
-		return client.HelloResult{}, &client.ProtocolVersionMismatchError{Expected: 2, Received: hello.ProtocolVersion}
-	}
-	return hello, nil
-}
-
-func (c *timeoutCapturingClient) token() (string, error) {
-	if c.opts.Token != "" {
-		return c.opts.Token, nil
-	}
-	raw, err := os.ReadFile(filepath.Join(c.opts.StateRoot, "token"))
-	if err != nil {
-		return "", err
-	}
-	token := strings.TrimSpace(string(raw))
-	if token == "" {
-		return "", errors.New("agentbus token file is empty")
-	}
-	return token, nil
-}
-
-func (c *timeoutCapturingClient) do(ctx context.Context, method string, params, result any) error {
-	c.requestMu.Lock()
-	defer c.requestMu.Unlock()
-	if err := c.ensureConnected(ctx); err != nil {
-		return err
-	}
-	c.mu.Lock()
-	if c.closed || c.conn == nil || c.reader == nil {
-		c.mu.Unlock()
-		return errors.New("agentbus client is closed")
-	}
-	c.ids++
-	id := strconv.FormatUint(c.ids, 10)
-	conn := c.conn
-	reader := c.reader
-	c.mu.Unlock()
-	request := struct {
-		JSONRPC string          `json:"jsonrpc"`
-		ID      json.RawMessage `json:"id"`
-		Method  string          `json:"method"`
-		Params  any             `json:"params,omitempty"`
-	}{JSONRPC: "2.0", ID: json.RawMessage(strconv.Quote(id)), Method: method, Params: params}
-	c.writeMu.Lock()
-	err := writeAgentbusWireFrame(ctx, conn, request)
-	c.writeMu.Unlock()
-	if err != nil {
-		c.connectionFailed(conn)
-		return err
-	}
-	line, err := readAgentbusWireFrame(ctx, conn, reader)
-	if err != nil {
-		c.connectionFailed(conn)
-		return err
-	}
-	return decodeAgentbusWireResponse(line, result)
-}
-
-func (c *timeoutCapturingClient) connectionFailed(conn net.Conn) {
-	c.mu.Lock()
-	if c.conn != conn {
-		c.mu.Unlock()
-		return
-	}
-	c.conn = nil
-	c.reader = nil
-	c.mu.Unlock()
-	_ = conn.Close()
-}
-
-func decodeAgentbusWireResponse(line []byte, result any) error {
-	var response struct {
-		Result json.RawMessage `json:"result"`
-		Error  json.RawMessage `json:"error"`
-	}
-	if err := json.Unmarshal(bytes.TrimSpace(line), &response); err != nil {
-		return err
-	}
-	if len(response.Error) != 0 && string(response.Error) != "null" {
-		raw, err := json.Marshal(map[string]json.RawMessage{"Object": response.Error})
-		if err != nil {
-			return err
-		}
-		var rpcError client.RPCError
-		if err := json.Unmarshal(raw, &rpcError); err != nil {
-			return err
-		}
-		return &rpcError
-	}
-	return json.Unmarshal(response.Result, result)
-}
-
-func writeAgentbusWireFrame(ctx context.Context, conn net.Conn, value any) error {
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetWriteDeadline(deadline)
-		defer conn.SetWriteDeadline(time.Time{})
-	}
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	_, err = conn.Write(append(raw, '\n'))
-	return err
-}
-
-func readAgentbusWireFrame(ctx context.Context, conn net.Conn, reader *bufio.Reader) ([]byte, error) {
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetReadDeadline(deadline)
-		defer conn.SetReadDeadline(time.Time{})
-	}
-	return reader.ReadBytes('\n')
-}
-
-type backendValueValidation struct {
-	ModelUnadvertised  bool
-	EffortUnadvertised bool
-}
-
-func validateBackend(hello client.HelloResult, backend, model, effort string, stderr io.Writer) error {
-	_, err := validateBackendValues(hello, backend, model, effort, false, stderr)
-	return err
-}
-
-func validateBackendValues(hello client.HelloResult, backend, model, effort string, strictModel bool, stderr io.Writer) (backendValueValidation, error) {
+// validateBackend checks only that Agentbus advertised the selected backend.
+// Model and effort are caller values that Agentbus/the backend owns.
+func validateBackend(hello client.HelloResult, backend string) error {
 	available := append([]string(nil), hello.Backends...)
 	sort.Strings(available)
-	found := false
 	for _, name := range available {
 		if name == backend {
-			found = true
-			break
+			return nil
 		}
 	}
-	if !found {
-		return backendValueValidation{}, fmt.Errorf("unknown backend %q; available backends: %s", backend, strings.Join(available, ", "))
-	}
-	for _, meta := range hello.BackendMetadata {
-		if meta.Name != backend {
-			continue
-		}
-		validation := backendValueValidation{
-			ModelUnadvertised:  model != "" && len(meta.Models) > 0 && !containsString(meta.Models, model),
-			EffortUnadvertised: effort != "" && len(meta.Efforts) > 0 && !containsString(meta.Efforts, effort),
-		}
-		var strictErrors []error
-		if validation.ModelUnadvertised {
-			if _, err := fmt.Fprintf(stderr, "warning: %s\n", unadvertisedBackendValueWarning("model", model, backend, meta.Models)); err != nil {
-				return backendValueValidation{}, err
-			}
-			if strictModel {
-				strictErrors = append(strictErrors, errors.New(unadvertisedBackendValueRejection("model", model, backend, meta.Models)))
-			}
-		}
-		if validation.EffortUnadvertised {
-			if _, err := fmt.Fprintf(stderr, "warning: %s\n", unadvertisedBackendValueWarning("effort", effort, backend, meta.Efforts)); err != nil {
-				return backendValueValidation{}, err
-			}
-			if strictModel {
-				strictErrors = append(strictErrors, errors.New(unadvertisedBackendValueRejection("effort", effort, backend, meta.Efforts)))
-			}
-		}
-		return validation, errors.Join(strictErrors...)
-	}
-	return backendValueValidation{}, nil
-}
-
-func unadvertisedBackendValueWarning(dimension, value, backend string, advertised []string) string {
-	return fmt.Sprintf("%s; passing through — the backend is authoritative", unadvertisedBackendValue(dimension, value, backend, advertised))
-}
-
-// unadvertisedBackendValueRejection reuses the warning's identifying half but
-// not its "passing through" clause, which would be false under --strict-model:
-// nothing is passed through, because no job is submitted.
-func unadvertisedBackendValueRejection(dimension, value, backend string, advertised []string) string {
-	return fmt.Sprintf("%s; --strict-model rejected it before submission", unadvertisedBackendValue(dimension, value, backend, advertised))
-}
-
-func unadvertisedBackendValue(dimension, value, backend string, advertised []string) string {
-	return fmt.Sprintf("%s %q is not advertised by agentbus for backend %q (advertised: %s)", dimension, value, backend, strings.Join(advertised, ", "))
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return fmt.Errorf("unknown backend %q; available backends: %s", backend, strings.Join(available, ", "))
 }
 
 var connectAgentbus = func(ctx context.Context, opts client.Options) (agentbusClient, error) {
-	return newTimeoutCapturingClient(ctx, opts)
+	return client.Connect(ctx, opts)
 }
 
 var lookPath = exec.LookPath
@@ -494,7 +47,7 @@ var commandOutput = func(name string, args ...string) ([]byte, error) {
 func connectCheckedAgentbus(ctx context.Context, opts client.Options, required []string, version string) (agentbusClient, client.HelloResult, error) {
 	c, err := connectAgentbus(ctx, opts)
 	if err != nil {
-		return nil, client.HelloResult{}, agentbusOperationError(err)
+		return nil, client.HelloResult{}, err
 	}
 	hello := c.HelloResult()
 	if err := requireCapabilities(hello, version, required); err != nil {
@@ -539,10 +92,6 @@ func resolveAgentbusStateRoot() (string, error) {
 	return resolveAgentbusStateRootFrom(os.Getenv, os.UserHomeDir)
 }
 
-func resolveAgentbusUserCacheRoot() (string, error) {
-	return resolveAgentbusUserCacheRootFrom(os.UserCacheDir)
-}
-
 func resolveAgentbusUserCacheRootFrom(userCacheDir func() (string, error)) (string, error) {
 	cacheDir, err := userCacheDir()
 	if err != nil {
@@ -552,18 +101,6 @@ func resolveAgentbusUserCacheRootFrom(userCacheDir func() (string, error)) (stri
 		return "", errors.New("user cache directory is empty")
 	}
 	return canonicalizeAgentbusStateRoot("user cache directory", filepath.Join(cacheDir, "agentbus"))
-}
-
-func resolveAgentbusAutostartLockRoot() (string, error) {
-	return resolveAgentbusAutostartLockRootFrom(os.UserCacheDir)
-}
-
-func resolveAgentbusAutostartLockRootFrom(userCacheDir func() (string, error)) (string, error) {
-	cacheRoot, err := resolveAgentbusUserCacheRootFrom(userCacheDir)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(cacheRoot, "start-locks"), nil
 }
 
 func resolveAgentbusStateRootFrom(env func(string) string, userHomeDir func() (string, error)) (string, error) {
@@ -631,11 +168,6 @@ func requireCapabilities(hello client.HelloResult, version string, required []st
 func requiredCapabilitiesForPolicy(policy *engine.TurnPolicy) []string {
 	required := []string{"admission.strictContainment"}
 	if policy != nil && policy.Contract != nil {
-		// No policy.shape requirement: delegate owns report-shape validation and
-		// the one client-side corrective retry. agentbus accepts, stores, and
-		// stamps a shape contract as opaque identity regardless of the
-		// (informational) policy.shape capability flag, so requiring it here would
-		// wrongly reject the normal managed path against a post-relocation agentbus.
 		if policy.Contract.JSONSchema != nil {
 			required = append(required, "policy.jsonSchema")
 		}
@@ -647,23 +179,6 @@ func requiredCapabilitiesForPolicy(policy *engine.TurnPolicy) []string {
 		required = append(required, "policy.retry")
 	}
 	return required
-}
-
-func setupRequiredCapabilities() []string {
-	// Strict containment is the only capability delegate strictly needs: shape
-	// validation is now client-side, and JSON-Schema/named/retry are required only
-	// when a job actually uses them (see requiredCapabilitiesForPolicy).
-	return []string{"admission.strictContainment"}
-}
-
-func missingCapabilities(hello client.HelloResult, required []string) []string {
-	var missing []string
-	for _, capName := range required {
-		if !hello.Capabilities[capName] {
-			missing = append(missing, capName)
-		}
-	}
-	return missing
 }
 
 func capabilityMissingError(hello client.HelloResult, version, capName string) error {
@@ -684,14 +199,6 @@ func agentbusLabel(hello client.HelloResult, version string) string {
 	return "agentbus"
 }
 
-func agentbusBinary() (string, error) {
-	path, err := lookPath("agentbus")
-	if err != nil {
-		return "", errors.New("agentbus binary not found; run mise-en-place install agentbus")
-	}
-	return path, nil
-}
-
 func agentbusVersion(path string) string {
 	if path == "" {
 		return ""
@@ -708,184 +215,6 @@ func agentbusVersion(path string) string {
 		return fields[0]
 	}
 	return ""
-}
-
-// assessAgentbusVersion compares the version token already extracted by
-// agentbusVersion with this build's declared floor. Discovery failures and
-// malformed output stay warnings so a changed version-reporting format cannot
-// make setup unusable.
-func assessAgentbusVersion(version string) agentbusVersionAssessment {
-	version = strings.TrimSpace(version)
-	if version == "" {
-		return agentbusVersionAssessment{
-			Status:  agentbusVersionStatusUnknown,
-			Warning: fmt.Sprintf("agentbus version could not be discovered; minimum supported version is %s (setup will not block readiness)", minimumSupportedAgentbusVersion),
-		}
-	}
-	comparison, err := compareAgentbusSemver(version, minimumSupportedAgentbusVersion)
-	if err != nil {
-		return agentbusVersionAssessment{
-			Status:  agentbusVersionStatusUnknown,
-			Warning: fmt.Sprintf("agentbus version %q could not be parsed; minimum supported version is %s (setup will not block readiness)", version, minimumSupportedAgentbusVersion),
-		}
-	}
-	if comparison < 0 {
-		return agentbusVersionAssessment{Status: agentbusVersionStatusTooOld}
-	}
-	return agentbusVersionAssessment{Status: agentbusVersionStatusSupported}
-}
-
-func agentbusMinimumVersionError(version string) error {
-	return fmt.Errorf("agentbus %s is older than the minimum supported version %s; run mise-en-place install agentbus to upgrade", version, minimumSupportedAgentbusVersion)
-}
-
-type agentbusSemver struct {
-	major      string
-	minor      string
-	patch      string
-	prerelease []string
-}
-
-func compareAgentbusSemver(a, b string) (int, error) {
-	parsedA, err := parseAgentbusSemver(a)
-	if err != nil {
-		return 0, err
-	}
-	parsedB, err := parseAgentbusSemver(b)
-	if err != nil {
-		return 0, err
-	}
-	return compareParsedAgentbusSemver(parsedA, parsedB), nil
-}
-
-func parseAgentbusSemver(version string) (agentbusSemver, error) {
-	version = strings.TrimSpace(version)
-	version = strings.TrimPrefix(version, "v")
-	if version == "" {
-		return agentbusSemver{}, errors.New("empty semantic version")
-	}
-
-	coreAndPrerelease, build, hasBuild := strings.Cut(version, "+")
-	if hasBuild && !validAgentbusSemverIdentifiers(build, false) {
-		return agentbusSemver{}, fmt.Errorf("invalid semantic version build metadata %q", build)
-	}
-	core, prerelease, hasPrerelease := strings.Cut(coreAndPrerelease, "-")
-	if hasPrerelease && !validAgentbusSemverIdentifiers(prerelease, true) {
-		return agentbusSemver{}, fmt.Errorf("invalid semantic version prerelease %q", prerelease)
-	}
-	parts := strings.Split(core, ".")
-	if len(parts) != 3 {
-		return agentbusSemver{}, fmt.Errorf("semantic version %q must have major, minor, and patch components", version)
-	}
-	for _, part := range parts {
-		if !validAgentbusSemverNumber(part) {
-			return agentbusSemver{}, fmt.Errorf("invalid semantic version number %q", part)
-		}
-	}
-	parsed := agentbusSemver{major: parts[0], minor: parts[1], patch: parts[2]}
-	if hasPrerelease {
-		parsed.prerelease = strings.Split(prerelease, ".")
-	}
-	return parsed, nil
-}
-
-func validAgentbusSemverNumber(value string) bool {
-	if value == "" || (len(value) > 1 && value[0] == '0') {
-		return false
-	}
-	for _, char := range value {
-		if char < '0' || char > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func validAgentbusSemverIdentifiers(value string, rejectLeadingZeroNumbers bool) bool {
-	for _, identifier := range strings.Split(value, ".") {
-		if identifier == "" {
-			return false
-		}
-		numeric := true
-		for _, char := range identifier {
-			if !((char >= '0' && char <= '9') || (char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') || char == '-') {
-				return false
-			}
-			if char < '0' || char > '9' {
-				numeric = false
-			}
-		}
-		if numeric && rejectLeadingZeroNumbers && len(identifier) > 1 && identifier[0] == '0' {
-			return false
-		}
-	}
-	return true
-}
-
-func compareParsedAgentbusSemver(a, b agentbusSemver) int {
-	for _, components := range [][2]string{{a.major, b.major}, {a.minor, b.minor}, {a.patch, b.patch}} {
-		if comparison := compareAgentbusSemverNumber(components[0], components[1]); comparison != 0 {
-			return comparison
-		}
-	}
-	if len(a.prerelease) == 0 && len(b.prerelease) == 0 {
-		return 0
-	}
-	if len(a.prerelease) == 0 {
-		return 1
-	}
-	if len(b.prerelease) == 0 {
-		return -1
-	}
-	for index := 0; index < len(a.prerelease) && index < len(b.prerelease); index++ {
-		if comparison := compareAgentbusSemverIdentifier(a.prerelease[index], b.prerelease[index]); comparison != 0 {
-			return comparison
-		}
-	}
-	if len(a.prerelease) < len(b.prerelease) {
-		return -1
-	}
-	if len(a.prerelease) > len(b.prerelease) {
-		return 1
-	}
-	return 0
-}
-
-func compareAgentbusSemverIdentifier(a, b string) int {
-	aNumeric := validAgentbusSemverNumber(a)
-	bNumeric := validAgentbusSemverNumber(b)
-	if aNumeric && bNumeric {
-		return compareAgentbusSemverNumber(a, b)
-	}
-	if aNumeric {
-		return -1
-	}
-	if bNumeric {
-		return 1
-	}
-	if a < b {
-		return -1
-	}
-	if a > b {
-		return 1
-	}
-	return 0
-}
-
-func compareAgentbusSemverNumber(a, b string) int {
-	if len(a) < len(b) {
-		return -1
-	}
-	if len(a) > len(b) {
-		return 1
-	}
-	if a < b {
-		return -1
-	}
-	if a > b {
-		return 1
-	}
-	return 0
 }
 
 func optionalAgentbusBinaryVersion() (string, string) {

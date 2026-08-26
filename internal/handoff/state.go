@@ -1,38 +1,20 @@
 package handoff
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-const (
-	fileMode = 0o600
-	dirMode  = 0o700
-)
+const dirMode = 0o700
 
 // StateConfig controls state directory resolution.
 type StateConfig struct {
 	StateDir string
 	Env      func(string) string
 	HomeDir  func() (string, error)
-}
-
-// CreateOptions controls handoff file creation.
-type CreateOptions struct {
-	StateDir string
-	Reader   io.Reader
-	Hooks    Hooks
-}
-
-// CreateResult is the JSON handoff creation envelope.
-type CreateResult struct {
-	Schema      int    `json:"schema"`
-	HandoffPath string `json:"handoff_path"`
 }
 
 // ResolveStateDir returns the delegate state directory using the XDG state fallback.
@@ -104,17 +86,6 @@ func EnsureStateDir(dir string) error {
 		return fmt.Errorf("state dir %q mode = %o, want %o", dir, got, dirMode)
 	}
 	return nil
-}
-
-func prepareStateDir(dir string) (string, error) {
-	stateDir, err := ResolveStateDir(StateConfig{StateDir: dir})
-	if err != nil {
-		return "", err
-	}
-	if err := EnsureStateDir(stateDir); err != nil {
-		return "", err
-	}
-	return stateDir, nil
 }
 
 func resolveConfiguredStateDir(label, path string) (string, error) {
@@ -191,65 +162,4 @@ func rejectExistingStateDirSymlink(path string) error {
 		return fmt.Errorf("state dir %q must not be a symlink", path)
 	}
 	return nil
-}
-
-// Create writes stdin-style prompt content to a private handoff file.
-func Create(opts CreateOptions) (CreateResult, error) {
-	reader := opts.Reader
-	if reader == nil {
-		reader = os.Stdin
-	}
-	stateDir, err := prepareStateDir(opts.StateDir)
-	if err != nil {
-		return CreateResult{}, err
-	}
-	file, err := os.CreateTemp(stateDir, "handoff-*.prompt")
-	if err != nil {
-		return CreateResult{}, err
-	}
-	path := file.Name()
-	closed := false
-	closeFile := func() error {
-		if closed {
-			return nil
-		}
-		closed = true
-		return file.Close()
-	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = closeFile()
-			_ = os.Remove(path)
-		}
-	}()
-	if err := os.Chmod(path, fileMode); err != nil {
-		return CreateResult{}, err
-	}
-	if _, err := io.Copy(file, reader); err != nil {
-		return CreateResult{}, err
-	}
-	if err := syncFile(file, path, opts.Hooks); err != nil {
-		return CreateResult{}, err
-	}
-	if err := closeFile(); err != nil {
-		return CreateResult{}, err
-	}
-	if err := syncDir(stateDir, opts.Hooks); err != nil {
-		return CreateResult{}, err
-	}
-	cleanup = false
-	return CreateResult{Schema: 1, HandoffPath: path}, nil
-}
-
-// MarshalCreateResult returns the canonical one-line JSON response for handoff creation.
-func MarshalCreateResult(result CreateResult) ([]byte, error) {
-	if result.Schema == 0 {
-		result.Schema = 1
-	}
-	raw, err := json.Marshal(result)
-	if err != nil {
-		return nil, err
-	}
-	return append(raw, '\n'), nil
 }

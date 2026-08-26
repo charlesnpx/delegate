@@ -9,26 +9,21 @@ import (
 	"os"
 	"time"
 
-	"github.com/charlesnpx/delegate/internal/handoff"
-	"github.com/charlesnpx/delegate/internal/policy"
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
 )
 
-const liveRepoReadWarning = "--allow-live-repo-read makes backend filesystem reads easier by using the live repository as cwd; delegate's path/history redaction and final content scan apply only to the context it assembles"
+const (
+	liveRepoReadWarning   = "--allow-live-repo-read makes backend filesystem reads easier by using the live repository as cwd; delegate's path/history redaction and final content scan apply only to the context it assembles"
+	reviewKind            = reviewpkg.KindReview
+	adversarialReviewKind = reviewpkg.KindAdversarialReview
+)
 
 type reviewOptions struct {
 	Backend           string
-	Wait              bool
-	JSON              bool
 	CWD               string
 	Model             string
 	Effort            string
 	Timeout           time.Duration
-	TimeoutSet        bool
-	StrictContract    bool
-	Origin            string
-	ParentClient      optionalStringFlag
-	ParentSession     optionalStringFlag
 	Base              string
 	Scope             string
 	AllowLiveRepoRead bool
@@ -39,12 +34,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	if err != nil {
 		return 0, err
 	}
-	taskDefaults := taskOptions{Backend: opts.Backend, Model: opts.Model, Effort: opts.Effort}
-	if err := resolveTaskModelEffort(&taskDefaults); err != nil {
-		return 0, err
-	}
-	opts.Model = taskDefaults.Model
-	opts.Effort = taskDefaults.Effort
+	taskOpts := taskOptions{Backend: opts.Backend, Model: opts.Model, Effort: opts.Effort}
 	assembled, err := reviewpkg.Assemble(context.Background(), reviewpkg.Options{
 		CWD:               opts.CWD,
 		Base:              opts.Base,
@@ -54,58 +44,61 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	if err != nil {
 		return 0, err
 	}
-	ownsWorkspace := true
-	defer func() {
-		if ownsWorkspace {
+
+	for _, sweepErr := range sweepReviewWorkspaces(context.Background(), assembled.StateDir) {
+		if _, err := fmt.Fprintf(stderr, "warning: review workspace sweep: %v\n", sweepErr); err != nil {
 			_ = reviewpkg.Cleanup(assembled)
+			return 0, err
 		}
-	}()
+	}
 	prompt, err := reviewpkg.ComposePrompt(kind, assembled)
 	if err != nil {
+		_ = reviewpkg.Cleanup(assembled)
 		return 0, err
 	}
-	turnPolicy, err := policy.ResolveTurnPolicy(policy.Flags{StrictContract: opts.StrictContract})
-	if err != nil {
-		return 0, err
-	}
-	taskOpts := taskOptions{
-		Backend:          opts.Backend,
-		Wait:             opts.Wait,
-		JSON:             opts.JSON,
-		CWD:              assembled.BackendCWD,
-		Model:            opts.Model,
-		Effort:           opts.Effort,
-		Timeout:          opts.Timeout,
-		TimeoutSet:       opts.TimeoutSet,
-		StrictContract:   opts.StrictContract,
-		Origin:           opts.Origin,
-		AuditOrigin:      captureTaskOrigin(opts.Origin, opts.ParentClient, opts.ParentSession, nil),
-		StateDir:         assembled.StateDir,
-		Kind:             kind,
-		ReviewWorkspace:  assembled.Workspace,
-		ModelEffort:      taskDefaults.ModelEffort,
-		LogicalWorkspace: assembled.RepositoryRoot,
-	}
-	result, err := executeTask(taskOpts, handoff.ResolvedPrompt{Prompt: prompt, Source: handoff.SourcePrompt}, turnPolicy, stderr)
-	if result.Submitted {
-		// A successful daemon submission owns the workspace even if later local
-		// bookkeeping fails; the durable submission intent and launch envelope recover it.
-		ownsWorkspace = false
+	taskOpts.CWD = assembled.BackendCWD
+	taskOpts.Timeout = opts.Timeout
+	taskOpts.LogicalWorkspace = assembled.RepositoryRoot
+	submitted, c, agentbusStateRoot, err := submitTask(context.Background(), &taskOpts, prompt, nil)
+	var unresolved *submissionUnresolvedError
+	cleanupWorkspace := err != nil && !errors.As(err, &unresolved)
+	if cleanupWorkspace {
+		_ = reviewpkg.Cleanup(assembled)
 	}
 	if err != nil {
-		if submissionErrorPreservesReviewWorkspace(err) {
-			ownsWorkspace = false
+		if !cleanupWorkspace && assembled.Workspace != "" {
+			if jobID := submissionJobID(err); jobID != "" {
+				if recordErr := saveReviewWorkspaceMetadata(assembled.StateDir, reviewWorkspaceMetadata{
+					JobID:             jobID,
+					Workspace:         assembled.Workspace,
+					AgentbusStateRoot: agentbusStateRoot,
+				}); recordErr != nil {
+					return 0, fmt.Errorf("%w; record review workspace for job %s: %v", err, jobID, recordErr)
+				}
+			}
 		}
-		return agentbusCommandErrorResult(opts.JSON, stdout, err)
+		return 0, err
 	}
-	if result.Launch != nil {
-		// Job metadata owns the workspace until a terminal state is observed.
-		ownsWorkspace = false
+	defer func() { _ = c.Close() }()
+
+	if assembled.Workspace != "" {
+		if err := saveReviewWorkspaceMetadata(assembled.StateDir, reviewWorkspaceMetadata{
+			JobID:             submitted.JobID,
+			Workspace:         assembled.Workspace,
+			AgentbusStateRoot: agentbusStateRoot,
+		}); err != nil {
+			return 0, fmt.Errorf("record review workspace for job %s: %w", submitted.JobID, err)
+		}
 	}
 	if opts.AllowLiveRepoRead {
-		result.Warnings = append([]string{liveRepoReadWarning}, result.Warnings...)
+		if _, err := fmt.Fprintf(stderr, "warning: %s\n", liveRepoReadWarning); err != nil {
+			return 0, err
+		}
 	}
-	return writeTaskRunResult(result, stdout, stderr)
+	if err := writeTaskSubmitReceipt(stdout, taskOpts, submitted); err != nil {
+		return 0, submissionError(taskOpts.RequestID, err)
+	}
+	return 0, nil
 }
 
 func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOptions, error) {
@@ -126,43 +119,27 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 		_, _ = fmt.Fprintln(fs.Output(), "  OS-level isolation requires a container/sandbox profile.")
 		fs.PrintDefaults()
 	}
-	var background bool
 	fs.StringVar(&opts.Backend, "backend", "", "backend name discovered from agentbus")
-	fs.BoolVar(&background, "background", false, "return after launch")
-	fs.BoolVar(&opts.Wait, "wait", false, "wait for terminal result")
-	fs.BoolVar(&opts.JSON, "json", false, "emit JSON")
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute repository working directory")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
-	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout; 0 leaves the deadline to the daemon default; envelope.timeout is authoritative")
-	fs.BoolVar(&opts.StrictContract, "strict-contract", false, "compatibility flag; delegate-report corrective retry is enabled by default")
-	fs.StringVar(&opts.Origin, "origin", "", "originating skill")
-	fs.Var(&opts.ParentClient, "parent-client", "explicit parent client for audit linkage")
-	fs.Var(&opts.ParentSession, "parent-session", "explicit parent session id for audit linkage")
+	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout; 0 leaves the deadline to the daemon default")
 	fs.StringVar(&opts.Base, "base", "", "comparison base ref")
 	fs.StringVar(&opts.Scope, "scope", reviewpkg.ScopeAuto, "review scope: auto combines branch and working-tree changes; or working-tree, branch")
 	fs.BoolVar(&opts.AllowLiveRepoRead, "allow-live-repo-read", false, "use live repository as backend cwd (makes backend file reads easier; does not prevent backend file reads)")
 	if err := fs.Parse(args); err != nil {
 		return reviewOptions{}, err
 	}
-	fs.Visit(func(flag *flag.Flag) {
-		if flag.Name == "timeout" {
-			opts.TimeoutSet = true
-		}
-	})
 	if fs.NArg() != 0 {
 		return reviewOptions{}, fmt.Errorf("%s does not accept positional arguments", command)
 	}
 	if opts.Backend == "" {
 		return reviewOptions{}, fmt.Errorf("%s requires --backend", command)
 	}
-	if background && opts.Wait {
-		return reviewOptions{}, fmt.Errorf("use only one of --background or --wait")
-	}
 	if opts.Scope == reviewpkg.ScopeWorkingTree && opts.Base != "" {
 		return reviewOptions{}, fmt.Errorf("--base cannot be used with --scope working-tree")
 	}
-	if err := validateTimeoutOption(opts.Timeout, opts.TimeoutSet); err != nil {
+	if err := validateTimeoutOption(opts.Timeout); err != nil {
 		return reviewOptions{}, err
 	}
 	if opts.CWD == "" {
@@ -173,9 +150,4 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 		opts.CWD = cwd
 	}
 	return opts, nil
-}
-
-func submissionErrorPreservesReviewWorkspace(err error) bool {
-	var unresolved submissionUnresolvedError
-	return errors.As(err, &unresolved)
 }

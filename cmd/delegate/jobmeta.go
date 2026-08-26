@@ -1,235 +1,91 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
-	"time"
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
-	"github.com/charlesnpx/delegate/internal/config"
 	"github.com/charlesnpx/delegate/internal/handoff"
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
 )
 
-const (
-	backendDiagnosticMaxBytes  = 2 * 1024
-	backendDiagnosticReadBytes = 64 * 1024
-	backendDiagnosticTruncated = "\n[truncated]"
-	// jobMetadataSchema 2 marks timeout resolutions captured from the daemon's
-	// wire response. Schema 1 metadata predates that capture and may have
-	// recorded a requested --timeout as its effective value.
-	jobMetadataSchema = 2
+const reviewWorkspaceMetadataDirectoryName = "review-workspaces"
 
-	cleanupDispositionNoExecutionPossible = "no_execution_possible"
-	cleanupDispositionVerifiedAbsent      = "verified_absent"
-	cleanupDispositionUnresolved          = "unresolved"
-
-	cleanupDispositionUnresolvedWarning = "Agentbus reported cleanupDisposition=unresolved; delegate retained local job artifacts because backend absence is unproven"
-)
-
-var (
-	deleteJobInputOnTerminalState = handoff.DeleteJobInputOnTerminalState
-	cleanupReviewWorkspace        = reviewpkg.CleanupWorkspace
-)
-
-type jobMetadata struct {
-	Schema                int                        `json:"schema"`
-	JobID                 string                     `json:"job_id"`
-	RequestID             string                     `json:"request_id,omitempty"`
-	WorkspaceKey          string                     `json:"workspace_key,omitempty"`
-	Kind                  string                     `json:"kind"`
-	Backend               string                     `json:"backend,omitempty"`
-	CWD                   string                     `json:"cwd,omitempty"`
-	SessionID             string                     `json:"session_id,omitempty"`
-	ContractKind          string                     `json:"contractKind"`
-	NoContract            bool                       `json:"no_contract,omitempty"`
-	ReportCorrectionOf    string                     `json:"report_correction_of,omitempty"`
-	ReportCorrectionJobID string                     `json:"report_correction_job_id,omitempty"`
-	JobInputPath          string                     `json:"job_input_path,omitempty"`
-	ReviewWorkspace       string                     `json:"review_workspace,omitempty"`
-	AgentbusStateRoot     string                     `json:"agentbus_state_root,omitempty"`
-	SubmissionState       engine.JobState            `json:"submission_state,omitempty"`
-	State                 engine.JobState            `json:"state,omitempty"`
-	CleanupDisposition    string                     `json:"cleanupDisposition,omitempty"`
-	Deduplicated          bool                       `json:"deduplicated,omitempty"`
-	BackendError          string                     `json:"backend_error,omitempty"`
-	Model                 config.DimensionResolution `json:"model,omitempty"`
-	Effort                config.DimensionResolution `json:"effort,omitempty"`
-	BackendProfile        config.DimensionResolution `json:"backend_profile,omitempty"`
-	Timeout               config.DimensionResolution `json:"timeout,omitempty"`
-	Origin                *envelopeOrigin            `json:"origin,omitempty"`
-	CreatedAt             time.Time                  `json:"created_at"`
-	UpdatedAt             time.Time                  `json:"updated_at"`
+// reviewWorkspaceMetadata is the sole Delegate-owned record left for review.
+// Agentbus owns the job outcome; this record only joins that durable outcome to
+// the private workspace that contains sanitized repository content.
+type reviewWorkspaceMetadata struct {
+	JobID             string `json:"job_id"`
+	Workspace         string `json:"workspace"`
+	AgentbusStateRoot string `json:"agentbus_state_root"`
 }
 
-func localCleanupSafe(disposition string) bool {
-	return disposition == cleanupDispositionNoExecutionPossible || disposition == cleanupDispositionVerifiedAbsent
+func encodedStateFilename(value string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(value)) + ".json"
 }
 
-type localCleanupWarnings struct {
-	writer io.Writer
-	seen   map[string]struct{}
-}
-
-func newLocalCleanupWarnings(writer io.Writer) *localCleanupWarnings {
-	if writer == nil {
-		return nil
+func saveReviewWorkspaceMetadata(stateDir string, meta reviewWorkspaceMetadata) error {
+	if err := validateReviewWorkspaceMetadata(meta); err != nil {
+		return err
 	}
-	return &localCleanupWarnings{writer: writer, seen: map[string]struct{}{}}
-}
-
-func (warnings *localCleanupWarnings) warn(jobID, message string) error {
-	if warnings == nil || warnings.writer == nil || message == "" {
-		return nil
-	}
-	key := jobID + "\x00" + message
-	if _, ok := warnings.seen[key]; ok {
-		return nil
-	}
-	warnings.seen[key] = struct{}{}
-	_, err := fmt.Fprintf(warnings.writer, "warning: %s\n", message)
-	return err
-}
-
-func warnLocalArtifactsRetained(warnings *localCleanupWarnings, jobID string, state engine.JobState, cleanupDisposition string) error {
-	message, ok := localArtifactsRetainedWarning(state, cleanupDisposition)
-	if !ok {
-		return nil
-	}
-	return warnings.warn(jobID, message)
-}
-
-func localArtifactsRetainedWarning(state engine.JobState, cleanupDisposition string) (string, bool) {
-	if !engine.IsTerminal(state) {
-		return "", false
-	}
-	if cleanupDisposition == cleanupDispositionUnresolved {
-		return cleanupDispositionUnresolvedWarning, true
-	}
-	if cleanupDisposition == "" {
-		return "Agentbus did not report cleanupDisposition for a terminal job; delegate retained local job artifacts because backend absence is unproven", true
-	}
-	if !localCleanupSafe(cleanupDisposition) {
-		return fmt.Sprintf("Agentbus reported cleanupDisposition=%s; delegate retained local job artifacts because backend absence is unproven", cleanupDisposition), true
-	}
-	return "", false
-}
-
-func warnLocalCleanupFailure(warnings *localCleanupWarnings, jobID, artifact string, err error) error {
-	if err == nil {
-		return nil
-	}
-	return warnings.warn(jobID, fmt.Sprintf("Delegate could not remove local %s; local job artifacts were retained: %v", artifact, err))
-}
-
-func captureBackendError(stateDir string, job client.JobStatus) error {
-	if !engine.IsTerminal(job.State) || job.LogPaths == nil || job.LogPaths.Stderr == "" {
-		return nil
-	}
-	file, err := os.Open(job.LogPaths.Stderr)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
+	dir, err := reviewWorkspaceMetadataDir(stateDir)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, backendDiagnosticReadBytes+1))
-	if err != nil {
-		return err
-	}
-	detail := string(raw)
-	if detail == "" {
-		return nil
-	}
-	meta, found, err := loadJobMetadata(stateDir, job.JobID)
-	if err != nil || !found {
-		return err
-	}
-	if meta.JobInputPath != "" {
-		if prompt, readErr := os.ReadFile(meta.JobInputPath); readErr == nil && len(prompt) > 0 {
-			detail = strings.ReplaceAll(detail, string(prompt), "[redacted: submitted prompt]")
-		}
-	}
-	detail = strings.TrimSpace(reviewpkg.RedactSecretLikeDiagnostic(detail))
-	if len(detail) > backendDiagnosticMaxBytes {
-		keep := backendDiagnosticMaxBytes - len(backendDiagnosticTruncated)
-		detail = strings.ToValidUTF8(detail[:keep], "") + backendDiagnosticTruncated
-	}
-	if detail == "" {
-		return nil
-	}
-	meta.BackendError = detail
-	return saveJobMetadata(stateDir, meta)
-}
-
-var saveJobMetadata = saveJobMetadataFile
-
-func saveJobMetadataFile(stateDir string, meta jobMetadata) error {
-	if err := validateDelegateJobID(meta.JobID); err != nil {
-		return err
-	}
-	if meta.Schema < jobMetadataSchema {
-		// Schema 1 and schema-less metadata predate daemon timeout capture. Do
-		// not let an unrelated local metadata rewrite promote a requested flag
-		// value into a trusted effective timeout. A same-process daemon capture
-		// reaches this boundary as schema 2 and is preserved.
-		meta.Timeout = config.DimensionResolution{Requested: meta.Timeout.Requested, Source: "unknown"}
-		meta.Schema = jobMetadataSchema
-	}
-	now := time.Now().UTC()
-	if meta.CreatedAt.IsZero() {
-		meta.CreatedAt = now
-	}
-	meta.UpdatedAt = now
-	dir, err := jobMetadataDir(stateDir)
-	if err != nil {
-		return err
-	}
-	raw, err := json.MarshalIndent(meta, "", "  ")
+	raw, err := json.Marshal(meta)
 	if err != nil {
 		return err
 	}
 	raw = append(raw, '\n')
-	return atomicWriteMetadata(filepath.Join(dir, encodedStateFilename(meta.JobID)), raw, 0o600)
+	return atomicWriteReviewWorkspaceMetadata(filepath.Join(dir, encodedStateFilename(meta.JobID)), raw)
 }
 
-func loadJobMetadata(stateDir, jobID string) (jobMetadata, bool, error) {
-	if err := validateDelegateJobID(jobID); err != nil {
-		return jobMetadata{}, false, err
-	}
-	dir, err := jobMetadataDir(stateDir)
+func loadReviewWorkspaceMetadata(stateDir string) ([]reviewWorkspaceMetadata, []error) {
+	dir, err := reviewWorkspaceMetadataDir(stateDir)
 	if err != nil {
-		return jobMetadata{}, false, err
+		return nil, []error{err}
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, encodedStateFilename(jobID)))
-	if errors.Is(err, os.ErrNotExist) {
-		return jobMetadata{}, false, nil
-	}
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return jobMetadata{}, false, err
+		return nil, []error{err}
 	}
-	var meta jobMetadata
-	if err := json.Unmarshal(raw, &meta); err != nil {
-		return jobMetadata{}, false, err
+	metadata := make([]reviewWorkspaceMetadata, 0, len(entries))
+	var errs []error
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("read %s: %w", path, err))
+			continue
+		}
+		var record reviewWorkspaceMetadata
+		if err := json.Unmarshal(raw, &record); err != nil {
+			errs = append(errs, fmt.Errorf("read %s: %w", path, err))
+			continue
+		}
+		if err := validateReviewWorkspaceMetadata(record); err != nil {
+			errs = append(errs, fmt.Errorf("read %s: %w", path, err))
+			continue
+		}
+		metadata = append(metadata, record)
 	}
-	if meta.JobID != jobID {
-		return jobMetadata{}, false, fmt.Errorf("delegate job metadata %q has job_id %q", jobID, meta.JobID)
-	}
-	return meta, true, nil
+	return metadata, errs
 }
 
-func deleteJobMetadata(stateDir, jobID string) error {
-	if err := validateDelegateJobID(jobID); err != nil {
-		return err
+func deleteReviewWorkspaceMetadata(stateDir, jobID string) error {
+	if jobID == "" {
+		return fmt.Errorf("invalid review workspace job id %q", jobID)
 	}
-	dir, err := jobMetadataDir(stateDir)
+	dir, err := reviewWorkspaceMetadataDir(stateDir)
 	if err != nil {
 		return err
 	}
@@ -248,71 +104,76 @@ func deleteJobMetadata(stateDir, jobID string) error {
 	return dirFile.Sync()
 }
 
-func cleanupJobInput(stateDir, jobID, sessionID string, state engine.JobState, cleanupDisposition string, warnings *localCleanupWarnings) error {
-	meta, found, err := loadJobMetadata(stateDir, jobID)
-	if err != nil {
-		_ = warnings.warn(jobID, fmt.Sprintf("Delegate could not read local job metadata; local job artifacts were retained: %v", err))
-		return nil
-	}
-	if !found {
-		return nil
-	}
-	changed := false
-	if sessionID != "" && meta.SessionID != sessionID {
-		meta.SessionID = sessionID
-		changed = true
-	}
-	if meta.State != state {
-		meta.State = state
-		changed = true
-	}
-	if meta.CleanupDisposition != cleanupDisposition {
-		meta.CleanupDisposition = cleanupDisposition
-		changed = true
-	}
-	cleanupSafe := engine.IsTerminal(state) && localCleanupSafe(cleanupDisposition)
-	retainedArtifacts := meta.JobInputPath != "" || meta.ReviewWorkspace != ""
-	if retainedArtifacts && !cleanupSafe {
-		_ = warnLocalArtifactsRetained(warnings, jobID, state, cleanupDisposition)
-	}
-	clearedArtifacts := false
-	if meta.JobInputPath != "" && cleanupSafe {
-		input := handoff.JobInput{JobID: jobID, Path: meta.JobInputPath}
-		_, err = deleteJobInputOnTerminalState(input, state, cleanupDisposition, handoff.Hooks{})
-		if err != nil {
-			_ = warnLocalCleanupFailure(warnings, jobID, "job input", err)
-		} else {
-			meta.JobInputPath = ""
-			changed = true
-			clearedArtifacts = true
-		}
-	}
-	if meta.ReviewWorkspace != "" && cleanupSafe {
-		if err := cleanupReviewWorkspace(stateDir, meta.ReviewWorkspace); err != nil {
-			_ = warnLocalCleanupFailure(warnings, jobID, "review workspace", err)
-		} else {
-			meta.ReviewWorkspace = ""
-			changed = true
-			clearedArtifacts = true
-		}
-	}
-	if !changed {
-		return nil
-	}
-	if err := saveJobMetadata(stateDir, meta); err != nil {
-		if clearedArtifacts {
-			if retryErr := saveJobMetadata(stateDir, meta); retryErr == nil {
-				return nil
-			} else {
-				err = retryErr
+// sweepReviewWorkspaces makes one status read per retained review job when a
+// later review starts. It deliberately does not wait or poll: a non-terminal
+// or unreadable job remains recorded for the next review invocation.
+func sweepReviewWorkspaces(ctx context.Context, stateDir string) (errs []error) {
+	metadata, loadErrs := loadReviewWorkspaceMetadata(stateDir)
+	errs = append(errs, loadErrs...)
+	clients := map[string]agentbusClient{}
+	clientErrs := map[string]error{}
+	defer func() {
+		for root, c := range clients {
+			if err := c.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close Agentbus client for %s: %w", root, err))
 			}
 		}
-		_ = warnings.warn(jobID, fmt.Sprintf("Delegate could not persist local cleanup metadata; terminal outcome was preserved: %v", err))
+	}()
+
+	for _, record := range metadata {
+		c, ok := clients[record.AgentbusStateRoot]
+		if !ok {
+			if connectErr, failed := clientErrs[record.AgentbusStateRoot]; failed {
+				errs = append(errs, fmt.Errorf("inspect review workspace for job %s: %w", record.JobID, connectErr))
+				continue
+			}
+			var err error
+			c, _, err = connectAgentbusCommandAtRoot(ctx, nil, record.AgentbusStateRoot)
+			if err != nil {
+				clientErrs[record.AgentbusStateRoot] = err
+				errs = append(errs, fmt.Errorf("inspect review workspace for job %s: %w", record.JobID, err))
+				continue
+			}
+			clients[record.AgentbusStateRoot] = c
+		}
+
+		status, err := c.JobStatus(ctx, client.JobStatusParams{JobID: record.JobID})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("inspect review workspace for job %s: %w", record.JobID, err))
+			continue
+		}
+		if len(status.Jobs) != 1 || status.Jobs[0].JobID != record.JobID {
+			errs = append(errs, fmt.Errorf("inspect review workspace for job %s: Agentbus returned no matching job", record.JobID))
+			continue
+		}
+		if !engine.IsTerminal(status.Jobs[0].State) {
+			continue
+		}
+		if err := reviewpkg.CleanupWorkspace(stateDir, record.Workspace); err != nil {
+			errs = append(errs, fmt.Errorf("remove review workspace for terminal job %s: %w", record.JobID, err))
+			continue
+		}
+		if err := deleteReviewWorkspaceMetadata(stateDir, record.JobID); err != nil {
+			errs = append(errs, fmt.Errorf("remove review workspace record for terminal job %s: %w", record.JobID, err))
+		}
+	}
+	return errs
+}
+
+func validateReviewWorkspaceMetadata(meta reviewWorkspaceMetadata) error {
+	if meta.JobID == "" {
+		return fmt.Errorf("invalid review workspace job id %q", meta.JobID)
+	}
+	if meta.Workspace == "" || !filepath.IsAbs(meta.Workspace) {
+		return fmt.Errorf("invalid review workspace %q", meta.Workspace)
+	}
+	if meta.AgentbusStateRoot == "" || !filepath.IsAbs(meta.AgentbusStateRoot) {
+		return fmt.Errorf("invalid Agentbus state root %q", meta.AgentbusStateRoot)
 	}
 	return nil
 }
 
-func jobMetadataDir(stateDir string) (string, error) {
+func reviewWorkspaceMetadataDir(stateDir string) (string, error) {
 	dir, err := handoff.ResolveStateDir(handoff.StateConfig{StateDir: stateDir})
 	if err != nil {
 		return "", err
@@ -320,35 +181,25 @@ func jobMetadataDir(stateDir string) (string, error) {
 	if err := handoff.EnsureStateDir(dir); err != nil {
 		return "", err
 	}
-	jobs := filepath.Join(dir, "jobs")
-	if err := os.MkdirAll(jobs, 0o700); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(jobs, 0o700); err != nil {
-		return "", err
-	}
-	return jobs, nil
-}
-
-func validateDelegateJobID(jobID string) error {
-	if jobID == "" {
-		return fmt.Errorf("invalid job id %q", jobID)
-	}
-	return nil
-}
-
-func atomicWriteMetadata(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
+	dir = filepath.Join(dir, reviewWorkspaceMetadataDirectoryName)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+		return "", err
 	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func atomicWriteReviewWorkspaceMetadata(path string, data []byte) error {
+	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
-	if err := tmp.Chmod(mode); err != nil {
+	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -366,7 +217,7 @@ func atomicWriteMetadata(path string, data []byte, mode os.FileMode) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
-	if err := os.Chmod(path, mode); err != nil {
+	if err := os.Chmod(path, 0o600); err != nil {
 		return err
 	}
 	dirFile, err := os.Open(dir)

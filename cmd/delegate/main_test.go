@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"testing"
 )
 
@@ -11,50 +10,6 @@ func TestVersionLine(t *testing.T) {
 	const want = "delegate 0.0.0-dev"
 	if got := versionLine(); got != want {
 		t.Fatalf("versionLine() = %q, want %q", got, want)
-	}
-}
-
-func TestRunHandoffCreateJSON(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"handoff", "create", "--json"}, bytes.NewBufferString("from stdin"), &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
-	}
-	var result struct {
-		Schema      int    `json:"schema"`
-		HandoffPath string `json:"handoff_path"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("handoff JSON invalid: %v; raw = %q", err, stdout.String())
-	}
-	if result.Schema != 1 {
-		t.Fatalf("schema = %d, want 1", result.Schema)
-	}
-	raw, err := os.ReadFile(result.HandoffPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(raw) != "from stdin" {
-		t.Fatalf("handoff file = %q, want %q", raw, "from stdin")
-	}
-	info, err := os.Stat(result.HandoffPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("handoff mode = %o, want 600", got)
-	}
-}
-
-func TestRunHandoffCreateRequiresJSON(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"handoff", "create"}, bytes.NewBufferString("prompt"), &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("run() code = 0, want error")
-	}
-	if !bytes.Contains(stderr.Bytes(), []byte("requires --json")) {
-		t.Fatalf("stderr = %q, want requires --json", stderr.String())
 	}
 }
 
@@ -90,14 +45,44 @@ func TestRunUnknownCommand(t *testing.T) {
 	}
 }
 
-func TestRunHandoffCreateRejectsPositional(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"handoff", "create", "--json", "extra"}, nil, &stdout, &stderr)
-	if code == 0 {
-		t.Fatal("run() code = 0, want error")
+func TestRunRetiredCommandsAreUnknownAndAbsentFromHelp(t *testing.T) {
+	for _, command := range []string{"status", "result", "cancel", "config"} {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{command}, nil, &stdout, &stderr); code != 2 {
+			t.Fatalf("run(%q) code = %d, want 2; stderr=%q", command, code, stderr.String())
+		}
+		if !bytes.Contains(stderr.Bytes(), []byte(`unknown command "`+command+`"`)) {
+			t.Fatalf("run(%q) stderr=%q, want unknown command", command, stderr.String())
+		}
 	}
-	if !bytes.Contains(stderr.Bytes(), []byte("does not accept positional")) {
-		t.Fatalf("stderr = %q, want positional error", stderr.String())
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--help"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("run(--help) code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	for _, command := range []string{"status", "result", "cancel", "config"} {
+		if bytes.Contains(stdout.Bytes(), []byte(command)) {
+			t.Fatalf("help=%q, must not list %q", stdout.String(), command)
+		}
+	}
+}
+
+func TestRunSetupIsUnknownAndAbsentFromHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"setup"}, nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("run(setup) code = %d, want 2; stderr=%q", code, stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte(`unknown command "setup"`)) {
+		t.Fatalf("stderr = %q, want unknown setup command", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"--help"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("run(--help) code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if bytes.Contains(stdout.Bytes(), []byte("setup")) {
+		t.Fatalf("help = %q, must not list setup", stdout.String())
 	}
 }
 
@@ -161,11 +146,21 @@ func TestRunVersionFlagJSONMatchesVersionJSONSubcommand(t *testing.T) {
 
 func TestRunFlagParseError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"handoff", "create", "--bad"}, nil, &stdout, &stderr)
+	code := run([]string{"task", "--bad"}, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatal("run() code = 0, want error")
 	}
 	if !bytes.Contains(stderr.Bytes(), []byte("flag provided but not defined")) {
 		t.Fatalf("stderr = %q, want flag parse error", stderr.String())
+	}
+}
+
+func TestRunHandoffCreateIsUnknown(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"handoff", "create"}, nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte(`unknown command "handoff"`)) {
+		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
