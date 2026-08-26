@@ -99,12 +99,12 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 	root := filepath.Join(tmp, "root")
 	codexHome := filepath.Join(root, "codex-home")
 	env := []string{"CODEX_HOME=" + codexHome}
-	for _, legacy := range []string{"claude:rescue", "claude:review", "claude:adversarial-review", "claude:status", "claude:result", "claude:cancel"} {
-		path := filepath.Join(codexHome, "skills", legacy, "SKILL.md")
+	for _, retired := range expectedRetiredSkillNames("codex") {
+		path := filepath.Join(codexHome, "skills", retired, "SKILL.md")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte("legacy"), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte("retired"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -113,15 +113,14 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 		t.Fatalf("staged install warning = %#v, want no staged-root warning", installed.Warnings)
 	}
 	codexTarget := installed.Targets["codex"]
-	if len(codexTarget.Files) != 9 {
-		t.Fatalf("codex files = %d, want 9: %#v", len(codexTarget.Files), codexTarget.Files)
+	if len(codexTarget.Files) != 1 {
+		t.Fatalf("codex files = %d, want 1: %#v", len(codexTarget.Files), codexTarget.Files)
 	}
-	if len(codexTarget.Removed) != 6 {
-		t.Fatalf("codex removed = %d, want 6: %#v", len(codexTarget.Removed), codexTarget.Removed)
+	if len(codexTarget.Removed) != len(expectedRetiredSkillNames("codex")) {
+		t.Fatalf("codex removed = %d: %#v", len(codexTarget.Removed), codexTarget.Removed)
 	}
-	var rescuePath string
-	installedNames := map[string]bool{}
-	legacyRemovals := map[string]bool{}
+	var skillPath string
+	retiredRemovals := map[string]bool{}
 	for _, file := range codexTarget.Files {
 		if !strings.HasPrefix(file.Path, root+string(os.PathSeparator)) {
 			t.Fatalf("installed path %q escapes install root %q", file.Path, root)
@@ -132,47 +131,41 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 		if file.SHA256 == "" {
 			t.Fatalf("installed file %q missing sha256", file.Path)
 		}
-		if strings.Contains(file.Path, "delegate:rescue:claude") {
-			rescuePath = file.Path
+		if filepath.Base(filepath.Dir(file.Path)) == "delegate" {
+			skillPath = file.Path
 		}
-		installedNames[filepath.Base(filepath.Dir(file.Path))] = true
 	}
 	for _, removal := range codexTarget.Removed {
-		legacyRemovals[filepath.Base(filepath.Dir(removal.Path))] = true
+		retiredRemovals[filepath.Base(filepath.Dir(removal.Path))] = true
 	}
-	if rescuePath == "" {
-		t.Fatalf("delegate:rescue:claude file missing from %#v", codexTarget.Files)
+	if skillPath == "" {
+		t.Fatalf("delegate skill missing from %#v", codexTarget.Files)
 	}
-	for _, name := range []string{"delegate:review:claude", "delegate:adversarial-review:claude", "delegate:rescue:codex", "delegate:rescue:cursor", "delegate:review:cursor", "delegate:adversarial-review:cursor"} {
-		if !installedNames[name] {
-			t.Fatalf("%s file missing from %#v", name, codexTarget.Files)
+	for _, retired := range expectedRetiredSkillNames("codex") {
+		if !retiredRemovals[retired] {
+			t.Fatalf("retired removal %q missing from %#v", retired, codexTarget.Removed)
+		}
+		if _, err := os.Stat(filepath.Join(codexHome, "skills", retired)); !os.IsNotExist(err) {
+			t.Fatalf("retired skill %q remains after install: %v", retired, err)
 		}
 	}
-	for _, legacy := range []string{"claude:rescue", "claude:review", "claude:adversarial-review", "claude:status", "claude:result", "claude:cancel"} {
-		if !legacyRemovals[legacy] {
-			t.Fatalf("legacy removal %q missing from %#v", legacy, codexTarget.Files)
-		}
-		if _, err := os.Stat(filepath.Join(codexHome, "skills", legacy)); !os.IsNotExist(err) {
-			t.Fatalf("legacy skill %q remains after install: %v", legacy, err)
-		}
-	}
-	raw, err := os.ReadFile(rescuePath)
+	raw, err := os.ReadFile(skillPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "--no-contract") {
-		t.Fatalf("%s contains forbidden --no-contract", rescuePath)
+	if len(raw) == 0 {
+		t.Fatalf("%s is empty", skillPath)
 	}
 
 	uninstalled := runDelegatedInstallerScript(t, []string{"--uninstall", "--target", "codex", "--json", "--install-root", root}, env)
-	if len(uninstalled.Targets["codex"].Files) != 9 {
+	if len(uninstalled.Targets["codex"].Files) != 1 {
 		t.Fatalf("uninstall files = %#v", uninstalled.Targets["codex"].Files)
 	}
-	if len(uninstalled.Targets["codex"].Removed) != 6 {
+	if len(uninstalled.Targets["codex"].Removed) != len(expectedRetiredSkillNames("codex")) {
 		t.Fatalf("uninstall removed = %#v", uninstalled.Targets["codex"].Removed)
 	}
-	if _, err := os.Stat(filepath.Dir(rescuePath)); !os.IsNotExist(err) {
-		t.Fatalf("rescue directory still exists or stat failed unexpectedly: %v", err)
+	if _, err := os.Stat(filepath.Dir(skillPath)); !os.IsNotExist(err) {
+		t.Fatalf("delegate directory still exists or stat failed unexpectedly: %v", err)
 	}
 }
 
@@ -181,23 +174,23 @@ func TestDelegatedInstallerPlanShowsLegacyRemovals(t *testing.T) {
 	codexHome := filepath.Join(root, "codex-home")
 	result := runDelegatedInstallerScript(t, []string{"--plan", "--target", "codex", "--json", "--install-root", root}, []string{"CODEX_HOME=" + codexHome})
 	files := result.Targets["codex"].Files
-	if len(files) != 9 {
+	if len(files) != 1 {
 		t.Fatalf("plan files = %#v", files)
 	}
 	removed := result.Targets["codex"].Removed
-	if len(removed) != 6 {
+	if len(removed) != len(expectedRetiredSkillNames("codex")) {
 		t.Fatalf("plan removed = %#v", removed)
 	}
-	for _, legacy := range []string{"claude:rescue", "claude:review", "claude:adversarial-review", "claude:status", "claude:result", "claude:cancel"} {
+	for _, retired := range expectedRetiredSkillNames("codex") {
 		found := false
 		for _, removal := range removed {
-			if filepath.Base(filepath.Dir(removal.Path)) == legacy {
+			if filepath.Base(filepath.Dir(removal.Path)) == retired {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Fatalf("plan did not identify legacy removal %q: %#v", legacy, removed)
+			t.Fatalf("plan did not identify retired removal %q: %#v", retired, removed)
 		}
 	}
 }
@@ -266,6 +259,43 @@ func containsInstallerWarning(warnings []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func expectedRetiredSkillNames(target string) []string {
+	names := []string{
+		"delegate:setup",
+		"delegate:status",
+		"delegate:result",
+		"delegate:cancel",
+		"delegate:config",
+		"delegate:rescue:claude",
+		"delegate:rescue:codex",
+		"delegate:rescue:cursor",
+		"delegate:review:claude",
+		"delegate:review:codex",
+		"delegate:review:cursor",
+		"delegate:adversarial-review:claude",
+		"delegate:adversarial-review:codex",
+		"delegate:adversarial-review:cursor",
+	}
+	if target == "claude" {
+		return append(names,
+			"codex:rescue",
+			"codex:review",
+			"codex:adversarial-review",
+			"codex:status",
+			"codex:result",
+			"codex:cancel",
+		)
+	}
+	return append(names,
+		"claude:rescue",
+		"claude:review",
+		"claude:adversarial-review",
+		"claude:status",
+		"claude:result",
+		"claude:cancel",
+	)
 }
 
 func TestDelegatedInstallerToolsInstallBuildsDelegate(t *testing.T) {

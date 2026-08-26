@@ -26,7 +26,7 @@ func TestRescueSmokeFixture(t *testing.T) {
 	defer restore()
 
 	var submitOut, submitErr bytes.Buffer
-	if code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", "--tag", "skill=delegate:rescue:codex"}, strings.NewReader(prompt), &submitOut, &submitErr); code != 0 {
+	if code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", "--tag", "skill=delegate"}, strings.NewReader(prompt), &submitOut, &submitErr); code != 0 {
 		t.Fatalf("task code=%d stderr=%q", code, submitErr.String())
 	}
 	var receipt taskSubmitReceipt
@@ -36,7 +36,7 @@ func TestRescueSmokeFixture(t *testing.T) {
 	if receipt.JobID != "job_smoke" || receipt.State != engine.StateQueued || receipt.Timeout == nil || receipt.Timeout.Source != engine.TimeoutSourceDaemonDefault {
 		t.Fatalf("receipt=%#v", receipt)
 	}
-	if len(bus.submits) != 1 || bus.submits[0].TaskSpec.Prompt != prompt || bus.submits[0].TaskSpec.Tags["skill"] != "delegate:rescue:codex" {
+	if len(bus.submits) != 1 || bus.submits[0].TaskSpec.Prompt != prompt || bus.submits[0].TaskSpec.Tags["skill"] != "delegate" {
 		t.Fatalf("submitted=%#v", bus.submits)
 	}
 }

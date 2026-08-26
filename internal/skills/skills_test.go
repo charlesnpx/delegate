@@ -3,96 +3,13 @@ package skills
 import (
 	"os"
 	"path/filepath"
-	"reflect"
-	"strings"
 	"testing"
 )
-
-func TestTargetMatrices(t *testing.T) {
-	for _, target := range []string{TargetClaude, TargetCodex} {
-		t.Run(target, func(t *testing.T) {
-			got, err := TargetNames(target)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(got, expectedSkillNames()) {
-				t.Fatalf("TargetNames(%q) = %#v, want %#v", target, got, expectedSkillNames())
-			}
-			if len(got) != 9 {
-				t.Fatalf("TargetNames(%q) count = %d, want 9", target, len(got))
-			}
-		})
-	}
-
-	claude, err := Generate(TargetClaude)
-	if err != nil {
-		t.Fatal(err)
-	}
-	codex, err := Generate(TargetCodex)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := range claude {
-		if claude[i].Name != codex[i].Name || claude[i].Content != codex[i].Content {
-			t.Fatalf("host matrices differ at %d: claude=%#v codex=%#v", i, claude[i], codex[i])
-		}
-	}
-}
-
-func expectedSkillNames() []string {
-	return []string{
-		"delegate:rescue:claude",
-		"delegate:rescue:codex",
-		"delegate:rescue:cursor",
-		"delegate:review:claude",
-		"delegate:review:codex",
-		"delegate:review:cursor",
-		"delegate:adversarial-review:claude",
-		"delegate:adversarial-review:codex",
-		"delegate:adversarial-review:cursor",
-	}
-}
-
-func TestGeneratedSkillsUseAgentbusForJobControl(t *testing.T) {
-	for _, skill := range allGeneratedSkills(t) {
-		for _, removed := range []string{"delegate status", "delegate result", "delegate cancel", "launch envelope", "terminal envelope"} {
-			if strings.Contains(skill.Content, removed) {
-				t.Fatalf("%s contains removed wording %q", skill.Name, removed)
-			}
-		}
-		switch skill.Kind {
-		case KindLaunch, KindReview:
-			fragments := []string{
-				"agentbus status --job <id> --json",
-				"agentbus result --job <id> --json",
-				"agentbus cancel --job <id> --json",
-				"exit code of 2 means the job is still running",
-				"plain shell loop",
-				"Agentbus state root",
-				"silently drop the job",
-				"substitute your own answer",
-			}
-			requireFragments(t, skill, []string{"Return the submit receipt verbatim"})
-			for _, fragment := range fragments {
-				if !strings.Contains(skill.Content, fragment) {
-					t.Fatalf("%s missing %q", skill.Name, fragment)
-				}
-			}
-			if skill.Kind == KindReview {
-				action := strings.Split(skill.Name, ":")[1]
-				if !strings.Contains(skill.Content, "delegate "+action+" --backend") {
-					t.Fatalf("%s missing review command", skill.Name)
-				}
-			}
-		default:
-			t.Fatalf("unexpected skill kind %q for %s", skill.Kind, skill.Name)
-		}
-	}
-}
 
 func TestTargetRootResolution(t *testing.T) {
 	home := func() (string, error) { return "/home/delegate-user", nil }
 	emptyEnv := func(string) string { return "" }
+
 	root, err := TargetRoot(TargetClaude, "", emptyEnv, home)
 	if err != nil {
 		t.Fatal(err)
@@ -100,6 +17,7 @@ func TestTargetRootResolution(t *testing.T) {
 	if root != "/home/delegate-user/.claude/skills" {
 		t.Fatalf("claude root = %q", root)
 	}
+
 	root, err = TargetRoot(TargetCodex, "", func(key string) string {
 		if key == "CODEX_HOME" {
 			return "/opt/codex-home"
@@ -114,100 +32,103 @@ func TestTargetRootResolution(t *testing.T) {
 	}
 }
 
-func TestSourceFixturesMatchGeneratedTemplates(t *testing.T) {
-	files, err := SourceFiles()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, rel := range SortedSourcePaths(files) {
-		raw, err := os.ReadFile(filepath.Join("..", "..", rel))
-		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
-		}
-		if string(raw) != files[rel] {
-			t.Fatalf("source fixture %s drifted from generator", rel)
-		}
-	}
-	paths, err := filepath.Glob(filepath.Join("..", "..", "skills", "*", "SKILL.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := make([]string, 0, len(paths))
-	for _, path := range paths {
-		rel, err := filepath.Rel(filepath.Join("..", ".."), path)
+func TestInstallRemovesAndReportsRetiredSkills(t *testing.T) {
+	root := t.TempDir()
+	env := func(string) string { return "" }
+	for _, target := range []string{TargetClaude, TargetCodex} {
+		targetRoot, err := TargetRoot(target, root, env, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		got = append(got, rel)
+		for _, name := range expectedRetiredNames(target) {
+			path := filepath.Join(targetRoot, name, "SKILL.md")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("retired"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
-	if !reflect.DeepEqual(got, SortedSourcePaths(files)) {
-		t.Fatalf("skill source paths = %#v, want %#v", got, SortedSourcePaths(files))
-	}
-}
 
-func TestPlanAndInstallRemoveLegacySkills(t *testing.T) {
+	installed, err := Install(TargetAll, root, env, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, target := range []string{TargetClaude, TargetCodex} {
-		t.Run(target, func(t *testing.T) {
-			root := t.TempDir()
-			rootForTarget, err := TargetRoot(target, root, func(string) string { return "" }, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, legacyName := range legacyNamesForTarget(target) {
-				path := filepath.Join(rootForTarget, legacyName, "SKILL.md")
-				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, []byte("legacy"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			plan, err := Plan(target, root, func(string) string { return "" }, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(plan[target].Files) != 9 {
-				t.Fatalf("plan files = %#v", plan[target].Files)
-			}
-			if len(plan[target].Removed) != len(legacyNamesForTarget(target)) {
-				t.Fatalf("plan removed = %#v", plan[target].Removed)
-			}
-
-			installed, err := Install(target, root, func(string) string { return "" }, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(installed[target].Files) != 9 {
-				t.Fatalf("installed files = %#v", installed[target].Files)
-			}
-			for _, legacyName := range legacyNamesForTarget(target) {
-				if _, err := os.Stat(filepath.Join(rootForTarget, legacyName)); !os.IsNotExist(err) {
-					t.Fatalf("legacy skill %q remains after install: %v", legacyName, err)
-				}
-			}
-		})
-	}
-}
-
-func allGeneratedSkills(t *testing.T) []GeneratedSkill {
-	t.Helper()
-	var all []GeneratedSkill
-	for _, target := range []string{TargetClaude, TargetCodex} {
-		generated, err := Generate(target)
+		targetRoot, err := TargetRoot(target, root, env, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		all = append(all, generated...)
+		result := installed[target]
+		if len(result.Files) != 1 {
+			t.Fatalf("%s installed files = %#v", target, result.Files)
+		}
+		skillPath := filepath.Join(targetRoot, "delegate", "SKILL.md")
+		if result.Files[0].Path != skillPath || result.Files[0].SHA256 == "" {
+			t.Fatalf("%s installed file = %#v", target, result.Files[0])
+		}
+		content, err := os.ReadFile(skillPath)
+		if err != nil || len(content) == 0 {
+			t.Fatalf("%s installed static skill: content=%q err=%v", target, content, err)
+		}
+
+		removed := make(map[string]bool, len(result.Removed))
+		for _, removal := range result.Removed {
+			removed[filepath.Base(filepath.Dir(removal.Path))] = true
+		}
+		want := expectedRetiredNames(target)
+		if len(result.Removed) != len(want) {
+			t.Fatalf("%s removed = %#v", target, result.Removed)
+		}
+		for _, name := range want {
+			if !removed[name] {
+				t.Fatalf("%s did not report retired skill %q: %#v", target, name, result.Removed)
+			}
+			if _, err := os.Stat(filepath.Join(targetRoot, name)); !os.IsNotExist(err) {
+				t.Fatalf("%s retired skill %q remains after install: %v", target, name, err)
+			}
+		}
 	}
-	return all
 }
 
-func requireFragments(t *testing.T, skill GeneratedSkill, fragments []string) {
-	t.Helper()
-	for _, fragment := range fragments {
-		if !strings.Contains(skill.Content, fragment) {
-			t.Fatalf("%s missing fragment %q", skill.Name, fragment)
-		}
+func expectedRetiredNames(target string) []string {
+	names := []string{
+		"delegate:setup",
+		"delegate:status",
+		"delegate:result",
+		"delegate:cancel",
+		"delegate:config",
+		"delegate:rescue:claude",
+		"delegate:rescue:codex",
+		"delegate:rescue:cursor",
+		"delegate:review:claude",
+		"delegate:review:codex",
+		"delegate:review:cursor",
+		"delegate:adversarial-review:claude",
+		"delegate:adversarial-review:codex",
+		"delegate:adversarial-review:cursor",
+	}
+	switch target {
+	case TargetClaude:
+		return append(names,
+			"codex:rescue",
+			"codex:review",
+			"codex:adversarial-review",
+			"codex:status",
+			"codex:result",
+			"codex:cancel",
+		)
+	case TargetCodex:
+		return append(names,
+			"claude:rescue",
+			"claude:review",
+			"claude:adversarial-review",
+			"claude:status",
+			"claude:result",
+			"claude:cancel",
+		)
+	default:
+		return names
 	}
 }

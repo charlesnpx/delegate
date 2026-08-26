@@ -118,7 +118,7 @@ if not {"go", "agentbus"}.issubset(executables):
 targets = doc.get("targets")
 if not isinstance(targets, dict):
     fail("targets is not an object")
-for target, minimum_files in (("tools", 1), ("claude", 5), ("codex", 5)):
+for target, minimum_files in (("tools", 1), ("claude", 1), ("codex", 1)):
     target_doc = targets.get(target)
     if not isinstance(target_doc, dict):
         fail(f"targets.{target} is not an object")
