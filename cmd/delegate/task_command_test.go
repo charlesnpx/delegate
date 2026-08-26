@@ -348,7 +348,7 @@ func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 		return "/tmp/agentbus", nil
 	}
 	commandOutput = func(string, ...string) ([]byte, error) {
-		return []byte(agentbusVersionFixtureOutput(minimumSupportedAgentbusVersion)), nil
+		return []byte(agentbusVersionFixtureOutput("v0.10.0")), nil
 	}
 	return func() {
 		connectAgentbus = oldConnect

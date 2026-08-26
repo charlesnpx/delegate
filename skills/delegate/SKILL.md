@@ -15,9 +15,7 @@ printf '%s' "$PROMPT" | delegate task --backend <name> --cwd <abs> --prompt-file
 
 Task flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, and `--tag`.
 
-For a retry after an ambiguous submission, supply a stable `--request-id` and retry with that same identity. A replay returns `deduplicated: true` and the original job ID.
-
-Submission is always asynchronous. Observe a job with Agentbus:
+Submission is asynchronous. After an ambiguous submission, reuse the same `--request-id` and run from the same `--cwd` (the replay key is their pair); a replay returns `deduplicated: true` and the original job ID. Observe a job with Agentbus:
 
 ```sh
 agentbus status --job <id> --json
