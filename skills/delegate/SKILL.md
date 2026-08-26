@@ -27,4 +27,4 @@ agentbus cancel --job <id> --json
 
 For `status` or `result`, exit code 2 means the job is still running.
 
-With `--write`, the worker has workspace-write access only inside its own `--cwd` and has no network. Put `GOCACHE` under that cwd for Go builds. Without `--write`, the worker is read-only, has no network, and cannot create temporary directories.
+With `--write`, the worker has workspace-write access only inside its own `--cwd` and has no network. Put `GOCACHE` under that cwd because Go writes to it; leave the default `GOMODCACHE` alone because it is read-only to the worker and already populated, while a relocated empty cache cannot be refilled without network access. Without `--write`, the worker is read-only, has no network, and cannot create temporary directories.

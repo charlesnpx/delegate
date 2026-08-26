@@ -7,7 +7,6 @@ OPERATION=""
 TARGET="all"
 INSTALL_ROOT_ARG=""
 WARNINGS_JSON=""
-CODEX_HOME_IGNORED_WARNING=0
 
 die() {
   printf 'delegate installer: %s\n' "$*" >&2
@@ -169,12 +168,6 @@ codex_requested() {
   [[ "$TARGET" == "codex" || "$TARGET" == "all" ]]
 }
 
-path_inside_root() {
-  local root=$1
-  local path=$2
-  [[ "$path" == "$root" || "$path" == "$root"/* ]]
-}
-
 decode_skill_dir() {
   local name=$1
   printf '%s\n' "${name//__colon__/:}"
@@ -185,23 +178,17 @@ claude_skills_root() {
 }
 
 codex_skills_root() {
+  if [[ -n "$INSTALL_ROOT_ARG" ]]; then
+    printf '%s\n' "$ROOT/.codex/skills"
+    return
+  fi
+
   local codex_home=${CODEX_HOME:-}
   if [[ -n "$codex_home" ]]; then
     [[ "$codex_home" == /* ]] || die "CODEX_HOME must be absolute"
     codex_home=$(trim_trailing_slash "$codex_home")
-    if [[ -n "$INSTALL_ROOT_ARG" ]]; then
-      if path_inside_root "$ROOT" "$codex_home"; then
-        printf '%s\n' "$codex_home/skills"
-        return
-      fi
-      if [[ "$CODEX_HOME_IGNORED_WARNING" -eq 0 ]]; then
-        CODEX_HOME_IGNORED_WARNING=1
-        add_warning "CODEX_HOME is outside --install-root; staged codex skills use .codex under the install root"
-      fi
-    else
-      printf '%s\n' "$codex_home/skills"
-      return
-    fi
+    printf '%s\n' "$codex_home/skills"
+    return
   fi
   printf '%s\n' "$ROOT/.codex/skills"
 }

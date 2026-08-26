@@ -97,7 +97,7 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := filepath.Join(tmp, "root")
-	codexHome := filepath.Join(root, "codex-home")
+	codexHome := filepath.Join(root, ".codex")
 	env := []string{"CODEX_HOME=" + codexHome}
 	for _, retired := range expectedRetiredSkillNames("codex") {
 		path := filepath.Join(codexHome, "skills", retired, "SKILL.md")
@@ -169,6 +169,39 @@ func TestDelegatedInstallerCodexInstallDecodeAndUninstall(t *testing.T) {
 	}
 }
 
+func TestDelegatedInstallerStagedCodexInstallIgnoresEscapingCodexHome(t *testing.T) {
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(tmp, "stage")
+	outsideCodexHome := filepath.Join(tmp, "outside-codex")
+	escapingCodexHome := root + string(os.PathSeparator) + ".." + string(os.PathSeparator) + filepath.Base(outsideCodexHome)
+	sentinel := filepath.Join(outsideCodexHome, "skills", "delegate:setup", "sentinel")
+	if err := os.MkdirAll(filepath.Dir(sentinel), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sentinel, []byte("sentinel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "codex", "--json", "--install-root", root}, []string{"CODEX_HOME=" + escapingCodexHome})
+	files := installed.Targets["codex"].Files
+	if len(files) != 1 {
+		t.Fatalf("codex files = %#v", files)
+	}
+	wantSkillPath := filepath.Join(root, ".codex", "skills", "delegate", "SKILL.md")
+	if files[0].Path != wantSkillPath {
+		t.Fatalf("staged codex skill path = %q, want %q", files[0].Path, wantSkillPath)
+	}
+	if _, err := os.Stat(wantSkillPath); err != nil {
+		t.Fatalf("staged codex skill missing at %q: %v", wantSkillPath, err)
+	}
+	if got, err := os.ReadFile(sentinel); err != nil || string(got) != "sentinel" {
+		t.Fatalf("outside sentinel = %q, %v; want untouched sentinel", got, err)
+	}
+}
+
 func TestDelegatedInstallerPlanShowsLegacyRemovals(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "root")
 	codexHome := filepath.Join(root, "codex-home")
@@ -219,6 +252,13 @@ func TestDelegatedInstallerLiveCodexInstallConfiguresSandbox(t *testing.T) {
 	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "codex", "--json"}, env)
 	if !containsInstallerWarning(installed.Warnings, "codex sandbox writable_roots configured") {
 		t.Fatalf("install warnings = %#v, want configured sandbox", installed.Warnings)
+	}
+	liveSkillPath := filepath.Join(codexHome, "skills", "delegate", "SKILL.md")
+	if files := installed.Targets["codex"].Files; len(files) != 1 || files[0].Path != liveSkillPath {
+		t.Fatalf("live codex files = %#v, want %q", files, liveSkillPath)
+	}
+	if _, err := os.Stat(liveSkillPath); err != nil {
+		t.Fatalf("live codex skill missing at %q: %v", liveSkillPath, err)
 	}
 	configPath := filepath.Join(codexHome, "config.toml")
 	raw, err := os.ReadFile(configPath)
