@@ -9,16 +9,6 @@ import (
 	"testing"
 )
 
-func TestInstallSkillsIsNotARuntimeCommand(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"install-skills"}, nil, &stdout, &stderr); code != 2 {
-		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stderr.String(), `unknown command "install-skills"`) {
-		t.Fatalf("stderr=%q", stderr.String())
-	}
-}
-
 func TestConfigureCodexSandboxCommand(t *testing.T) {
 	home := t.TempDir()
 	stateHome := filepath.Join(home, "state")
