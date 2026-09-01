@@ -95,7 +95,7 @@ With `--write`, workspace-write access only inside its `--cwd` and no network ar
 
 ## Review commands
 
-Today `review` delegates a sanitized code review and `adversarial-review` delegates a refute-first review. Both accept the flags shown above and return the submit-receipt shape; they are slated to be rebuilt against a shared review contract.
+Today `review` delegates a sanitized code review and `adversarial-review` delegates a refute-first review; both also support contract mode with caller-frozen `--request-file`, `--artifact-file`, and `--charter-file` inputs against the shared review contract and return the submit-receipt shape.
 
 ## Managed skill
 

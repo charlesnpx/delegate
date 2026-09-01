@@ -36,7 +36,6 @@ type reviewOptions struct {
 	RequestFile       string
 	ArtifactFile      string
 	CharterFile       string
-	ContractMode      bool
 }
 
 type contractReviewInput struct {
@@ -58,7 +57,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	var prompt string
 	contractCharterHash := ""
 	contractReviewInputDigest := ""
-	if opts.ContractMode {
+	if opts.RequestFile != "" {
 		input, err := loadContractReviewInput(opts)
 		if err != nil {
 			return 0, err
@@ -100,7 +99,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 			return 0, err
 		}
 	}
-	if opts.ContractMode {
+	if opts.RequestFile != "" {
 		prompt, err = reviewpkg.ComposeContractPrompt(kind, contractCharterHash, contractReviewInputDigest)
 	} else {
 		prompt, err = reviewpkg.ComposePrompt(kind, assembled)
@@ -206,8 +205,7 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	if contractFileCount == 0 && (provided["request-file"] || provided["artifact-file"] || provided["charter-file"]) {
 		return reviewOptions{}, fmt.Errorf("contract mode requires non-empty --request-file, --artifact-file, and --charter-file together")
 	}
-	opts.ContractMode = contractFileCount == 3
-	if opts.ContractMode {
+	if opts.RequestFile != "" {
 		for _, name := range []string{"base", "scope", "allow-live-repo-read"} {
 			if provided[name] {
 				return reviewOptions{}, fmt.Errorf("--%s cannot be used with --request-file/--artifact-file/--charter-file contract mode", name)

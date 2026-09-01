@@ -24,7 +24,6 @@ func TestProductionImportsOnlyPinnedAgentbusAndWitnessContracts(t *testing.T) {
 	allowedWitness := map[string]struct{}{
 		"github.com/charlesnpx/witness/contract/charter": {},
 		"github.com/charlesnpx/witness/contract/review":  {},
-		"github.com/charlesnpx/witness/contract/diag":    {},
 	}
 	var agentbusViolations, witnessViolations []string
 	for _, root := range roots {

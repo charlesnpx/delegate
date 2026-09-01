@@ -7,13 +7,9 @@ import (
 
 	"github.com/charlesnpx/witness/contract/charter"
 	reviewcontract "github.com/charlesnpx/witness/contract/review"
+	"github.com/charlesnpx/witness/contract/strictjson"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
-
-func TestDefaultReviewerSchemaCompilesForEmbeddedCorpusCharter(t *testing.T) {
-	frozen := embeddedConformanceFrozenCharter(t)
-	compileDefaultReviewerSchema(t, frozen, "sha256:1111111111111111111111111111111111111111111111111111111111111111")
-}
 
 func TestDefaultReviewerSchemaMatchesConformanceManifest(t *testing.T) {
 	frozen := embeddedConformanceFrozenCharter(t)
@@ -22,23 +18,27 @@ func TestDefaultReviewerSchemaMatchesConformanceManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, testCase := range cases {
-		if testCase.Strict != "pass" {
-			continue
-		}
 		t.Run(testCase.File, func(t *testing.T) {
 			schema := compileDefaultReviewerSchema(t, frozen, testCase.ExpectedInputDigest)
 			data, err := reviewcontract.ConformanceFS.ReadFile("testdata/conformance/" + testCase.File)
 			if err != nil {
 				t.Fatal(err)
 			}
-			instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
-			if err != nil {
-				t.Fatalf("decode schema instance: %v", err)
+			_, strictErr := strictjson.DecodeBytes[reviewcontract.ReviewReportDocument](data, strictjson.DefaultMaxBytes)
+			if got, want := strictErr == nil, testCase.Strict == "pass"; got != want {
+				t.Fatalf("strict decode=%t, want manifest strict outcome %q: %v", got, testCase.Strict, strictErr)
 			}
-			got := schema.Validate(instance) == nil
-			want := testCase.Schema == "pass"
-			if got != want {
-				t.Fatalf("schema validation=%t, want manifest schema outcome %q", got, testCase.Schema)
+			instance, decodeErr := jsonschema.UnmarshalJSON(bytes.NewReader(data))
+			var schemaErr error
+			if decodeErr == nil {
+				schemaErr = schema.Validate(instance)
+			}
+			got := "fail"
+			if strictErr == nil && decodeErr == nil && schemaErr == nil {
+				got = "pass"
+			}
+			if got != testCase.Schema {
+				t.Fatalf("schema outcome=%q, want manifest schema outcome %q; strict decode error: %v; instance decode error: %v; schema validation error: %v", got, testCase.Schema, strictErr, decodeErr, schemaErr)
 			}
 		})
 	}
