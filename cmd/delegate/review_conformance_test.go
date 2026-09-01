@@ -19,7 +19,7 @@ func TestDefaultReviewerSchemaMatchesConformanceManifest(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.File, func(t *testing.T) {
-			schema := compileDefaultReviewerSchema(t, frozen, testCase.ExpectedInputDigest)
+			schema := compileDefaultReviewerSchema(t, frozen, testCase.ExpectedInputDigest, testCase.ExpectedConsumerIdentity)
 			data, err := reviewcontract.ConformanceFS.ReadFile("testdata/conformance/" + testCase.File)
 			if err != nil {
 				t.Fatal(err)
@@ -57,9 +57,9 @@ func embeddedConformanceFrozenCharter(t *testing.T) charter.FrozenCharter {
 	return frozen
 }
 
-func compileDefaultReviewerSchema(t *testing.T, frozen charter.FrozenCharter, reviewInputDigest string) *jsonschema.Schema {
+func compileDefaultReviewerSchema(t *testing.T, frozen charter.FrozenCharter, reviewInputDigest string, consumerIdentity map[string]any) *jsonschema.Schema {
 	t.Helper()
-	data, err := reviewcontract.DefaultReviewerSchema(frozen, reviewInputDigest)
+	data, err := reviewcontract.DefaultReviewerSchema(frozen, reviewInputDigest, consumerIdentity)
 	if err != nil {
 		t.Fatalf("DefaultReviewerSchema: %v", err)
 	}

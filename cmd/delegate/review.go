@@ -43,6 +43,7 @@ type contractReviewInput struct {
 	FrozenCharterJSON []byte
 	Artifact          []byte
 	ReviewInputDigest string
+	ConsumerIdentity  map[string]any
 }
 
 func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error) {
@@ -66,7 +67,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		if err != nil {
 			return 0, err
 		}
-		schema, err := reviewcontract.DefaultReviewerSchema(input.FrozenCharter, input.ReviewInputDigest)
+		schema, err := reviewcontract.DefaultReviewerSchema(input.FrozenCharter, input.ReviewInputDigest, input.ConsumerIdentity)
 		if err != nil {
 			return 0, fmt.Errorf("build review-report-v1 schema: %w", err)
 		}
@@ -269,6 +270,7 @@ func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
 		FrozenCharterJSON: frozenJSON,
 		Artifact:          artifact,
 		ReviewInputDigest: request.ReviewInputDigest,
+		ConsumerIdentity:  request.ConsumerIdentity,
 	}, nil
 }
 
