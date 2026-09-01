@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,12 +13,15 @@ import (
 	"time"
 
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
+	"github.com/charlesnpx/witness/contract/charter"
+	reviewcontract "github.com/charlesnpx/witness/contract/review"
 )
 
 const (
-	liveRepoReadWarning   = "--allow-live-repo-read makes backend filesystem reads easier by using the live repository as cwd; delegate's path/history redaction and final content scan apply only to the context it assembles"
-	reviewKind            = reviewpkg.KindReview
-	adversarialReviewKind = reviewpkg.KindAdversarialReview
+	liveRepoReadWarning    = "--allow-live-repo-read makes backend filesystem reads easier by using the live repository as cwd; delegate's path/history redaction and final content scan apply only to the context it assembles"
+	reviewKind             = reviewpkg.KindReview
+	adversarialReviewKind  = reviewpkg.KindAdversarialReview
+	maxReviewArtifactBytes = 8 * 1024 * 1024
 )
 
 type reviewOptions struct {
@@ -27,6 +33,17 @@ type reviewOptions struct {
 	Base              string
 	Scope             string
 	AllowLiveRepoRead bool
+	RequestFile       string
+	ArtifactFile      string
+	CharterFile       string
+	ContractMode      bool
+}
+
+type contractReviewInput struct {
+	FrozenCharter     charter.FrozenCharter
+	FrozenCharterJSON []byte
+	Artifact          []byte
+	ReviewInputDigest string
 }
 
 func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error) {
@@ -35,14 +52,46 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		return 0, err
 	}
 	taskOpts := taskOptions{Backend: opts.Backend, Model: opts.Model, Effort: opts.Effort}
-	assembled, err := reviewpkg.Assemble(context.Background(), reviewpkg.Options{
-		CWD:               opts.CWD,
-		Base:              opts.Base,
-		Scope:             opts.Scope,
-		AllowLiveRepoRead: opts.AllowLiveRepoRead,
-	})
-	if err != nil {
-		return 0, err
+	policy := turnPolicyForSchema(nil, "")
+	logicalWorkspace := ""
+	var assembled reviewpkg.Context
+	var prompt string
+	contractCharterHash := ""
+	contractReviewInputDigest := ""
+	if opts.ContractMode {
+		input, err := loadContractReviewInput(opts)
+		if err != nil {
+			return 0, err
+		}
+		logicalWorkspace, err = reviewpkg.CanonicalizeCWD(opts.CWD)
+		if err != nil {
+			return 0, err
+		}
+		schema, err := reviewcontract.DefaultReviewerSchema(input.FrozenCharter, input.ReviewInputDigest)
+		if err != nil {
+			return 0, fmt.Errorf("build review-report-v1 schema: %w", err)
+		}
+		assembled, err = reviewpkg.PrepareContractWorkspace(reviewpkg.ContractWorkspaceOptions{
+			Charter:  input.FrozenCharterJSON,
+			Artifact: input.Artifact,
+		})
+		if err != nil {
+			return 0, err
+		}
+		policy = turnPolicyForSchema(schema, reviewRetryTemplate)
+		contractCharterHash = input.FrozenCharter.CharterHash
+		contractReviewInputDigest = input.ReviewInputDigest
+	} else {
+		assembled, err = reviewpkg.Assemble(context.Background(), reviewpkg.Options{
+			CWD:               opts.CWD,
+			Base:              opts.Base,
+			Scope:             opts.Scope,
+			AllowLiveRepoRead: opts.AllowLiveRepoRead,
+		})
+		if err != nil {
+			return 0, err
+		}
+		logicalWorkspace = assembled.RepositoryRoot
 	}
 
 	for _, sweepErr := range sweepReviewWorkspaces(context.Background(), assembled.StateDir) {
@@ -51,15 +100,19 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 			return 0, err
 		}
 	}
-	prompt, err := reviewpkg.ComposePrompt(kind, assembled)
+	if opts.ContractMode {
+		prompt, err = reviewpkg.ComposeContractPrompt(kind, contractCharterHash, contractReviewInputDigest)
+	} else {
+		prompt, err = reviewpkg.ComposePrompt(kind, assembled)
+	}
 	if err != nil {
 		_ = reviewpkg.Cleanup(assembled)
 		return 0, err
 	}
 	taskOpts.CWD = assembled.BackendCWD
 	taskOpts.Timeout = opts.Timeout
-	taskOpts.LogicalWorkspace = assembled.RepositoryRoot
-	submitted, c, agentbusStateRoot, err := submitTask(context.Background(), &taskOpts, prompt, nil)
+	taskOpts.LogicalWorkspace = logicalWorkspace
+	submitted, c, agentbusStateRoot, err := submitTask(context.Background(), &taskOpts, prompt, policy)
 	var unresolved *submissionUnresolvedError
 	cleanupWorkspace := err != nil && !errors.As(err, &unresolved)
 	if cleanupWorkspace {
@@ -127,6 +180,9 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	fs.StringVar(&opts.Base, "base", "", "comparison base ref")
 	fs.StringVar(&opts.Scope, "scope", reviewpkg.ScopeAuto, "review scope: auto combines branch and working-tree changes; or working-tree, branch")
 	fs.BoolVar(&opts.AllowLiveRepoRead, "allow-live-repo-read", false, "use live repository as backend cwd (makes backend file reads easier; does not prevent backend file reads)")
+	fs.StringVar(&opts.RequestFile, "request-file", "", "review-request-v1 file for exact-input contract mode")
+	fs.StringVar(&opts.ArtifactFile, "artifact-file", "", "exact review artifact file for contract mode")
+	fs.StringVar(&opts.CharterFile, "charter-file", "", "review charter file for contract mode")
 	if err := fs.Parse(args); err != nil {
 		return reviewOptions{}, err
 	}
@@ -135,6 +191,28 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	}
 	if opts.Backend == "" {
 		return reviewOptions{}, fmt.Errorf("%s requires --backend", command)
+	}
+	provided := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { provided[f.Name] = true })
+	contractFileCount := 0
+	for _, path := range []string{opts.RequestFile, opts.ArtifactFile, opts.CharterFile} {
+		if path != "" {
+			contractFileCount++
+		}
+	}
+	if contractFileCount != 0 && contractFileCount != 3 {
+		return reviewOptions{}, fmt.Errorf("contract mode requires --request-file, --artifact-file, and --charter-file together")
+	}
+	if contractFileCount == 0 && (provided["request-file"] || provided["artifact-file"] || provided["charter-file"]) {
+		return reviewOptions{}, fmt.Errorf("contract mode requires non-empty --request-file, --artifact-file, and --charter-file together")
+	}
+	opts.ContractMode = contractFileCount == 3
+	if opts.ContractMode {
+		for _, name := range []string{"base", "scope", "allow-live-repo-read"} {
+			if provided[name] {
+				return reviewOptions{}, fmt.Errorf("--%s cannot be used with --request-file/--artifact-file/--charter-file contract mode", name)
+			}
+		}
 	}
 	if opts.Scope == reviewpkg.ScopeWorkingTree && opts.Base != "" {
 		return reviewOptions{}, fmt.Errorf("--base cannot be used with --scope working-tree")
@@ -150,4 +228,64 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 		opts.CWD = cwd
 	}
 	return opts, nil
+}
+
+func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
+	inputCharter, err := charter.ReadFile(opts.CharterFile)
+	if err != nil {
+		return contractReviewInput{}, fmt.Errorf("read --charter-file %q: %w", opts.CharterFile, err)
+	}
+	frozen, err := charter.Freeze(inputCharter, nil)
+	if err != nil {
+		return contractReviewInput{}, fmt.Errorf("freeze --charter-file %q: %w", opts.CharterFile, err)
+	}
+
+	requestData, err := os.ReadFile(opts.RequestFile)
+	if err != nil {
+		return contractReviewInput{}, fmt.Errorf("read --request-file %q: %w", opts.RequestFile, err)
+	}
+	request, err := reviewcontract.DecodeAndValidateReviewRequest(requestData)
+	if err != nil {
+		return contractReviewInput{}, fmt.Errorf("validate --request-file %q: %w", opts.RequestFile, err)
+	}
+	if request.CharterHash != frozen.CharterHash {
+		return contractReviewInput{}, fmt.Errorf("review request charter hash mismatch: request %s does not match frozen charter %s", request.CharterHash, frozen.CharterHash)
+	}
+
+	artifact, err := readContractReviewArtifact(opts.ArtifactFile)
+	if err != nil {
+		return contractReviewInput{}, err
+	}
+	sum := sha256.Sum256(artifact)
+	artifactDigest := "sha256:" + hex.EncodeToString(sum[:])
+	if artifactDigest != request.ReviewInputDigest {
+		return contractReviewInput{}, fmt.Errorf("review artifact digest mismatch: got %s, request review_input_digest is %s", artifactDigest, request.ReviewInputDigest)
+	}
+
+	frozenJSON, err := json.Marshal(frozen)
+	if err != nil {
+		return contractReviewInput{}, fmt.Errorf("marshal frozen charter: %w", err)
+	}
+	return contractReviewInput{
+		FrozenCharter:     frozen,
+		FrozenCharterJSON: frozenJSON,
+		Artifact:          artifact,
+		ReviewInputDigest: request.ReviewInputDigest,
+	}, nil
+}
+
+func readContractReviewArtifact(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read --artifact-file %q: %w", path, err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxReviewArtifactBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read --artifact-file %q: %w", path, err)
+	}
+	if len(data) > maxReviewArtifactBytes {
+		return nil, fmt.Errorf("review artifact exceeds the 8 MiB limit")
+	}
+	return data, nil
 }

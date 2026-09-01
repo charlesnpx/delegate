@@ -38,6 +38,7 @@ const (
 	agentbusMaxTimeout      = 4 * time.Hour
 	readOnlyTaskHint        = "notice: task will run with a read-only backend profile; pass --write for edits or builds."
 	jsonSchemaRetryTemplate = "The previous response did not conform to the requested JSON Schema: {{missing}}.\n\nReturn only a corrected response."
+	reviewRetryTemplate     = "The response did not conform to review-report-v1: {{missing}} — emit only the corrected single JSON report document."
 )
 
 // taskSubmitReceipt is intentionally a direct projection of the Agentbus
@@ -110,7 +111,7 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 		}
 	}
 
-	submitted, c, _, err := submitTask(context.Background(), &opts, prompt, turnPolicyForSchema(schema))
+	submitted, c, _, err := submitTask(context.Background(), &opts, prompt, turnPolicyForSchema(schema, jsonSchemaRetryTemplate))
 	if err != nil {
 		return 0, err
 	}
@@ -231,7 +232,7 @@ func readTaskSchema(path string) (json.RawMessage, error) {
 	return append(json.RawMessage(nil), raw...), nil
 }
 
-func turnPolicyForSchema(schema json.RawMessage) *engine.TurnPolicy {
+func turnPolicyForSchema(schema json.RawMessage, retryTemplate string) *engine.TurnPolicy {
 	if schema == nil {
 		return nil
 	}
@@ -239,7 +240,7 @@ func turnPolicyForSchema(schema json.RawMessage) *engine.TurnPolicy {
 		Contract: &engine.ContractSpec{JSONSchema: append(json.RawMessage(nil), schema...)},
 		Retry: &engine.RetryPolicy{
 			Max:      1,
-			Template: jsonSchemaRetryTemplate,
+			Template: retryTemplate,
 		},
 	}
 }

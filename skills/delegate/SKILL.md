@@ -15,6 +15,8 @@ printf '%s' "$PROMPT" | delegate task --backend <name> --cwd <abs> --prompt-file
 
 Task flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, and `--tag`.
 
+Contract mode via `--request-file`/`--artifact-file`/`--charter-file` returns a schema-enforced `review-report-v1` document.
+
 Submission is asynchronous. After an ambiguous submission, reuse the same `--request-id` and run from the same `--cwd` (the replay key is their pair); a replay returns `deduplicated: true` and the original job ID. Observe a job with Agentbus:
 
 ```sh

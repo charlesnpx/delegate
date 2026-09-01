@@ -10,18 +10,23 @@ import (
 	"testing"
 )
 
-func TestProductionImportsOnlyAgentbusClientAndStableEngine(t *testing.T) {
+func TestProductionImportsOnlyPinnedAgentbusAndWitnessContracts(t *testing.T) {
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", ".."))
 	roots := []string{filepath.Join(repoRoot, "cmd/delegate"), filepath.Join(repoRoot, "internal")}
-	allowed := map[string]struct{}{
+	allowedAgentbus := map[string]struct{}{
 		"github.com/charlesnpx/agentbus/client": {},
 		"github.com/charlesnpx/agentbus/engine": {},
 	}
-	var violations []string
+	allowedWitness := map[string]struct{}{
+		"github.com/charlesnpx/witness/contract/charter": {},
+		"github.com/charlesnpx/witness/contract/review":  {},
+		"github.com/charlesnpx/witness/contract/diag":    {},
+	}
+	var agentbusViolations, witnessViolations []string
 	for _, root := range roots {
 		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 			if err != nil {
@@ -36,15 +41,19 @@ func TestProductionImportsOnlyAgentbusClientAndStableEngine(t *testing.T) {
 			}
 			for _, imp := range file.Imports {
 				importPath := strings.Trim(imp.Path.Value, `"`)
-				if !strings.HasPrefix(importPath, "github.com/charlesnpx/agentbus/") {
-					continue
+				displayPath, err := filepath.Rel(repoRoot, path)
+				if err != nil {
+					displayPath = path
 				}
-				if _, ok := allowed[importPath]; !ok {
-					displayPath, err := filepath.Rel(repoRoot, path)
-					if err != nil {
-						displayPath = path
+				switch {
+				case strings.HasPrefix(importPath, "github.com/charlesnpx/agentbus/"):
+					if _, ok := allowedAgentbus[importPath]; !ok {
+						agentbusViolations = append(agentbusViolations, displayPath+": "+importPath)
 					}
-					violations = append(violations, displayPath+": "+importPath)
+				case strings.HasPrefix(importPath, "github.com/charlesnpx/witness/"):
+					if _, ok := allowedWitness[importPath]; !ok {
+						witnessViolations = append(witnessViolations, displayPath+": "+importPath)
+					}
 				}
 			}
 			return nil
@@ -53,7 +62,10 @@ func TestProductionImportsOnlyAgentbusClientAndStableEngine(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(violations) > 0 {
-		t.Fatalf("production files import unstable agentbus packages:\n%s", strings.Join(violations, "\n"))
+	if len(agentbusViolations) > 0 {
+		t.Fatalf("production files import unstable agentbus packages:\n%s", strings.Join(agentbusViolations, "\n"))
+	}
+	if len(witnessViolations) > 0 {
+		t.Fatalf("production files import unpinned witness contracts:\n%s", strings.Join(witnessViolations, "\n"))
 	}
 }

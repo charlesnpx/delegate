@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -13,7 +15,147 @@ import (
 
 	"github.com/charlesnpx/agentbus/client"
 	"github.com/charlesnpx/agentbus/engine"
+	"github.com/charlesnpx/witness/contract/charter"
+	reviewcontract "github.com/charlesnpx/witness/contract/review"
 )
+
+func TestContractReviewSubmitsFrozenInputsFromPrivateWorkspace(t *testing.T) {
+	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
+	fake := &fakeAgentbusClient{
+		hello: helloWithCapabilities(),
+		submitResult: client.JobSubmitResult{
+			JobID:   "job_contract_review",
+			State:   engine.StateQueued,
+			Timeout: timeout,
+		},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	fixture := newContractReviewFixture(t)
+	callerCWD := t.TempDir() // Deliberately not a repository.
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"review", "--backend", "codex", "--cwd", callerCWD,
+		"--request-file", fixture.requestPath,
+		"--artifact-file", fixture.artifactPath,
+		"--charter-file", fixture.charterPath,
+		"--model", "review-model", "--effort", "review-effort",
+	}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("contract review code=%d stderr=%q", code, stderr.String())
+	}
+	assertTaskReceiptShape(t, stdout.Bytes(), "job_contract_review")
+	if len(fake.submits) != 1 {
+		t.Fatalf("submits=%d, want 1", len(fake.submits))
+	}
+	spec := fake.submits[0].TaskSpec
+	if spec.Policy == nil || spec.Policy.Contract == nil || spec.Policy.Retry == nil {
+		t.Fatalf("contract review policy=%#v, want schema and retry policy", spec.Policy)
+	}
+	if spec.Policy.Retry.Template != reviewRetryTemplate {
+		t.Fatalf("contract retry template=%q, want %q", spec.Policy.Retry.Template, reviewRetryTemplate)
+	}
+	for _, want := range []string{fixture.frozen.CharterHash, fixture.reviewInputDigest, "EXACTLY ONE review-report-v1 JSON object"} {
+		if !strings.Contains(string(spec.Policy.Contract.JSONSchema), want) && !strings.Contains(spec.Prompt, want) {
+			t.Fatalf("schema/prompt missing %q\nschema=%s\nprompt=%s", want, spec.Policy.Contract.JSONSchema, spec.Prompt)
+		}
+	}
+	if strings.Contains(spec.Prompt, "Present findings first, ordered by severity") {
+		t.Fatalf("contract prompt includes plain-mode prose: %q", spec.Prompt)
+	}
+
+	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate")
+	metadata, metadataErrs := loadReviewWorkspaceMetadata(stateDir)
+	if len(metadataErrs) != 0 || len(metadata) != 1 {
+		t.Fatalf("contract workspace metadata=%#v errors=%v", metadata, metadataErrs)
+	}
+	workspace := metadata[0].Workspace
+	if spec.CWD != workspace {
+		t.Fatalf("submitted cwd=%q, want private workspace %q", spec.CWD, workspace)
+	}
+	artifact, err := os.ReadFile(filepath.Join(workspace, "review.patch"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(artifact, fixture.artifact) {
+		t.Fatalf("private artifact changed:\n got %q\nwant %q", artifact, fixture.artifact)
+	}
+	charterData, err := os.ReadFile(filepath.Join(workspace, "charter.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var frozen charter.FrozenCharter
+	if err := json.Unmarshal(charterData, &frozen); err != nil {
+		t.Fatalf("private charter is not frozen charter JSON: %v", err)
+	}
+	if frozen.CharterHash != fixture.frozen.CharterHash {
+		t.Fatalf("private charter hash=%q, want %q", frozen.CharterHash, fixture.frozen.CharterHash)
+	}
+}
+
+func TestContractReviewRejectsTamperedArtifactBeforeSubmission(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	fixture := newContractReviewFixture(t)
+	if err := os.WriteFile(fixture.artifactPath, append(fixture.artifact, 'x'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run(contractReviewArgs(fixture, t.TempDir()), nil, &stdout, &stderr); code == 0 {
+		t.Fatal("tampered contract review unexpectedly succeeded")
+	}
+	if !strings.Contains(stderr.String(), "digest mismatch") {
+		t.Fatalf("stderr=%q, want artifact digest mismatch", stderr.String())
+	}
+	if len(fake.submits) != 0 {
+		t.Fatalf("submits=%d, want 0 before preflight rejection", len(fake.submits))
+	}
+}
+
+func TestContractReviewRejectsLiveDiscoveryFlags(t *testing.T) {
+	for _, flagArgs := range [][]string{
+		{"--base", "origin/main"},
+		{"--scope", "working-tree"},
+		{"--allow-live-repo-read"},
+	} {
+		t.Run(strings.Join(flagArgs, " "), func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+
+			fixture := newContractReviewFixture(t)
+			args := append(contractReviewArgs(fixture, t.TempDir()), flagArgs...)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, nil, &stdout, &stderr); code == 0 {
+				t.Fatalf("contract review with %q unexpectedly succeeded", flagArgs)
+			}
+			if !strings.Contains(stderr.String(), "contract mode") || !strings.Contains(stderr.String(), flagArgs[0]) {
+				t.Fatalf("stderr=%q, want contract-mode rejection for %q", stderr.String(), flagArgs[0])
+			}
+			if len(fake.submits) != 0 {
+				t.Fatalf("submits=%d, want 0", len(fake.submits))
+			}
+		})
+	}
+}
+
+func TestContractReviewRequiresAllInputFiles(t *testing.T) {
+	fixture := newContractReviewFixture(t)
+	for _, args := range [][]string{
+		{"--request-file", fixture.requestPath},
+		{"--request-file", fixture.requestPath, "--artifact-file", fixture.artifactPath},
+		{"--request-file", fixture.requestPath, "--charter-file", fixture.charterPath},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			args = append([]string{"--backend", "codex"}, args...)
+			if _, err := parseReviewOptions(reviewKind, args, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "--request-file, --artifact-file, and --charter-file together") {
+				t.Fatalf("parseReviewOptions(%q) error=%v, want all-files error", args, err)
+			}
+		})
+	}
+}
 
 func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) {
 	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
@@ -322,5 +464,77 @@ func runReviewGit(t *testing.T, repo string, args ...string) {
 	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
+}
+
+type contractReviewFixture struct {
+	requestPath       string
+	artifactPath      string
+	charterPath       string
+	artifact          []byte
+	frozen            charter.FrozenCharter
+	reviewInputDigest string
+}
+
+func newContractReviewFixture(t *testing.T) contractReviewFixture {
+	t.Helper()
+	inputCharter, ok := charter.InitTemplate(charter.TemplateDeltaReview, "delegate-test", "event-test", "Delegate contract test fixture.")
+	if !ok {
+		t.Fatal("delta-review charter template is unavailable")
+	}
+	frozen, err := charter.Freeze(inputCharter, nil)
+	if err != nil {
+		t.Fatalf("freeze fixture charter: %v", err)
+	}
+	charterData, err := json.Marshal(inputCharter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := []byte("diff --git a/subject.go b/subject.go\n+CALLER_FROZEN_SECRET=delegate-must-not-scan\n")
+	sum := sha256.Sum256(artifact)
+	reviewInputDigest := "sha256:" + hex.EncodeToString(sum[:])
+	requestData, err := json.Marshal(reviewcontract.ReviewRequestDocument{
+		SchemaVersion: reviewcontract.ReviewRequestV1,
+		ConsumerIdentity: map[string]any{
+			"kind": "delegate",
+			"id":   "delegate-contract-test",
+		},
+		Subject:           reviewcontract.RequestSubject{Head: "frozen-subject-head"},
+		CharterHash:       frozen.CharterHash,
+		ReviewInputDigest: reviewInputDigest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	fixture := contractReviewFixture{
+		requestPath:       filepath.Join(dir, "request.json"),
+		artifactPath:      filepath.Join(dir, "artifact.patch"),
+		charterPath:       filepath.Join(dir, "charter.json"),
+		artifact:          artifact,
+		frozen:            frozen,
+		reviewInputDigest: reviewInputDigest,
+	}
+	for _, file := range []struct {
+		path string
+		data []byte
+	}{
+		{path: fixture.requestPath, data: requestData},
+		{path: fixture.artifactPath, data: artifact},
+		{path: fixture.charterPath, data: charterData},
+	} {
+		if err := os.WriteFile(file.path, file.data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return fixture
+}
+
+func contractReviewArgs(fixture contractReviewFixture, cwd string) []string {
+	return []string{
+		"review", "--backend", "codex", "--cwd", cwd,
+		"--request-file", fixture.requestPath,
+		"--artifact-file", fixture.artifactPath,
+		"--charter-file", fixture.charterPath,
 	}
 }

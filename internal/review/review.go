@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/charlesnpx/delegate/internal/handoff"
+	reviewcontract "github.com/charlesnpx/witness/contract/review"
 )
 
 const (
@@ -29,6 +30,7 @@ const (
 	KindReview             = "review"
 	KindAdversarialReview  = "adversarial_review"
 	artifactFilename       = "review.patch"
+	charterFilename        = "charter.json"
 	reviewWorkspacePrefix  = "review-"
 	sanitizedContextHeader = "DELEGATE_SANITIZED_REVIEW_CONTEXT_V1"
 )
@@ -40,6 +42,15 @@ type Options struct {
 	Scope             string
 	StateDir          string
 	AllowLiveRepoRead bool
+}
+
+// ContractWorkspaceOptions supplies caller-frozen review inputs for an
+// exact-input review. Charter is the frozen charter document and Artifact is
+// copied verbatim into the private workspace.
+type ContractWorkspaceOptions struct {
+	StateDir string
+	Charter  []byte
+	Artifact []byte
 }
 
 // Base identifies the resolved base tip and how it was selected.
@@ -64,6 +75,7 @@ type Context struct {
 	BackendCWD        string
 	StateDir          string
 	Workspace         string
+	CharterPath       string
 	ArtifactPath      string
 	Inline            string
 	Scope             string
@@ -235,6 +247,46 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	return result, nil
 }
 
+// PrepareContractWorkspace creates a private backend workspace for a
+// caller-frozen exact-input review. Unlike Assemble, it does not resolve a
+// repository, collect a diff, or inspect artifact content.
+func PrepareContractWorkspace(opts ContractWorkspaceOptions) (result Context, err error) {
+	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{StateDir: opts.StateDir})
+	if err != nil {
+		return Context{}, err
+	}
+	if err := handoff.EnsureStateDir(stateDir); err != nil {
+		return Context{}, err
+	}
+
+	result = Context{StateDir: stateDir}
+	result.Workspace, err = os.MkdirTemp(stateDir, reviewWorkspacePrefix)
+	if err != nil {
+		return Context{}, err
+	}
+	if err := os.Chmod(result.Workspace, 0o700); err != nil {
+		_ = os.RemoveAll(result.Workspace)
+		return Context{}, err
+	}
+	workspaceForCleanup := result
+	defer func() {
+		if err != nil {
+			_ = Cleanup(workspaceForCleanup)
+		}
+	}()
+
+	result.BackendCWD = result.Workspace
+	result.CharterPath = filepath.Join(result.Workspace, charterFilename)
+	result.ArtifactPath = filepath.Join(result.Workspace, artifactFilename)
+	if err = writePrivateFile(result.CharterPath, opts.Charter); err != nil {
+		return Context{}, err
+	}
+	if err = writePrivateFile(result.ArtifactPath, opts.Artifact); err != nil {
+		return Context{}, err
+	}
+	return result, nil
+}
+
 // verifyHeadUnchanged rejects a context assembled across two committed tips.
 // A captured "HEAD" denotes an initial best-effort fallback, for which this
 // check intentionally preserves the existing behavior.
@@ -385,6 +437,25 @@ func ComposePrompt(kind string, assembled Context) (string, error) {
 		prompt.WriteString("The complete sanitized change context follows:\n\n")
 		prompt.WriteString(assembled.Inline)
 	}
+	return prompt.String(), nil
+}
+
+// ComposeContractPrompt builds the exact-input review instruction. It refers
+// only to the two caller-frozen workspace files and uses the shared report
+// boundary rather than Delegate's plain-mode prose report contract.
+func ComposeContractPrompt(kind, charterHash, reviewInputDigest string) (string, error) {
+	if kind != KindReview && kind != KindAdversarialReview {
+		return "", fmt.Errorf("unsupported review kind %q", kind)
+	}
+	var prompt strings.Builder
+	prompt.WriteString("Perform a read-only code review. Do not modify files, apply fixes, commit, or change repository state.\n")
+	if kind == KindAdversarialReview {
+		prompt.WriteString("Use refute-first framing: begin by trying to disprove the change's correctness, safety, and completeness claims. Seek concrete counterexamples, boundary failures, and hidden assumptions before acknowledging strengths.\n")
+	}
+	prompt.WriteString("The frozen charter at \"" + charterFilename + "\" is the review frame; its goals are authoritative.\n")
+	prompt.WriteString("The exact review input is \"" + artifactFilename + "\". Review only these supplied files; do not rediscover or inspect live repository context.\n")
+	prompt.WriteString("Emit EXACTLY ONE review-report-v1 JSON object and nothing else, echoing charter_hash " + strconv.Quote(charterHash) + " and review_input_digest " + strconv.Quote(reviewInputDigest) + ".\n")
+	prompt.WriteString(reviewcontract.DefaultReviewerBriefText)
 	return prompt.String(), nil
 }
 
