@@ -97,7 +97,7 @@ With `--write`, workspace-write access only inside its `--cwd` and no network ar
 
 Today `review` delegates a sanitized code review and `adversarial-review` delegates a refute-first review; both also support contract mode with caller-frozen `--request-file`, `--artifact-file`, and `--charter-file` inputs against the shared review contract and return the submit-receipt shape.
 
-Contract mode submits the caller's frozen bytes verbatim: Delegate does not run its secret-path, history, or content redaction on them, so screening is the caller's responsibility. Resubmitting the same request file replays the same job (`deduplicated: true`) instead of paying for a second review.
+Contract mode submits the caller's frozen bytes verbatim: Delegate does not run its secret-path, history, or content redaction on them, so screening is the caller's responsibility. Resubmitting the same request file from the same canonical `--cwd` replays the same job (`deduplicated: true`) instead of paying for a second review.
 
 ## Managed skill
 

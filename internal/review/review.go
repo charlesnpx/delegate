@@ -34,7 +34,6 @@ const (
 	charterFilename        = "charter.json"
 	reviewWorkspacePrefix  = "review-"
 	contractWorkspaceDir   = "review-contract"
-	contractWorkspaceChars = 16
 	sanitizedContextHeader = "DELEGATE_SANITIZED_REVIEW_CONTEXT_V1"
 )
 
@@ -81,7 +80,6 @@ type Context struct {
 	Workspace         string
 	ArtifactPath      string
 	contractWorkspace bool
-	workspaceCreated  bool
 	Inline            string
 	Scope             string
 	Base              Base
@@ -274,7 +272,6 @@ func PrepareContractWorkspace(opts ContractWorkspaceOptions) (result Context, er
 		BackendCWD:        workspace,
 		ArtifactPath:      filepath.Join(workspace, artifactFilename),
 		contractWorkspace: true,
-		workspaceCreated:  created,
 	}
 	charterPath := filepath.Join(workspace, charterFilename)
 	if !created {
@@ -284,10 +281,9 @@ func PrepareContractWorkspace(opts ContractWorkspaceOptions) (result Context, er
 		return result, nil
 	}
 
-	workspaceForCleanup := result
 	defer func() {
 		if err != nil {
-			_ = Cleanup(workspaceForCleanup)
+			_ = cleanupContractWorkspace(stateDir, workspace)
 		}
 	}()
 
@@ -332,7 +328,7 @@ func contractWorkspaceKey(requestDigest string) (string, error) {
 	if _, err := hex.DecodeString(digestHex); err != nil {
 		return "", fmt.Errorf("invalid contract request digest %q: %w", requestDigest, err)
 	}
-	return digestHex[:contractWorkspaceChars], nil
+	return digestHex, nil
 }
 
 func createOrVerifyPrivateDirectory(path string) error {
@@ -560,16 +556,14 @@ func ComposeContractPrompt(kind, charterHash, reviewInputDigest string) (string,
 	return prompt.String(), nil
 }
 
-// Cleanup removes a review workspace and any artifact it contains.
+// Cleanup removes an ordinary review workspace and any artifact it contains.
+// Published contract workspaces are persistent content-addressed state.
 func Cleanup(assembled Context) error {
 	if assembled.Workspace == "" {
 		return nil
 	}
 	if assembled.contractWorkspace {
-		if !assembled.workspaceCreated {
-			return nil
-		}
-		return cleanupContractWorkspace(assembled.StateDir, assembled.Workspace)
+		return nil
 	}
 	return CleanupWorkspace(assembled.StateDir, assembled.Workspace)
 }
@@ -598,7 +592,7 @@ func cleanupContractWorkspace(stateDir, workspace string) error {
 }
 
 func isContractWorkspaceKey(key string) bool {
-	if len(key) != contractWorkspaceChars {
+	if len(key) != 64 {
 		return false
 	}
 	_, err := hex.DecodeString(key)

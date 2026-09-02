@@ -83,7 +83,7 @@ func TestContractReviewReusesDeterministicRequestAndWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantWorkspace := filepath.Join(resolvedStateDir, "review-contract", strings.TrimPrefix(fixture.requestDigest, "sha256:")[:16])
+	wantWorkspace := filepath.Join(resolvedStateDir, "review-contract", strings.TrimPrefix(fixture.requestDigest, "sha256:"))
 	if spec.CWD != wantWorkspace {
 		t.Fatalf("submitted cwd=%q, want deterministic private workspace %q", spec.CWD, wantWorkspace)
 	}
@@ -130,6 +130,54 @@ func TestContractReviewRejectsTamperedArtifactBeforeSubmission(t *testing.T) {
 	}
 	if len(fake.submits) != 0 {
 		t.Fatalf("submits=%d, want 0 before preflight rejection", len(fake.submits))
+	}
+}
+
+func TestContractReviewPreAdmissionFailureKeepsPublishedWorkspace(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+	fake.hello.Backends = []string{"claude"}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	fixture := newContractReviewFixture(t)
+	var stdout, stderr bytes.Buffer
+	if code := run(contractReviewArgs(fixture, t.TempDir()), nil, &stdout, &stderr); code == 0 {
+		t.Fatal("contract review unexpectedly succeeded with an unavailable backend")
+	}
+	if got := len(fake.submits); got != 0 {
+		t.Fatalf("submits=%d, want 0 before backend validation failure", got)
+	}
+
+	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate")
+	resolvedStateDir, err := filepath.EvalSymlinks(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(resolvedStateDir, "review-contract", strings.TrimPrefix(fixture.requestDigest, "sha256:"))
+	if info, err := os.Stat(workspace); err != nil {
+		t.Fatalf("published workspace: %v", err)
+	} else if !info.IsDir() {
+		t.Fatalf("published workspace mode=%v, want directory", info.Mode())
+	}
+	wantCharter, err := json.Marshal(fixture.frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []struct {
+		name string
+		path string
+		want []byte
+	}{
+		{name: "charter", path: filepath.Join(workspace, "charter.json"), want: wantCharter},
+		{name: "artifact", path: filepath.Join(workspace, "review.patch"), want: fixture.artifact},
+	} {
+		got, err := os.ReadFile(file.path)
+		if err != nil {
+			t.Fatalf("published %s: %v", file.name, err)
+		}
+		if !bytes.Equal(got, file.want) {
+			t.Fatalf("published %s changed:\n got %q\nwant %q", file.name, got, file.want)
+		}
 	}
 }
 

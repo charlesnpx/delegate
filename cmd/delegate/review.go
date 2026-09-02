@@ -299,11 +299,7 @@ func contractReviewRequestID(requestDigest string) (string, error) {
 	if _, err := hex.DecodeString(digestHex); err != nil {
 		return "", fmt.Errorf("invalid contract review request digest %q: %w", requestDigest, err)
 	}
-	requestID := requestIDPrefix + digestHex[:32]
-	if err := validateRequestID(requestID); err != nil {
-		return "", fmt.Errorf("validate contract review request id: %w", err)
-	}
-	return requestID, nil
+	return requestIDPrefix + digestHex[:32], nil
 }
 
 func readContractReviewArtifact(path string) ([]byte, error) {

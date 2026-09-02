@@ -847,9 +847,6 @@ func TestPrepareContractWorkspaceReusesFrozenInputsVerbatim(t *testing.T) {
 	if replayed.Workspace != assembled.Workspace || replayed.BackendCWD != assembled.BackendCWD {
 		t.Fatalf("replayed workspace/cwd=%q/%q, want %q/%q", replayed.Workspace, replayed.BackendCWD, assembled.Workspace, assembled.BackendCWD)
 	}
-	if !assembled.workspaceCreated || replayed.workspaceCreated {
-		t.Fatalf("workspace creation flags=%t/%t, want true/false", assembled.workspaceCreated, replayed.workspaceCreated)
-	}
 	if err := Cleanup(replayed); err != nil {
 		t.Fatal(err)
 	}
