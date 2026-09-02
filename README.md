@@ -97,6 +97,8 @@ With `--write`, workspace-write access only inside its `--cwd` and no network ar
 
 Today `review` delegates a sanitized code review and `adversarial-review` delegates a refute-first review; both also support contract mode with caller-frozen `--request-file`, `--artifact-file`, and `--charter-file` inputs against the shared review contract and return the submit-receipt shape.
 
+Contract mode submits the caller's frozen bytes verbatim: Delegate does not run its secret-path, history, or content redaction on them, so screening is the caller's responsibility. Resubmitting the same request file replays the same job (`deduplicated: true`) instead of paying for a second review.
+
 ## Managed skill
 
 The repository has one managed skill: [`skills/delegate/SKILL.md`](skills/delegate/SKILL.md). It sends a task prompt through standard input and tells the worker how to use the receipt and Agentbus observation commands. Install it with `./install-skill.sh --install --target all --json`, or use `--target claude` or `--target codex` when only one host needs the skill.

@@ -19,7 +19,7 @@ import (
 	reviewcontract "github.com/charlesnpx/witness/contract/review"
 )
 
-func TestContractReviewSubmitsFrozenInputsFromPrivateWorkspace(t *testing.T) {
+func TestContractReviewReusesDeterministicRequestAndWorkspace(t *testing.T) {
 	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
 	fake := &fakeAgentbusClient{
 		hello: helloWithCapabilities(),
@@ -34,21 +34,35 @@ func TestContractReviewSubmitsFrozenInputsFromPrivateWorkspace(t *testing.T) {
 
 	fixture := newContractReviewFixture(t)
 	callerCWD := t.TempDir() // Deliberately not a repository.
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{
+	args := []string{
 		"review", "--backend", "codex", "--cwd", callerCWD,
 		"--request-file", fixture.requestPath,
 		"--artifact-file", fixture.artifactPath,
 		"--charter-file", fixture.charterPath,
 		"--model", "review-model", "--effort", "review-effort",
-	}, nil, &stdout, &stderr); code != 0 {
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run(args, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("contract review code=%d stderr=%q", code, stderr.String())
 	}
 	assertTaskReceiptShape(t, stdout.Bytes(), "job_contract_review")
-	if len(fake.submits) != 1 {
-		t.Fatalf("submits=%d, want 1", len(fake.submits))
+	var replayOut, replayErr bytes.Buffer
+	if code := run(args, nil, &replayOut, &replayErr); code != 0 {
+		t.Fatalf("replayed contract review code=%d stderr=%q", code, replayErr.String())
 	}
-	spec := fake.submits[0].TaskSpec
+	assertTaskReceiptShape(t, replayOut.Bytes(), "job_contract_review")
+	if len(fake.submits) != 2 {
+		t.Fatalf("submits=%d, want 2", len(fake.submits))
+	}
+	first, replayed := fake.submits[0], fake.submits[1]
+	wantRequestID := "delegate-review-" + strings.TrimPrefix(fixture.requestDigest, "sha256:")[:32]
+	if first.RequestID != wantRequestID || replayed.RequestID != wantRequestID {
+		t.Fatalf("request IDs=%q/%q, want %q", first.RequestID, replayed.RequestID, wantRequestID)
+	}
+	if first.TaskSpec.CWD != replayed.TaskSpec.CWD {
+		t.Fatalf("backend cwds=%q/%q, want the same deterministic workspace", first.TaskSpec.CWD, replayed.TaskSpec.CWD)
+	}
+	spec := first.TaskSpec
 	if spec.Policy == nil || spec.Policy.Contract == nil || spec.Policy.Retry == nil {
 		t.Fatalf("contract review policy=%#v, want schema and retry policy", spec.Policy)
 	}
@@ -65,14 +79,19 @@ func TestContractReviewSubmitsFrozenInputsFromPrivateWorkspace(t *testing.T) {
 	}
 
 	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate")
+	resolvedStateDir, err := filepath.EvalSymlinks(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWorkspace := filepath.Join(resolvedStateDir, "review-contract", strings.TrimPrefix(fixture.requestDigest, "sha256:")[:16])
+	if spec.CWD != wantWorkspace {
+		t.Fatalf("submitted cwd=%q, want deterministic private workspace %q", spec.CWD, wantWorkspace)
+	}
 	metadata, metadataErrs := loadReviewWorkspaceMetadata(stateDir)
-	if len(metadataErrs) != 0 || len(metadata) != 1 {
-		t.Fatalf("contract workspace metadata=%#v errors=%v", metadata, metadataErrs)
+	if len(metadataErrs) != 0 || len(metadata) != 0 {
+		t.Fatalf("contract workspace metadata=%#v errors=%v, want no cleanup record", metadata, metadataErrs)
 	}
-	workspace := metadata[0].Workspace
-	if spec.CWD != workspace {
-		t.Fatalf("submitted cwd=%q, want private workspace %q", spec.CWD, workspace)
-	}
+	workspace := spec.CWD
 	artifact, err := os.ReadFile(filepath.Join(workspace, "review.patch"))
 	if err != nil {
 		t.Fatal(err)
@@ -473,6 +492,7 @@ type contractReviewFixture struct {
 	charterPath       string
 	artifact          []byte
 	frozen            charter.FrozenCharter
+	requestDigest     string
 	reviewInputDigest string
 }
 
@@ -493,7 +513,7 @@ func newContractReviewFixture(t *testing.T) contractReviewFixture {
 	artifact := []byte("diff --git a/subject.go b/subject.go\n+CALLER_FROZEN_SECRET=delegate-must-not-scan\n")
 	sum := sha256.Sum256(artifact)
 	reviewInputDigest := "sha256:" + hex.EncodeToString(sum[:])
-	requestData, err := json.Marshal(reviewcontract.ReviewRequestDocument{
+	request := reviewcontract.ReviewRequestDocument{
 		SchemaVersion: reviewcontract.ReviewRequestV1,
 		ConsumerIdentity: map[string]any{
 			"kind": "delegate",
@@ -502,7 +522,12 @@ func newContractReviewFixture(t *testing.T) contractReviewFixture {
 		Subject:           reviewcontract.RequestSubject{Head: "frozen-subject-head"},
 		CharterHash:       frozen.CharterHash,
 		ReviewInputDigest: reviewInputDigest,
-	})
+	}
+	requestData, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestDigest, err := reviewcontract.ReviewRequestDigest(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,6 +538,7 @@ func newContractReviewFixture(t *testing.T) contractReviewFixture {
 		charterPath:       filepath.Join(dir, "charter.json"),
 		artifact:          artifact,
 		frozen:            frozen,
+		requestDigest:     requestDigest,
 		reviewInputDigest: reviewInputDigest,
 	}
 	for _, file := range []struct {

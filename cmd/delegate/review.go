@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
@@ -42,6 +43,7 @@ type contractReviewInput struct {
 	FrozenCharter     charter.FrozenCharter
 	FrozenCharterJSON []byte
 	Artifact          []byte
+	RequestDigest     string
 	ReviewInputDigest string
 	ConsumerIdentity  map[string]any
 }
@@ -52,14 +54,19 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		return 0, err
 	}
 	taskOpts := taskOptions{Backend: opts.Backend, Model: opts.Model, Effort: opts.Effort}
+	contractMode := opts.RequestFile != ""
 	policy := turnPolicyForSchema(nil, "")
 	logicalWorkspace := ""
 	var assembled reviewpkg.Context
 	var prompt string
 	contractCharterHash := ""
 	contractReviewInputDigest := ""
-	if opts.RequestFile != "" {
+	if contractMode {
 		input, err := loadContractReviewInput(opts)
+		if err != nil {
+			return 0, err
+		}
+		taskOpts.RequestID, err = contractReviewRequestID(input.RequestDigest)
 		if err != nil {
 			return 0, err
 		}
@@ -72,8 +79,9 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 			return 0, fmt.Errorf("build review-report-v1 schema: %w", err)
 		}
 		assembled, err = reviewpkg.PrepareContractWorkspace(reviewpkg.ContractWorkspaceOptions{
-			Charter:  input.FrozenCharterJSON,
-			Artifact: input.Artifact,
+			RequestDigest: input.RequestDigest,
+			Charter:       input.FrozenCharterJSON,
+			Artifact:      input.Artifact,
 		})
 		if err != nil {
 			return 0, err
@@ -100,7 +108,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 			return 0, err
 		}
 	}
-	if opts.RequestFile != "" {
+	if contractMode {
 		prompt, err = reviewpkg.ComposeContractPrompt(kind, contractCharterHash, contractReviewInputDigest)
 	} else {
 		prompt, err = reviewpkg.ComposePrompt(kind, assembled)
@@ -119,7 +127,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		_ = reviewpkg.Cleanup(assembled)
 	}
 	if err != nil {
-		if !cleanupWorkspace && assembled.Workspace != "" {
+		if !cleanupWorkspace && !contractMode && assembled.Workspace != "" {
 			if jobID := submissionJobID(err); jobID != "" {
 				if recordErr := saveReviewWorkspaceMetadata(assembled.StateDir, reviewWorkspaceMetadata{
 					JobID:             jobID,
@@ -134,7 +142,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	}
 	defer func() { _ = c.Close() }()
 
-	if assembled.Workspace != "" {
+	if !contractMode && assembled.Workspace != "" {
 		if err := saveReviewWorkspaceMetadata(assembled.StateDir, reviewWorkspaceMetadata{
 			JobID:             submitted.JobID,
 			Workspace:         assembled.Workspace,
@@ -247,6 +255,10 @@ func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
 	if err != nil {
 		return contractReviewInput{}, fmt.Errorf("validate --request-file %q: %w", opts.RequestFile, err)
 	}
+	requestDigest, err := reviewcontract.ReviewRequestDigest(request)
+	if err != nil {
+		return contractReviewInput{}, fmt.Errorf("digest --request-file %q: %w", opts.RequestFile, err)
+	}
 	if request.CharterHash != frozen.CharterHash {
 		return contractReviewInput{}, fmt.Errorf("review request charter hash mismatch: request %s does not match frozen charter %s", request.CharterHash, frozen.CharterHash)
 	}
@@ -269,9 +281,29 @@ func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
 		FrozenCharter:     frozen,
 		FrozenCharterJSON: frozenJSON,
 		Artifact:          artifact,
+		RequestDigest:     requestDigest,
 		ReviewInputDigest: request.ReviewInputDigest,
 		ConsumerIdentity:  request.ConsumerIdentity,
 	}, nil
+}
+
+func contractReviewRequestID(requestDigest string) (string, error) {
+	const digestPrefix = "sha256:"
+	const digestHexLength = 64
+	const requestIDPrefix = "delegate-review-"
+
+	digestHex, found := strings.CutPrefix(requestDigest, digestPrefix)
+	if !found || len(digestHex) != digestHexLength {
+		return "", fmt.Errorf("invalid contract review request digest %q", requestDigest)
+	}
+	if _, err := hex.DecodeString(digestHex); err != nil {
+		return "", fmt.Errorf("invalid contract review request digest %q: %w", requestDigest, err)
+	}
+	requestID := requestIDPrefix + digestHex[:32]
+	if err := validateRequestID(requestID); err != nil {
+		return "", fmt.Errorf("validate contract review request id: %w", err)
+	}
+	return requestID, nil
 }
 
 func readContractReviewArtifact(path string) ([]byte, error) {

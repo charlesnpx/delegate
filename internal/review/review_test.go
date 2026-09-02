@@ -823,20 +823,43 @@ func TestReviewWorkspaceAndArtifactCleanup(t *testing.T) {
 	})
 }
 
-func TestPrepareContractWorkspaceCopiesFrozenInputsVerbatim(t *testing.T) {
+func TestPrepareContractWorkspaceReusesFrozenInputsVerbatim(t *testing.T) {
 	charter := []byte(`{"schema_version":"review-charter-freeze-v1","charter_hash":"sha256:charter"}`)
 	artifact := []byte("CALLER_FROZEN_SECRET=not-scanned\n--- exact bytes ---\n")
-	assembled, err := PrepareContractWorkspace(ContractWorkspaceOptions{
-		StateDir: filepath.Join(t.TempDir(), "state"),
-		Charter:  charter,
-		Artifact: artifact,
-	})
+	opts := ContractWorkspaceOptions{
+		StateDir:      filepath.Join(t.TempDir(), "state"),
+		RequestDigest: "sha256:" + strings.Repeat("a", 64),
+		Charter:       charter,
+		Artifact:      artifact,
+	}
+	assembled, err := PrepareContractWorkspace(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = Cleanup(assembled) })
+	replayed, err := PrepareContractWorkspace(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if assembled.BackendCWD != assembled.Workspace {
 		t.Fatalf("backend cwd=%q, want private workspace %q", assembled.BackendCWD, assembled.Workspace)
+	}
+	if replayed.Workspace != assembled.Workspace || replayed.BackendCWD != assembled.BackendCWD {
+		t.Fatalf("replayed workspace/cwd=%q/%q, want %q/%q", replayed.Workspace, replayed.BackendCWD, assembled.Workspace, assembled.BackendCWD)
+	}
+	if !assembled.workspaceCreated || replayed.workspaceCreated {
+		t.Fatalf("workspace creation flags=%t/%t, want true/false", assembled.workspaceCreated, replayed.workspaceCreated)
+	}
+	if err := Cleanup(replayed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(assembled.Workspace); err != nil {
+		t.Fatalf("reused workspace was removed: %v", err)
+	}
+	if info, err := os.Stat(assembled.Workspace); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o700 {
+		t.Fatalf("workspace mode=%o, want 700", info.Mode().Perm())
 	}
 	charterPath := filepath.Join(assembled.Workspace, charterFilename)
 	if filepath.Base(charterPath) != charterFilename || filepath.Base(assembled.ArtifactPath) != artifactFilename {
@@ -866,6 +889,60 @@ func TestPrepareContractWorkspaceCopiesFrozenInputsVerbatim(t *testing.T) {
 				t.Fatalf("%s mode=%o, want 600", testCase.name, info.Mode().Perm())
 			}
 		})
+	}
+}
+
+func TestPrepareContractWorkspaceRefusesMismatchedExistingArtifact(t *testing.T) {
+	charter := []byte(`{"schema_version":"review-charter-freeze-v1","charter_hash":"sha256:charter"}`)
+	artifact := []byte("CALLER_FROZEN_ARTIFACT\n")
+	opts := ContractWorkspaceOptions{
+		StateDir:      filepath.Join(t.TempDir(), "state"),
+		RequestDigest: "sha256:" + strings.Repeat("b", 64),
+		Charter:       charter,
+		Artifact:      artifact,
+	}
+	assembled, err := PrepareContractWorkspace(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = Cleanup(assembled) })
+
+	opts.Artifact = []byte("DIFFERENT_CALLER_ARTIFACT\n")
+	if _, err := PrepareContractWorkspace(opts); err == nil {
+		t.Fatal("mismatched contract artifact unexpectedly reused its workspace")
+	} else if !strings.Contains(err.Error(), assembled.Workspace) || !strings.Contains(err.Error(), artifactFilename+" mismatch") {
+		t.Fatalf("error=%q, want workspace path and artifact mismatch", err)
+	}
+	got, err := os.ReadFile(assembled.ArtifactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, artifact) {
+		t.Fatalf("existing artifact changed:\n got %q\nwant %q", got, artifact)
+	}
+}
+
+func TestAssembleUsesFreshPrivateWorkspace(t *testing.T) {
+	repo := newGitFixture(t)
+	writeFixtureFile(t, repo, "visible.txt", "change\n")
+	stateDir := filepath.Join(t.TempDir(), "state")
+	first, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeWorkingTree, StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = Cleanup(first) })
+	second, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeWorkingTree, StateDir: stateDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = Cleanup(second) })
+	if first.Workspace == second.Workspace {
+		t.Fatalf("normal review reused workspace %q", first.Workspace)
+	}
+	for _, workspace := range []string{first.Workspace, second.Workspace} {
+		if !strings.HasPrefix(filepath.Base(workspace), reviewWorkspacePrefix) {
+			t.Fatalf("normal review workspace=%q, want %q prefix", workspace, reviewWorkspacePrefix)
+		}
 	}
 }
 
