@@ -45,7 +45,7 @@ type contractReviewInput struct {
 	Artifact          []byte
 	RequestDigest     string
 	ReviewInputDigest string
-	ConsumerIdentity  map[string]any
+	ConsumerIdentity  reviewcontract.Identity
 }
 
 func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error) {

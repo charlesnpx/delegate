@@ -515,9 +515,9 @@ func newContractReviewFixture(t *testing.T) contractReviewFixture {
 	reviewInputDigest := "sha256:" + hex.EncodeToString(sum[:])
 	request := reviewcontract.ReviewRequestDocument{
 		SchemaVersion: reviewcontract.ReviewRequestV1,
-		ConsumerIdentity: map[string]any{
-			"kind": "delegate",
-			"id":   "delegate-contract-test",
+		ConsumerIdentity: reviewcontract.Identity{
+			Kind: "delegate",
+			ID:   "delegate-contract-test",
 		},
 		Subject:           reviewcontract.RequestSubject{Head: "frozen-subject-head"},
 		CharterHash:       frozen.CharterHash,

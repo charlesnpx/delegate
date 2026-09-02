@@ -57,7 +57,7 @@ func embeddedConformanceFrozenCharter(t *testing.T) charter.FrozenCharter {
 	return frozen
 }
 
-func compileDefaultReviewerSchema(t *testing.T, frozen charter.FrozenCharter, reviewInputDigest string, consumerIdentity map[string]any) *jsonschema.Schema {
+func compileDefaultReviewerSchema(t *testing.T, frozen charter.FrozenCharter, reviewInputDigest string, consumerIdentity reviewcontract.Identity) *jsonschema.Schema {
 	t.Helper()
 	data, err := reviewcontract.DefaultReviewerSchema(frozen, reviewInputDigest, consumerIdentity)
 	if err != nil {
