@@ -15,7 +15,9 @@ printf '%s' "$PROMPT" | delegate task --backend <name> --cwd <abs> --prompt-file
 
 Task flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, and `--tag`.
 
-Submission is asynchronous. After an ambiguous submission, reuse the same `--request-id` and run from the same `--cwd` (the replay key is their pair); a replay returns `deduplicated: true` and the original job ID. Observe a job with Agentbus:
+Contract mode for `delegate review` and `delegate adversarial-review` uses `--request-file <request.json> --artifact-file <review.patch> --charter-file <charter.json>`; the command returns the asynchronous submit receipt, its schema-enforced `review-report-v1` result is later available through `agentbus result --job <id> --json`, and Delegate does not run secret-path, history, or content redaction on those caller-frozen inputs, so callers are responsible for screening them.
+
+Submission is asynchronous. After an ambiguous submission, reuse the same `--request-id` and run from the same canonical `--cwd` (the replay key is their pair); a replay returns `deduplicated: true` and the original job ID. Observe a job with Agentbus:
 
 ```sh
 agentbus status --job <id> --json

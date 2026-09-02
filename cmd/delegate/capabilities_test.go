@@ -20,7 +20,7 @@ func TestRequiredCapabilitiesForNilPolicy(t *testing.T) {
 
 func TestRequiredCapabilitiesForJSONSchemaPolicy(t *testing.T) {
 	schema := json.RawMessage(`{"type":"object","required":["schema_version"]}`)
-	turnPolicy := turnPolicyForSchema(schema)
+	turnPolicy := turnPolicyForSchema(schema, jsonSchemaRetryTemplate)
 	if turnPolicy == nil || turnPolicy.Contract == nil || string(turnPolicy.Contract.JSONSchema) != string(schema) {
 		t.Fatalf("turn policy = %#v, want JSON Schema contract", turnPolicy)
 	}
