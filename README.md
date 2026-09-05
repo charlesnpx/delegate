@@ -92,9 +92,9 @@ agentbus result --job "$JOB_ID" --json
 agentbus cancel --job "$JOB_ID" --json
 ```
 
-Tag related `delegate task` submissions with `--tag run=<label>`, then use `agentbus status --tag run=<label>` to watch the group. Use `agentbus transcript --job "$JOB_ID"` to see job activity: without `--kind` it returns a digest with counts by kind, first and last timestamps, and a short tail; `--kind message` returns only the agent's messages.
+Tag related `delegate task` submissions with `--tag run=<label>`, then use `agentbus status --tag run=<label>` to watch the group. Use `agentbus transcript --job "$JOB_ID"` to see job activity: without `--kind` it returns a digest with counts by kind and a short tail, and `--json` adds the first and last item timestamps; `--kind message` returns only the agent's messages.
 
-For `status` and `result`, exit code `2` means the job is still running. The receipt's `jobId` is the value to pass to each command.
+For `status --job` and `result`, exit code `2` means the job is still running. A tag or workspace listing exits `0` once it has printed the list, whatever state its members are in, so do not read a successful listing as a finished fleet. The receipt's `jobId` is the value to pass to each command.
 
 ## Worker sandbox rules
 
