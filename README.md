@@ -29,11 +29,11 @@ delegate version [--json]
 
 delegate task --backend <name> [--cwd <abs>] [--write] [--model <model>] [--effort <effort>]
               [--timeout <duration>] --prompt-file <path|-> [--schema-file <path>]
-              [--request-id <id>] [--tag <key=value>]...
+              [--request-id <id>] [--resume <jobId>] [--tag <key=value>]...
 
 delegate review --backend <name> [--cwd <abs>] [--base <ref>]
                 [--scope auto|working-tree|branch] [--allow-live-repo-read]
-                [--model <model>] [--effort <effort>] [--timeout <duration>]
+                [--model <model>] [--effort <effort>] [--timeout <duration>] [--resume <jobId>]
 
 delegate adversarial-review --backend <name> [--cwd <abs>] [--base <ref>]
                             [--scope auto|working-tree|branch] [--allow-live-repo-read]
@@ -42,7 +42,9 @@ delegate adversarial-review --backend <name> [--cwd <abs>] [--base <ref>]
 
 `version` prints the installed Delegate version; `--version`, `-version`, and `-V` are equivalent aliases. `--json` makes `version` emit an object with its `version` field.
 
-`task` needs `--backend` and `--prompt-file`. Its ten flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, and `--tag`. `--cwd` must be absolute when supplied; otherwise the current directory is used. `--prompt-file -` reads the prompt from standard input, `--schema-file` supplies an optional JSON Schema output contract, and `--tag key=value` can be repeated. `--timeout 0` leaves the deadline to Agentbus's default.
+`task` needs `--backend` and `--prompt-file`. Its eleven flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, and `--tag`. `--cwd` must be absolute when supplied; otherwise the current directory is used. `--prompt-file -` reads the prompt from standard input, `--schema-file` supplies an optional JSON Schema output contract, and `--tag key=value` can be repeated. `--timeout 0` leaves the deadline to Agentbus's default.
+
+`task` and `review` accept `--resume <jobId>` to continue a prior backend thread. A resume creates a new job with a fresh deadline; it does not extend the named job. Agentbus validates the resume target, and changing `--resume` while reusing an explicit `--request-id` returns Agentbus's conflict response.
 
 For example, submit a prompt without placing it in the process arguments:
 
@@ -61,6 +63,7 @@ Each successful `task`, `review`, or `adversarial-review` submission writes one 
 ```json
 {
   "requestId": "automation/retry-1",
+  "workspaceKey": "delegate-v1-<sha256>",
   "jobId": "job_receipt",
   "state": "queued",
   "deduplicated": false,
@@ -73,7 +76,7 @@ Each successful `task`, `review`, or `adversarial-review` submission writes one 
 }
 ```
 
-`model` and `effort` are omitted when their flags were not supplied. The timeout values are Agentbus's returned values, not a local interpretation.
+`model` and `effort` are omitted when their flags were not supplied. The timeout values are Agentbus's returned values, not a local interpretation. `workspaceKey` lets an operator scope Agentbus status queries to the workspace that submitted the job.
 
 For replay safety, Agentbus's replay key is the pair of request ID and working directory: after an ambiguous submission, reuse that exact `--request-id` and run against the same working directory. If it has already been accepted, the replay receipt has `deduplicated: true` and carries the original job ID. Without the flag, Delegate generates an ID and includes it in the receipt. That is convenient for a normal one-off invocation, but it has a deliberate trade-off: if a manually run command is hard-killed before its generated receipt is visible, Delegate has not retained that generated ID for a later replay. Use an explicit request ID whenever replay matters.
 

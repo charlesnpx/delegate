@@ -1,7 +1,7 @@
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
-github.com/charlesnpx/agentbus v0.13.0 h1:HVoqe78M+3XmUF3ZPvwenDzNdrzQiLfXjUUg+G4lMLM=
-github.com/charlesnpx/agentbus v0.13.0/go.mod h1:JgC5+qGo6vbkFx4qomFIzpo9DBHx0WeFrMBs0JE7hyM=
+github.com/charlesnpx/agentbus v0.13.1 h1:pB7r522ys5rhJmlKXkxKLC3muh0Q81mSlXbxjR2vSVk=
+github.com/charlesnpx/agentbus v0.13.1/go.mod h1:JgC5+qGo6vbkFx4qomFIzpo9DBHx0WeFrMBs0JE7hyM=
 github.com/charlesnpx/witness v0.7.0 h1:iuFVmx/WLuITEKyVPd0v7wgvkZAUEoy9Br2kKb1zpA4=
 github.com/charlesnpx/witness v0.7.0/go.mod h1:iXwk4TY9ye6YaCUhuZ/8aUE7pRJSXQVkz/l5i4xRseQ=
 github.com/dlclark/regexp2 v1.11.0 h1:G/nrcoOa7ZXlpoa/91N3X7mM3r8eIlMBBJZvsz/mxKI=
