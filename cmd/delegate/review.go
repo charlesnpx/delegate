@@ -67,7 +67,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		if err != nil {
 			return 0, err
 		}
-		taskOpts.RequestID, err = contractReviewRequestID(input.RequestDigest)
+		taskOpts.RequestID, err = contractReviewRequestIDForResume(input.RequestDigest, opts.ResumeJobID)
 		if err != nil {
 			return 0, err
 		}
@@ -303,6 +303,17 @@ func contractReviewRequestID(requestDigest string) (string, error) {
 		return "", fmt.Errorf("invalid contract review request digest %q: %w", requestDigest, err)
 	}
 	return requestIDPrefix + digestHex[:32], nil
+}
+
+func contractReviewRequestIDForResume(requestDigest, resumeJobID string) (string, error) {
+	const requestIDPrefix = "delegate-review-"
+
+	requestID, err := contractReviewRequestID(requestDigest)
+	if err != nil || resumeJobID == "" {
+		return requestID, err
+	}
+	resumeIdentity := sha256.Sum256([]byte(requestDigest + "\x00" + resumeJobID))
+	return requestIDPrefix + hex.EncodeToString(resumeIdentity[:])[:32], nil
 }
 
 func readContractReviewArtifact(path string) ([]byte, error) {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -19,7 +20,7 @@ import (
 	reviewcontract "github.com/charlesnpx/witness/contract/review"
 )
 
-func TestContractReviewReusesDeterministicRequestAndWorkspace(t *testing.T) {
+func TestContractReviewResumeUsesDistinctReplayStableRequestID(t *testing.T) {
 	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
 	fake := &fakeAgentbusClient{
 		hello: helloWithBackends(),
@@ -46,21 +47,74 @@ func TestContractReviewReusesDeterministicRequestAndWorkspace(t *testing.T) {
 		t.Fatalf("contract review code=%d stderr=%q", code, stderr.String())
 	}
 	assertTaskReceiptShape(t, stdout.Bytes(), "job_contract_review")
+
+	resumeArgs := append(append([]string(nil), args...), "--resume", "job_contract_review")
+	fake.submitResult = client.JobSubmitResult{
+		JobID:   "job_contract_resume",
+		State:   publicStateQueued,
+		Timeout: timeout,
+	}
+	var resumedOut, resumedErr bytes.Buffer
+	if code := run(resumeArgs, nil, &resumedOut, &resumedErr); code != 0 {
+		t.Fatalf("resumed contract review code=%d stderr=%q", code, resumedErr.String())
+	}
+	assertTaskReceiptShape(t, resumedOut.Bytes(), "job_contract_resume")
+	var resumedReceipt taskSubmitReceipt
+	if err := json.Unmarshal(resumedOut.Bytes(), &resumedReceipt); err != nil {
+		t.Fatal(err)
+	}
+	if resumedReceipt.Deduplicated {
+		t.Fatalf("resumed receipt=%#v, want a new job", resumedReceipt)
+	}
+
+	fake.submitResult = client.JobSubmitResult{
+		JobID:        "job_contract_resume",
+		State:        publicStateQueued,
+		Deduplicated: true,
+		Timeout:      timeout,
+	}
 	var replayOut, replayErr bytes.Buffer
-	if code := run(args, nil, &replayOut, &replayErr); code != 0 {
-		t.Fatalf("replayed contract review code=%d stderr=%q", code, replayErr.String())
+	if code := run(resumeArgs, nil, &replayOut, &replayErr); code != 0 {
+		t.Fatalf("replayed resumed contract review code=%d stderr=%q", code, replayErr.String())
 	}
-	assertTaskReceiptShape(t, replayOut.Bytes(), "job_contract_review")
-	if len(fake.submits) != 2 {
-		t.Fatalf("submits=%d, want 2", len(fake.submits))
+	assertTaskReceiptShape(t, replayOut.Bytes(), "job_contract_resume")
+	var replayReceipt taskSubmitReceipt
+	if err := json.Unmarshal(replayOut.Bytes(), &replayReceipt); err != nil {
+		t.Fatal(err)
 	}
-	first, replayed := fake.submits[0], fake.submits[1]
+	if !replayReceipt.Deduplicated {
+		t.Fatalf("replayed receipt=%#v, want deduplicated resume", replayReceipt)
+	}
+
+	if len(fake.submits) != 3 {
+		t.Fatalf("submits=%d, want 3", len(fake.submits))
+	}
+	first, resumed, replayed := fake.submits[0], fake.submits[1], fake.submits[2]
 	wantRequestID := "delegate-review-" + strings.TrimPrefix(fixture.requestDigest, "sha256:")[:32]
-	if first.RequestID != wantRequestID || replayed.RequestID != wantRequestID {
-		t.Fatalf("request IDs=%q/%q, want %q", first.RequestID, replayed.RequestID, wantRequestID)
+	if first.RequestID != wantRequestID {
+		t.Fatalf("initial request ID=%q, want %q", first.RequestID, wantRequestID)
 	}
-	if first.TaskSpec.CWD != replayed.TaskSpec.CWD {
-		t.Fatalf("backend cwds=%q/%q, want the same deterministic workspace", first.TaskSpec.CWD, replayed.TaskSpec.CWD)
+	resumeDigest := sha256.Sum256([]byte(fixture.requestDigest + "\x00" + "job_contract_review"))
+	wantResumeRequestID := "delegate-review-" + hex.EncodeToString(resumeDigest[:])[:32]
+	if resumed.RequestID != wantResumeRequestID || replayed.RequestID != wantResumeRequestID {
+		t.Fatalf("resumed request IDs=%q/%q, want %q", resumed.RequestID, replayed.RequestID, wantResumeRequestID)
+	}
+	if resumed.RequestID == first.RequestID {
+		t.Fatalf("resumed request ID=%q, want an identity distinct from initial %q", resumed.RequestID, first.RequestID)
+	}
+	if first.TaskSpec.ResumeJobID != "" {
+		t.Fatalf("initial resume target=%q, want empty", first.TaskSpec.ResumeJobID)
+	}
+	wantResumedSpec := first.TaskSpec
+	wantResumedSpec.ResumeJobID = "job_contract_review"
+	if !reflect.DeepEqual(resumed.TaskSpec, wantResumedSpec) {
+		t.Fatalf("resumed task spec=%#v, want initial spec except resume target %#v", resumed.TaskSpec, wantResumedSpec)
+	}
+	if !reflect.DeepEqual(replayed.TaskSpec, resumed.TaskSpec) {
+		t.Fatalf("replayed task spec=%#v, want %#v", replayed.TaskSpec, resumed.TaskSpec)
+	}
+	if first.TaskSpec.CWD != resumed.TaskSpec.CWD || resumed.TaskSpec.CWD != replayed.TaskSpec.CWD {
+		t.Fatalf("backend cwds=%q/%q/%q, want the same deterministic workspace", first.TaskSpec.CWD, resumed.TaskSpec.CWD, replayed.TaskSpec.CWD)
 	}
 	spec := first.TaskSpec
 	if len(spec.OutputSchema) == 0 {
@@ -408,6 +462,47 @@ func TestReviewAmbiguousSubmissionFailureKeepsWorkspace(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workspaces[0], "review.patch")); err != nil {
 		t.Fatalf("retained workspace artifact: %v", err)
+	}
+}
+
+func TestReviewRejectedResumeCleansWorkspaceAndReturnsDaemonError(t *testing.T) {
+	var daemonErr client.RPCError
+	if err := json.Unmarshal([]byte(`{"Object":{"code":-32000,"message":"unknown resume target","data":{"code":"invalid_task_spec","jobId":"job_does_not_exist"}}}`), &daemonErr); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAgentbusClient{hello: helloWithBackends(), submitErr: &daemonErr}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	repo := newReviewCommandRepository(t)
+	var stdout, stderr bytes.Buffer
+	_, err := runReview(reviewKind, []string{
+		"--backend", "codex", "--cwd", repo, "--scope", "working-tree",
+		"--resume", "job_does_not_exist",
+	}, &stdout, &stderr)
+	if err != &daemonErr {
+		t.Fatalf("runReview() error=%#v, want unchanged daemon error %#v", err, &daemonErr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout=%q, want no receipt", stdout.String())
+	}
+	if got := len(fake.submits); got != 1 {
+		t.Fatalf("submits=%d, want 1", got)
+	}
+	if got := fake.submits[0].TaskSpec.ResumeJobID; got != "job_does_not_exist" {
+		t.Fatalf("submitted resume target=%q, want %q", got, "job_does_not_exist")
+	}
+	if len(fake.gets) != 0 {
+		t.Fatalf("review locally inspected resume target: gets=%#v", fake.gets)
+	}
+
+	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate")
+	if workspaces := reviewWorkspacePaths(t, stateDir); len(workspaces) != 0 {
+		t.Fatalf("workspaces=%q, want none after rejected resume", workspaces)
+	}
+	metadata, metadataErrs := loadReviewWorkspaceMetadata(stateDir)
+	if len(metadataErrs) != 0 || len(metadata) != 0 {
+		t.Fatalf("review workspace metadata=%#v errors=%v, want none after rejected resume", metadata, metadataErrs)
 	}
 }
 

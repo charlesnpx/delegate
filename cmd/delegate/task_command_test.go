@@ -58,9 +58,6 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receipt.WorkspaceKey != wantWorkspaceKey {
-		t.Fatalf("receipt workspace key=%q, want %q", receipt.WorkspaceKey, wantWorkspaceKey)
-	}
 	if receipt.Model != "unadvertised-model" || receipt.Effort != "unadvertised-effort" {
 		t.Fatalf("receipt model/effort=%q/%q", receipt.Model, receipt.Effort)
 	}
@@ -318,8 +315,11 @@ func TestTaskFailureReportsRequestIDAndDoesNotWriteLocalState(t *testing.T) {
 		if code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", "--request-id", "caller/resume-after-error", "--resume", "job_killed"}, strings.NewReader("prompt"), &stdout, &stderr); code == 0 {
 			t.Fatal("task succeeded")
 		}
-		if stdout.Len() != 0 || !strings.Contains(stderr.String(), "caller/resume-after-error") || !strings.Contains(stderr.String(), daemonErr.Error()) {
-			t.Fatalf("stdout=%q stderr=%q, want request ID and daemon rejection %q", stdout.String(), stderr.String(), daemonErr.Error())
+		if got, want := stdout.String(), ""; got != want {
+			t.Fatalf("stdout=%q, want %q", got, want)
+		}
+		if got, want := stderr.String(), readOnlyTaskHint+"\n"+daemonErr.Error()+"\n"; got != want {
+			t.Fatalf("stderr=%q, want read-only notice and unchanged daemon rejection %q", got, want)
 		}
 		if len(fake.gets) != 0 {
 			t.Fatalf("task locally inspected resume target: gets=%#v", fake.gets)

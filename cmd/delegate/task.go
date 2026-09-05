@@ -316,6 +316,9 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema js
 	submitted, err := c.JobSubmit(ctx, params)
 	if err != nil {
 		_ = c.Close()
+		if opts.ResumeJobID != "" && submissionJobID(err) == opts.ResumeJobID {
+			return client.JobSubmitResult{}, nil, stateRoot, err
+		}
 		return client.JobSubmitResult{}, nil, stateRoot, &submissionUnresolvedError{err: submissionError(opts.RequestID, err)}
 	}
 	return submitted, c, stateRoot, nil
