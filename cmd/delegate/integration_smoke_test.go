@@ -15,10 +15,10 @@ import (
 func TestManagedSkillSmokeFixture(t *testing.T) {
 	prompt := "Investigate the managed skill task and report the result."
 	bus := &fakeAgentbusClient{
-		hello: helloWithCapabilities(),
+		hello: helloWithBackends(),
 		submitResult: client.JobSubmitResult{
 			JobID:   "job_smoke",
-			State:   engine.StateQueued,
+			State:   publicStateQueued,
 			Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
 		},
 	}
@@ -33,10 +33,10 @@ func TestManagedSkillSmokeFixture(t *testing.T) {
 	if err := json.Unmarshal(submitOut.Bytes(), &receipt); err != nil {
 		t.Fatalf("receipt JSON invalid: %v; raw=%q", err, submitOut.String())
 	}
-	if receipt.JobID != "job_smoke" || receipt.State != engine.StateQueued || receipt.Timeout == nil || receipt.Timeout.Source != engine.TimeoutSourceDaemonDefault {
+	if receipt.JobID != "job_smoke" || receipt.State != publicStateQueued || receipt.Timeout == nil || receipt.Timeout.Source != engine.TimeoutSourceDaemonDefault {
 		t.Fatalf("receipt=%#v", receipt)
 	}
-	if len(bus.submits) != 1 || bus.submits[0].TaskSpec.Prompt != prompt || bus.submits[0].TaskSpec.Tags["skill"] != "delegate" {
+	if len(bus.submits) != 1 || bus.submits[0].TaskSpec.Prompt != prompt || bus.submits[0].TaskSpec.Tags == nil || (*bus.submits[0].TaskSpec.Tags)["skill"] != "delegate" {
 		t.Fatalf("submitted=%#v", bus.submits)
 	}
 }

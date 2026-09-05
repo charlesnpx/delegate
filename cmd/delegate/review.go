@@ -55,7 +55,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	}
 	taskOpts := taskOptions{Backend: opts.Backend, Model: opts.Model, Effort: opts.Effort}
 	contractMode := opts.RequestFile != ""
-	policy := turnPolicyForSchema(nil, "")
+	var schema json.RawMessage
 	logicalWorkspace := ""
 	var assembled reviewpkg.Context
 	var prompt string
@@ -74,7 +74,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		if err != nil {
 			return 0, err
 		}
-		schema, err := reviewcontract.DefaultReviewerSchema(input.FrozenCharter, input.ReviewInputDigest, input.ConsumerIdentity)
+		schema, err = reviewcontract.DefaultReviewerSchema(input.FrozenCharter, input.ReviewInputDigest, input.ConsumerIdentity)
 		if err != nil {
 			return 0, fmt.Errorf("build review-report-v1 schema: %w", err)
 		}
@@ -86,7 +86,6 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		if err != nil {
 			return 0, err
 		}
-		policy = turnPolicyForSchema(schema, reviewRetryTemplate)
 		contractCharterHash = input.FrozenCharter.CharterHash
 		contractReviewInputDigest = input.ReviewInputDigest
 	} else {
@@ -120,7 +119,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	taskOpts.CWD = assembled.BackendCWD
 	taskOpts.Timeout = opts.Timeout
 	taskOpts.LogicalWorkspace = logicalWorkspace
-	submitted, c, agentbusStateRoot, err := submitTask(context.Background(), &taskOpts, prompt, policy)
+	submitted, c, agentbusStateRoot, err := submitTask(context.Background(), &taskOpts, prompt, schema)
 	var unresolved *submissionUnresolvedError
 	cleanupWorkspace := err != nil && !errors.As(err, &unresolved)
 	if cleanupWorkspace {

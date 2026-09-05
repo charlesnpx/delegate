@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	"github.com/charlesnpx/agentbus/client"
-	"github.com/charlesnpx/agentbus/engine"
 	"github.com/charlesnpx/delegate/internal/handoff"
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
 )
@@ -128,7 +127,7 @@ func sweepReviewWorkspaces(ctx context.Context, stateDir string) (errs []error) 
 				continue
 			}
 			var err error
-			c, _, err = connectAgentbusCommandAtRoot(ctx, nil, record.AgentbusStateRoot)
+			c, _, err = connectAgentbusCommandAtRoot(ctx, record.AgentbusStateRoot)
 			if err != nil {
 				clientErrs[record.AgentbusStateRoot] = err
 				errs = append(errs, fmt.Errorf("inspect review workspace for job %s: %w", record.JobID, err))
@@ -137,16 +136,12 @@ func sweepReviewWorkspaces(ctx context.Context, stateDir string) (errs []error) 
 			clients[record.AgentbusStateRoot] = c
 		}
 
-		status, err := c.JobStatus(ctx, client.JobStatusParams{JobID: record.JobID})
+		job, err := c.JobGet(ctx, client.JobGetParams{JobID: record.JobID})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("inspect review workspace for job %s: %w", record.JobID, err))
 			continue
 		}
-		if len(status.Jobs) != 1 || status.Jobs[0].JobID != record.JobID {
-			errs = append(errs, fmt.Errorf("inspect review workspace for job %s: Agentbus returned no matching job", record.JobID))
-			continue
-		}
-		if !engine.IsTerminal(status.Jobs[0].State) {
+		if !job.State.IsTerminal() {
 			continue
 		}
 		if err := reviewpkg.CleanupWorkspace(stateDir, record.Workspace); err != nil {

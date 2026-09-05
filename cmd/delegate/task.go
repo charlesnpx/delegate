@@ -35,10 +35,8 @@ type taskOptions struct {
 }
 
 const (
-	agentbusMaxTimeout      = 4 * time.Hour
-	readOnlyTaskHint        = "notice: task will run with a read-only backend profile; pass --write for edits or builds."
-	jsonSchemaRetryTemplate = "The previous response did not conform to the requested JSON Schema: {{missing}}.\n\nReturn only a corrected response."
-	reviewRetryTemplate     = "The response did not conform to review-report-v1: {{missing}} — emit only the corrected single JSON report document."
+	agentbusMaxTimeout = 4 * time.Hour
+	readOnlyTaskHint   = "notice: task will run with a read-only backend profile; pass --write for edits or builds."
 )
 
 // taskSubmitReceipt is intentionally a direct projection of the Agentbus
@@ -47,7 +45,7 @@ const (
 type taskSubmitReceipt struct {
 	RequestID    string             `json:"requestId"`
 	JobID        string             `json:"jobId"`
-	State        engine.JobState    `json:"state"`
+	State        client.PublicState `json:"state"`
 	Deduplicated bool               `json:"deduplicated"`
 	Model        string             `json:"model,omitempty"`
 	Effort       string             `json:"effort,omitempty"`
@@ -111,7 +109,7 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 		}
 	}
 
-	submitted, c, _, err := submitTask(context.Background(), &opts, prompt, turnPolicyForSchema(schema, jsonSchemaRetryTemplate))
+	submitted, c, _, err := submitTask(context.Background(), &opts, prompt, schema)
 	if err != nil {
 		return 0, err
 	}
@@ -232,19 +230,6 @@ func readTaskSchema(path string) (json.RawMessage, error) {
 	return append(json.RawMessage(nil), raw...), nil
 }
 
-func turnPolicyForSchema(schema json.RawMessage, retryTemplate string) *engine.TurnPolicy {
-	if schema == nil {
-		return nil
-	}
-	return &engine.TurnPolicy{
-		Contract: &engine.ContractSpec{JSONSchema: append(json.RawMessage(nil), schema...)},
-		Retry: &engine.RetryPolicy{
-			Max:      1,
-			Template: retryTemplate,
-		},
-	}
-}
-
 func ensureTaskRequestID(opts *taskOptions) error {
 	if opts.RequestID == "" {
 		requestID, err := newRequestID()
@@ -285,7 +270,7 @@ func submissionError(requestID string, err error) error {
 
 // submitTask is the one-shot Agentbus admission primitive shared by task and
 // review. It deliberately does no retry, polling, persistence, or cleanup.
-func submitTask(ctx context.Context, opts *taskOptions, prompt string, turnPolicy *engine.TurnPolicy) (client.JobSubmitResult, agentbusClient, string, error) {
+func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema json.RawMessage) (client.JobSubmitResult, agentbusClient, string, error) {
 	if err := ensureTaskRequestID(opts); err != nil {
 		return client.JobSubmitResult{}, nil, "", err
 	}
@@ -297,8 +282,7 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, turnPolic
 	if err != nil {
 		return client.JobSubmitResult{}, nil, "", submissionError(opts.RequestID, err)
 	}
-	requiredCapabilities := requiredCapabilitiesForPolicy(turnPolicy)
-	c, hello, stateRoot, err := connectAgentbusCommand(ctx, requiredCapabilities)
+	c, hello, stateRoot, err := connectAgentbusCommand(ctx)
 	if err != nil {
 		return client.JobSubmitResult{}, nil, "", submissionError(opts.RequestID, err)
 	}
@@ -311,15 +295,15 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, turnPolic
 		WorkspaceKey: workspaceKey,
 		RequestID:    opts.RequestID,
 		TaskSpec: client.TaskSpec{
-			Backend:   opts.Backend,
-			CWD:       opts.CWD,
-			Write:     opts.Write,
-			Model:     opts.Model,
-			Effort:    opts.Effort,
-			Prompt:    prompt,
-			Policy:    turnPolicy,
-			Tags:      cloneTaskTags(opts.Tags),
-			TimeoutMs: timeoutMillis(opts.Timeout),
+			Backend:      opts.Backend,
+			CWD:          opts.CWD,
+			Write:        opts.Write,
+			Model:        optionalTaskSpecString(opts.Model),
+			Effort:       optionalTaskSpecString(opts.Effort),
+			Prompt:       prompt,
+			OutputSchema: append(json.RawMessage(nil), schema...),
+			Tags:         optionalTaskSpecTags(opts.Tags),
+			TimeoutMS:    timeoutMillis(opts.Timeout),
 		},
 	}
 	submitted, err := c.JobSubmit(ctx, params)
@@ -339,6 +323,23 @@ func cloneTaskTags(tags map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
+}
+
+func optionalTaskSpecString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+// optionalTaskSpecTags does not clone. The caller's map was already copied into
+// taskOptions at parse time, the submit that follows is synchronous, and nothing
+// between the two mutates it.
+func optionalTaskSpecTags(tags map[string]string) *map[string]string {
+	if len(tags) == 0 {
+		return nil
+	}
+	return &tags
 }
 
 func timeoutMillis(timeout time.Duration) *int64 {

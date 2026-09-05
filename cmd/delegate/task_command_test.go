@@ -14,13 +14,18 @@ import (
 	"github.com/charlesnpx/agentbus/engine"
 )
 
+const (
+	publicStateQueued    client.PublicState = "queued"
+	publicStateCompleted client.PublicState = "completed"
+)
+
 func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) {
 	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
 	fake := &fakeAgentbusClient{
-		hello: helloWithCapabilities(),
+		hello: helloWithBackends(),
 		submitResult: client.JobSubmitResult{
 			JobID:        "job_receipt",
-			State:        engine.StateQueued,
+			State:        publicStateQueued,
 			Deduplicated: false,
 			Timeout:      timeout,
 		},
@@ -44,7 +49,7 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	if err := json.Unmarshal(stdout.Bytes(), &receipt); err != nil {
 		t.Fatalf("stdout is not receipt JSON: %v; raw=%q", err, stdout.String())
 	}
-	if receipt.RequestID != "automation/retry-1" || receipt.JobID != "job_receipt" || receipt.State != engine.StateQueued || receipt.Deduplicated {
+	if receipt.RequestID != "automation/retry-1" || receipt.JobID != "job_receipt" || receipt.State != publicStateQueued || receipt.Deduplicated {
 		t.Fatalf("receipt=%#v", receipt)
 	}
 	if receipt.Model != "unadvertised-model" || receipt.Effort != "unadvertised-effort" {
@@ -52,6 +57,10 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	}
 	if receipt.Timeout == nil || receipt.Timeout.EffectiveMS != timeout.Effective || receipt.Timeout.Source != timeout.Source {
 		t.Fatalf("receipt timeout=%#v, want Agentbus effective/source %#v", receipt.Timeout, timeout)
+	}
+	const wantReceipt = "{\"requestId\":\"automation/retry-1\",\"jobId\":\"job_receipt\",\"state\":\"queued\",\"deduplicated\":false,\"model\":\"unadvertised-model\",\"effort\":\"unadvertised-effort\",\"timeout\":{\"effectiveMs\":1800000,\"source\":\"daemon_default\"}}\n"
+	if got := stdout.String(); got != wantReceipt {
+		t.Fatalf("receipt bytes changed:\n got %q\nwant %q", got, wantReceipt)
 	}
 	var receiptFields map[string]json.RawMessage
 	if err := json.Unmarshal(stdout.Bytes(), &receiptFields); err != nil {
@@ -90,19 +99,19 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	if params.RequestID != "automation/retry-1" || params.TaskSpec.Prompt != "inspect this" {
 		t.Fatalf("submitted params=%#v", params)
 	}
-	if params.TaskSpec.Model != "unadvertised-model" || params.TaskSpec.Effort != "unadvertised-effort" {
-		t.Fatalf("submitted model/effort=%q/%q", params.TaskSpec.Model, params.TaskSpec.Effort)
+	if params.TaskSpec.Model == nil || *params.TaskSpec.Model != "unadvertised-model" || params.TaskSpec.Effort == nil || *params.TaskSpec.Effort != "unadvertised-effort" {
+		t.Fatalf("submitted model/effort=%#v/%#v", params.TaskSpec.Model, params.TaskSpec.Effort)
 	}
-	if got, want := params.TaskSpec.Tags, map[string]string{"ticket": "ABC-123", "owner": "qa"}; !mapsEqual(got, want) {
-		t.Fatalf("tags=%#v, want %#v", got, want)
+	if params.TaskSpec.Tags == nil || !mapsEqual(*params.TaskSpec.Tags, map[string]string{"ticket": "ABC-123", "owner": "qa"}) {
+		t.Fatalf("tags=%#v", params.TaskSpec.Tags)
 	}
-	if len(fake.statuses) != 0 {
-		t.Fatalf("task polled after submit: statuses=%d", len(fake.statuses))
+	if len(fake.gets) != 0 {
+		t.Fatalf("task inspected jobs after submit: gets=%d", len(fake.gets))
 	}
 }
 
 func TestTaskReceiptWriteFailureIncludesGeneratedRequestID(t *testing.T) {
-	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+	fake := &fakeAgentbusClient{hello: helloWithBackends()}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
 
@@ -126,10 +135,10 @@ func TestTaskReceiptWriteFailureIncludesGeneratedRequestID(t *testing.T) {
 
 func TestTaskReceiptOmitsUnsetModelAndEffort(t *testing.T) {
 	fake := &fakeAgentbusClient{
-		hello: helloWithCapabilities(),
+		hello: helloWithBackends(),
 		submitResult: client.JobSubmitResult{
 			JobID:   "job_no_model_or_effort",
-			State:   engine.StateQueued,
+			State:   publicStateQueued,
 			Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
 		},
 	}
@@ -168,7 +177,7 @@ func TestTaskPromptFileReadsStdinAndDisk(t *testing.T) {
 		{name: "file", stdin: "ignored", want: "from file"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+			fake := &fakeAgentbusClient{hello: helloWithBackends()}
 			restore := stubAgentbusGlobals(t, fake)
 			defer restore()
 			cwd := t.TempDir()
@@ -193,10 +202,10 @@ func TestTaskPromptFileReadsStdinAndDisk(t *testing.T) {
 func TestTaskSchemaFileAndTimeoutReachAgentbus(t *testing.T) {
 	requested := int64(45000)
 	fake := &fakeAgentbusClient{
-		hello: helloWithCapabilities(),
+		hello: helloWithBackends(),
 		submitResult: client.JobSubmitResult{
 			JobID: "job_schema_timeout",
-			State: engine.StateQueued,
+			State: publicStateQueued,
 			Timeout: &engine.TimeoutResolution{
 				Requested: &requested,
 				Effective: requested,
@@ -219,11 +228,11 @@ func TestTaskSchemaFileAndTimeoutReachAgentbus(t *testing.T) {
 		t.Fatalf("submits=%d", len(fake.submits))
 	}
 	spec := fake.submits[0].TaskSpec
-	if spec.Policy == nil || spec.Policy.Contract == nil || string(spec.Policy.Contract.JSONSchema) != `{"type":"object"}` {
-		t.Fatalf("policy=%#v", spec.Policy)
+	if string(spec.OutputSchema) != `{"type":"object"}` {
+		t.Fatalf("output schema=%s", spec.OutputSchema)
 	}
-	if spec.TimeoutMs == nil || *spec.TimeoutMs != 45000 {
-		t.Fatalf("timeout=%v", spec.TimeoutMs)
+	if spec.TimeoutMS == nil || *spec.TimeoutMS != 45000 {
+		t.Fatalf("timeout=%v", spec.TimeoutMS)
 	}
 	var receipt taskSubmitReceipt
 	if err := json.Unmarshal(stdout.Bytes(), &receipt); err != nil {
@@ -273,7 +282,7 @@ func TestTaskRejectsMalformedTagAndInvalidRequestID(t *testing.T) {
 
 func TestTaskFailureReportsRequestIDAndDoesNotWriteLocalState(t *testing.T) {
 	t.Run("failure", func(t *testing.T) {
-		fake := &fakeAgentbusClient{hello: helloWithCapabilities(), submitErr: errors.New("lost response")}
+		fake := &fakeAgentbusClient{hello: helloWithBackends(), submitErr: errors.New("lost response")}
 		restore := stubAgentbusGlobals(t, fake)
 		defer restore()
 		var stdout, stderr bytes.Buffer
@@ -286,7 +295,7 @@ func TestTaskFailureReportsRequestIDAndDoesNotWriteLocalState(t *testing.T) {
 	})
 
 	t.Run("success", func(t *testing.T) {
-		fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+		fake := &fakeAgentbusClient{hello: helloWithBackends()}
 		restore := stubAgentbusGlobals(t, fake)
 		defer restore()
 		cwd := t.TempDir()
@@ -340,20 +349,15 @@ func stubAgentbusClientGlobals(t *testing.T, fake agentbusClient) func() {
 	stubAgentbusTestEnvironment(t)
 	oldConnect := connectAgentbus
 	oldLookPath := lookPath
-	oldCommandOutput := commandOutput
 	connectAgentbus = func(context.Context, client.Options) (agentbusClient, error) {
 		return fake, nil
 	}
 	lookPath = func(string) (string, error) {
 		return "/tmp/agentbus", nil
 	}
-	commandOutput = func(string, ...string) ([]byte, error) {
-		return []byte(agentbusVersionFixtureOutput("v0.10.0")), nil
-	}
 	return func() {
 		connectAgentbus = oldConnect
 		lookPath = oldLookPath
-		commandOutput = oldCommandOutput
 	}
 }
 
@@ -365,21 +369,12 @@ func stubAgentbusTestEnvironment(t *testing.T) {
 	t.Setenv("AGENTBUS_STATE_ROOT", "")
 }
 
-func agentbusVersionFixtureOutput(version string) string {
-	return "agentbus " + version + "\n"
-}
-
-func helloWithCapabilities() client.HelloResult {
+func helloWithBackends() client.HelloResult {
 	return client.HelloResult{
-		ProtocolVersion: 2,
-		Backends:        []string{"codex", "claude"},
-		Capabilities: map[string]bool{
-			"admission.strictContainment": true,
-			"policy.shape":                false,
-			"policy.jsonSchema":           true,
-			"policy.named":                true,
-			"policy.retry":                true,
-			"models.reported":             true,
+		ProtocolVersion: 3,
+		BackendMetadata: []client.BackendInfo{
+			{Name: "codex"},
+			{Name: "claude"},
 		},
 	}
 }
@@ -389,9 +384,9 @@ type fakeAgentbusClient struct {
 	submits      []client.JobSubmitParams
 	submitResult client.JobSubmitResult
 	submitErr    error
-	statuses     []client.JobStatusParams
-	statusErr    error
-	status       client.JobStatusResult
+	gets         []client.JobGetParams
+	getErr       error
+	get          client.JobGetResult
 }
 
 func (f *fakeAgentbusClient) Close() error { return nil }
@@ -410,22 +405,19 @@ func (f *fakeAgentbusClient) JobSubmit(_ context.Context, params client.JobSubmi
 			submitted.JobID = jobID
 		}
 		if submitted.State == "" {
-			submitted.State = engine.StateQueued
+			submitted.State = publicStateQueued
 		}
 		return submitted, nil
 	}
-	return client.JobSubmitResult{JobID: jobID, State: engine.StateQueued}, nil
+	return client.JobSubmitResult{JobID: jobID, State: publicStateQueued}, nil
 }
 
-func (f *fakeAgentbusClient) JobStatus(_ context.Context, params client.JobStatusParams) (client.JobStatusResult, error) {
-	f.statuses = append(f.statuses, params)
-	if f.statusErr != nil {
-		return client.JobStatusResult{}, f.statusErr
+func (f *fakeAgentbusClient) JobGet(_ context.Context, params client.JobGetParams) (client.JobGetResult, error) {
+	f.gets = append(f.gets, params)
+	if f.getErr != nil {
+		return client.JobGetResult{}, f.getErr
 	}
-	if len(f.status.Jobs) > 0 {
-		return f.status, nil
-	}
-	return client.JobStatusResult{}, nil
+	return f.get, nil
 }
 
 func ptr[T any](v T) *T {
