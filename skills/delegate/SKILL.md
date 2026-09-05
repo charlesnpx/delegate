@@ -21,10 +21,14 @@ Submission is asynchronous. After an ambiguous submission, reuse the same `--req
 
 ```sh
 agentbus status --job <id> --json
+agentbus status --tag <key=value> --json
+agentbus transcript --job <id> --json
 agentbus result --job <id> --json
 agentbus cancel --job <id> --json
 ```
 
-For `status` or `result`, exit code 2 means the job is still running.
+Without a kind filter, `agentbus transcript` returns a digest; use `--kind message` for only the agent's messages.
+
+For `status --job` or `result`, exit code 2 means the job is still running; a tag listing exits 0 once printed, whatever state its members are in.
 
 With `--write`, workspace-write access only inside its `--cwd` and no network are Codex-specific guarantees; enforcement depends on the selected Agentbus backend: Claude runs without a filesystem or network sandbox, and Cursor uses agent-mode permissions. For Go builds, set `GOCACHE` inside `--cwd` and leave `GOMODCACHE` at its default.
