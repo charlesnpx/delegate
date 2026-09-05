@@ -67,7 +67,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		if err != nil {
 			return 0, err
 		}
-		taskOpts.RequestID, err = contractReviewRequestIDForResume(input.RequestDigest, opts.ResumeJobID)
+		taskOpts.RequestID, err = contractReviewRequestID(input.RequestDigest, opts.ResumeJobID)
 		if err != nil {
 			return 0, err
 		}
@@ -185,9 +185,7 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
 	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout; 0 leaves the deadline to the daemon default")
-	if kind == reviewKind {
-		fs.StringVar(&opts.ResumeJobID, "resume", "", "resume a prior job; creates a new job with a fresh deadline")
-	}
+	fs.StringVar(&opts.ResumeJobID, "resume", "", "resume a prior job; creates a new job with a fresh deadline")
 	fs.StringVar(&opts.Base, "base", "", "comparison base ref")
 	fs.StringVar(&opts.Scope, "scope", reviewpkg.ScopeAuto, "review scope: auto combines branch and working-tree changes; or working-tree, branch")
 	fs.BoolVar(&opts.AllowLiveRepoRead, "allow-live-repo-read", false, "use live repository as backend cwd (makes backend file reads easier; does not prevent backend file reads)")
@@ -290,7 +288,12 @@ func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
 	}, nil
 }
 
-func contractReviewRequestID(requestDigest string) (string, error) {
+// contractReviewRequestID derives a contract review's replay identity. A resume
+// is a distinct identity, because agentbus hashes the whole task spec and would
+// otherwise reject the resumed submission as a replay conflict before it ever
+// validated the resume target. It stays replay-stable: the same digest and the
+// same target always derive the same id.
+func contractReviewRequestID(requestDigest, resumeJobID string) (string, error) {
 	const digestPrefix = "sha256:"
 	const digestHexLength = 64
 	const requestIDPrefix = "delegate-review-"
@@ -302,15 +305,8 @@ func contractReviewRequestID(requestDigest string) (string, error) {
 	if _, err := hex.DecodeString(digestHex); err != nil {
 		return "", fmt.Errorf("invalid contract review request digest %q: %w", requestDigest, err)
 	}
-	return requestIDPrefix + digestHex[:32], nil
-}
-
-func contractReviewRequestIDForResume(requestDigest, resumeJobID string) (string, error) {
-	const requestIDPrefix = "delegate-review-"
-
-	requestID, err := contractReviewRequestID(requestDigest)
-	if err != nil || resumeJobID == "" {
-		return requestID, err
+	if resumeJobID == "" {
+		return requestIDPrefix + digestHex[:32], nil
 	}
 	resumeIdentity := sha256.Sum256([]byte(requestDigest + "\x00" + resumeJobID))
 	return requestIDPrefix + hex.EncodeToString(resumeIdentity[:])[:32], nil
