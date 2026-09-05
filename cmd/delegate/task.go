@@ -332,12 +332,14 @@ func optionalTaskSpecString(value string) *string {
 	return &value
 }
 
+// optionalTaskSpecTags does not clone. The caller's map was already copied into
+// taskOptions at parse time, the submit that follows is synchronous, and nothing
+// between the two mutates it.
 func optionalTaskSpecTags(tags map[string]string) *map[string]string {
-	cloned := cloneTaskTags(tags)
-	if cloned == nil {
+	if len(tags) == 0 {
 		return nil
 	}
-	return &cloned
+	return &tags
 }
 
 func timeoutMillis(timeout time.Duration) *int64 {

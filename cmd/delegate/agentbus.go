@@ -42,14 +42,6 @@ var connectAgentbus = func(ctx context.Context, opts client.Options) (agentbusCl
 
 var lookPath = exec.LookPath
 
-func connectCheckedAgentbus(ctx context.Context, opts client.Options) (agentbusClient, client.HelloResult, error) {
-	c, err := connectAgentbus(ctx, opts)
-	if err != nil {
-		return nil, client.HelloResult{}, err
-	}
-	return c, c.HelloResult(), nil
-}
-
 func connectAgentbusCommand(ctx context.Context) (agentbusClient, client.HelloResult, string, error) {
 	stateRoot, err := resolveAgentbusStateRoot()
 	if err != nil {
@@ -69,7 +61,11 @@ func connectAgentbusCommandAtRoot(ctx context.Context, stateRoot string) (agentb
 	if path != "" {
 		opts.CommandPath = path
 	}
-	return connectCheckedAgentbus(ctx, opts)
+	c, err := connectAgentbus(ctx, opts)
+	if err != nil {
+		return nil, client.HelloResult{}, err
+	}
+	return c, c.HelloResult(), nil
 }
 
 type agentbusStateRootUsageError struct {
