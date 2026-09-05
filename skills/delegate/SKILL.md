@@ -21,9 +21,13 @@ Submission is asynchronous. After an ambiguous submission, reuse the same `--req
 
 ```sh
 agentbus status --job <id> --json
+agentbus status --tag <key=value> --json
+agentbus transcript --job <id> --json
 agentbus result --job <id> --json
 agentbus cancel --job <id> --json
 ```
+
+Without a kind filter, `agentbus transcript` returns a digest; use `--kind message` for only the agent's messages.
 
 For `status` or `result`, exit code 2 means the job is still running.
 
