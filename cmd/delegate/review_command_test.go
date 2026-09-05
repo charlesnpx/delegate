@@ -22,10 +22,10 @@ import (
 func TestContractReviewReusesDeterministicRequestAndWorkspace(t *testing.T) {
 	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
 	fake := &fakeAgentbusClient{
-		hello: helloWithCapabilities(),
+		hello: helloWithBackends(),
 		submitResult: client.JobSubmitResult{
 			JobID:   "job_contract_review",
-			State:   engine.StateQueued,
+			State:   publicStateQueued,
 			Timeout: timeout,
 		},
 	}
@@ -63,15 +63,12 @@ func TestContractReviewReusesDeterministicRequestAndWorkspace(t *testing.T) {
 		t.Fatalf("backend cwds=%q/%q, want the same deterministic workspace", first.TaskSpec.CWD, replayed.TaskSpec.CWD)
 	}
 	spec := first.TaskSpec
-	if spec.Policy == nil || spec.Policy.Contract == nil || spec.Policy.Retry == nil {
-		t.Fatalf("contract review policy=%#v, want schema and retry policy", spec.Policy)
-	}
-	if spec.Policy.Retry.Template != reviewRetryTemplate {
-		t.Fatalf("contract retry template=%q, want %q", spec.Policy.Retry.Template, reviewRetryTemplate)
+	if len(spec.OutputSchema) == 0 {
+		t.Fatal("contract review output schema is empty")
 	}
 	for _, want := range []string{fixture.frozen.CharterHash, fixture.reviewInputDigest, "EXACTLY ONE review-report-v1 JSON object"} {
-		if !strings.Contains(string(spec.Policy.Contract.JSONSchema), want) && !strings.Contains(spec.Prompt, want) {
-			t.Fatalf("schema/prompt missing %q\nschema=%s\nprompt=%s", want, spec.Policy.Contract.JSONSchema, spec.Prompt)
+		if !strings.Contains(string(spec.OutputSchema), want) && !strings.Contains(spec.Prompt, want) {
+			t.Fatalf("schema/prompt missing %q\nschema=%s\nprompt=%s", want, spec.OutputSchema, spec.Prompt)
 		}
 	}
 	if strings.Contains(spec.Prompt, "Present findings first, ordered by severity") {
@@ -113,7 +110,7 @@ func TestContractReviewReusesDeterministicRequestAndWorkspace(t *testing.T) {
 }
 
 func TestContractReviewRejectsTamperedArtifactBeforeSubmission(t *testing.T) {
-	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+	fake := &fakeAgentbusClient{hello: helloWithBackends()}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
 
@@ -134,8 +131,8 @@ func TestContractReviewRejectsTamperedArtifactBeforeSubmission(t *testing.T) {
 }
 
 func TestContractReviewPreAdmissionFailureKeepsPublishedWorkspace(t *testing.T) {
-	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
-	fake.hello.Backends = []string{"claude"}
+	fake := &fakeAgentbusClient{hello: helloWithBackends()}
+	fake.hello.BackendMetadata = []client.BackendInfo{{Name: "claude"}}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
 
@@ -188,7 +185,7 @@ func TestContractReviewRejectsLiveDiscoveryFlags(t *testing.T) {
 		{"--allow-live-repo-read"},
 	} {
 		t.Run(strings.Join(flagArgs, " "), func(t *testing.T) {
-			fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
+			fake := &fakeAgentbusClient{hello: helloWithBackends()}
 			restore := stubAgentbusGlobals(t, fake)
 			defer restore()
 
@@ -227,10 +224,10 @@ func TestContractReviewRequiresAllInputFiles(t *testing.T) {
 func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) {
 	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
 	fake := &fakeAgentbusClient{
-		hello: helloWithCapabilities(),
+		hello: helloWithBackends(),
 		submitResult: client.JobSubmitResult{
 			JobID:   "job_review",
-			State:   engine.StateQueued,
+			State:   publicStateQueued,
 			Timeout: timeout,
 		},
 	}
@@ -246,8 +243,8 @@ func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) 
 		t.Fatalf("review code=%d stderr=%q", code, firstErr.String())
 	}
 	assertTaskReceiptShape(t, firstOut.Bytes(), "job_review")
-	if got := len(fake.statuses); got != 0 {
-		t.Fatalf("review status reads=%d, want none before a workspace is retained", got)
+	if got := len(fake.gets); got != 0 {
+		t.Fatalf("review job reads=%d, want none before a workspace is retained", got)
 	}
 
 	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "delegate")
@@ -265,8 +262,8 @@ func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) 
 		t.Fatalf("review artifact did not contain the assembled repository content")
 	}
 
-	fake.status = client.JobStatusResult{Jobs: []client.JobStatus{{JobID: "job_review", State: engine.StateCompleted}}}
-	fake.submitResult = client.JobSubmitResult{JobID: "job_adversarial", State: engine.StateQueued, Timeout: timeout}
+	fake.get = client.JobGetResult{JobID: "job_review", State: publicStateCompleted}
+	fake.submitResult = client.JobSubmitResult{JobID: "job_adversarial", State: publicStateQueued, Timeout: timeout}
 	var secondOut, secondErr bytes.Buffer
 	if code := run([]string{
 		"adversarial-review", "--backend", "claude", "--cwd", repo, "--scope", "working-tree",
@@ -275,11 +272,11 @@ func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) 
 		t.Fatalf("adversarial-review code=%d stderr=%q", code, secondErr.String())
 	}
 	assertTaskReceiptShape(t, secondOut.Bytes(), "job_adversarial")
-	if got := len(fake.statuses); got != 1 {
-		t.Fatalf("later review status reads=%d, want one one-shot cleanup check", got)
+	if got := len(fake.gets); got != 1 {
+		t.Fatalf("later review job reads=%d, want one one-shot cleanup check", got)
 	}
-	if got := fake.statuses[0].JobID; got != "job_review" {
-		t.Fatalf("cleanup status job=%q, want job_review", got)
+	if got := fake.gets[0].JobID; got != "job_review" {
+		t.Fatalf("cleanup job=%q, want job_review", got)
 	}
 	if _, err := os.Stat(firstWorkspace); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("terminal review workspace still exists or stat failed: %v", err)
@@ -292,13 +289,52 @@ func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) 
 		t.Fatalf("metadata after later review=%#v errors=%v", metadata, errs)
 	}
 
-	fake.status = client.JobStatusResult{Jobs: []client.JobStatus{{JobID: "job_adversarial", State: engine.StateCompleted}}}
+	fake.get = client.JobGetResult{JobID: "job_adversarial", State: publicStateCompleted}
 	if errs := sweepReviewWorkspaces(context.Background(), stateDir); len(errs) != 0 {
 		t.Fatalf("final workspace sweep errors=%v", errs)
 	}
 	metadata, errs = loadReviewWorkspaceMetadata(stateDir)
 	if len(errs) != 0 || len(metadata) != 0 {
 		t.Fatalf("metadata after terminal cleanup=%#v errors=%v", metadata, errs)
+	}
+}
+
+func TestSweepReviewWorkspacesLeavesWorkspaceWhenJobGetFails(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(stateDir, "review-retained")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stateRoot := t.TempDir()
+	meta := reviewWorkspaceMetadata{
+		JobID:             "job_unavailable",
+		Workspace:         workspace,
+		AgentbusStateRoot: stateRoot,
+	}
+	if err := saveReviewWorkspaceMetadata(stateDir, meta); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeAgentbusClient{hello: helloWithBackends(), getErr: errors.New("job lookup unavailable")}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	errs := sweepReviewWorkspaces(context.Background(), stateDir)
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "job lookup unavailable") {
+		t.Fatalf("sweep errors=%v, want lookup error", errs)
+	}
+	if len(fake.gets) != 1 || fake.gets[0].JobID != meta.JobID {
+		t.Fatalf("job gets=%#v, want %q", fake.gets, meta.JobID)
+	}
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("workspace was removed after failed lookup: %v", err)
+	}
+	metadata, metadataErrs := loadReviewWorkspaceMetadata(stateDir)
+	if len(metadataErrs) != 0 || len(metadata) != 1 || metadata[0] != meta {
+		t.Fatalf("metadata after failed lookup=%#v errors=%v, want %#v", metadata, metadataErrs, meta)
 	}
 }
 
@@ -311,10 +347,10 @@ func TestReviewCommandsPassModelAndEffortThrough(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeAgentbusClient{
-				hello: helloWithCapabilities(),
+				hello: helloWithBackends(),
 				submitResult: client.JobSubmitResult{
 					JobID:   "job_passthrough",
-					State:   engine.StateQueued,
+					State:   publicStateQueued,
 					Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
 				},
 			}
@@ -332,8 +368,8 @@ func TestReviewCommandsPassModelAndEffortThrough(t *testing.T) {
 			if len(fake.submits) != 1 {
 				t.Fatalf("submits=%d, want 1", len(fake.submits))
 			}
-			if got := fake.submits[0].TaskSpec; got.Model != tc.model || got.Effort != tc.effort {
-				t.Fatalf("submitted model/effort=%q/%q, want %q/%q", got.Model, got.Effort, tc.model, tc.effort)
+			if got := fake.submits[0].TaskSpec; taskSpecString(got.Model) != tc.model || taskSpecString(got.Effort) != tc.effort {
+				t.Fatalf("submitted model/effort=%#v/%#v, want %q/%q", got.Model, got.Effort, tc.model, tc.effort)
 			}
 		})
 	}
@@ -341,7 +377,7 @@ func TestReviewCommandsPassModelAndEffortThrough(t *testing.T) {
 
 func TestReviewAmbiguousSubmissionFailureKeepsWorkspace(t *testing.T) {
 	fake := &fakeAgentbusClient{
-		hello:     helloWithCapabilities(),
+		hello:     helloWithBackends(),
 		submitErr: errors.New("lost acknowledgement"),
 	}
 	restore := stubAgentbusGlobals(t, fake)
@@ -371,8 +407,8 @@ func TestReviewAmbiguousSubmissionFailureKeepsWorkspace(t *testing.T) {
 
 func TestReviewMetadataWriteFailureAfterSubmissionKeepsWorkspace(t *testing.T) {
 	fake := &fakeAgentbusClient{
-		hello:        helloWithCapabilities(),
-		submitResult: client.JobSubmitResult{JobID: "job_metadata_failure", State: engine.StateQueued},
+		hello:        helloWithBackends(),
+		submitResult: client.JobSubmitResult{JobID: "job_metadata_failure", State: publicStateQueued},
 	}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
@@ -406,8 +442,8 @@ func TestReviewMetadataWriteFailureAfterSubmissionKeepsWorkspace(t *testing.T) {
 }
 
 func TestReviewPreSubmissionFailureRemovesWorkspace(t *testing.T) {
-	fake := &fakeAgentbusClient{hello: helloWithCapabilities()}
-	fake.hello.Backends = []string{"claude"}
+	fake := &fakeAgentbusClient{hello: helloWithBackends()}
+	fake.hello.BackendMetadata = []client.BackendInfo{{Name: "claude"}}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
 
@@ -433,7 +469,7 @@ func TestReviewAcceptedRPCErrorReportsIdentityAndKeepsWorkspaceMetadata(t *testi
 	if err := json.Unmarshal([]byte(`{"Object":{"code":-32000,"message":"admission closing","data":{"code":"backend_unavailable","jobId":"job_accepted_after_error"}}}`), &rpcErr); err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeAgentbusClient{hello: helloWithCapabilities(), submitErr: &rpcErr}
+	fake := &fakeAgentbusClient{hello: helloWithBackends(), submitErr: &rpcErr}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
 
@@ -487,7 +523,7 @@ func assertTaskReceiptShape(t *testing.T, raw []byte, jobID string) {
 	if err := json.Unmarshal(raw, &receipt); err != nil {
 		t.Fatalf("receipt JSON invalid: %v; raw=%q", err, string(raw))
 	}
-	if receipt.JobID != jobID || receipt.State != engine.StateQueued || receipt.Timeout == nil {
+	if receipt.JobID != jobID || receipt.State != publicStateQueued || receipt.Timeout == nil {
 		t.Fatalf("receipt=%#v", receipt)
 	}
 	var fields map[string]json.RawMessage
@@ -507,6 +543,13 @@ func assertTaskReceiptShape(t *testing.T, raw []byte, jobID string) {
 			t.Fatalf("receipt fields=%#v, unexpectedly includes %q", fields, forbidden)
 		}
 	}
+}
+
+func taskSpecString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func newReviewCommandRepository(t *testing.T) string {
