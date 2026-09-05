@@ -398,6 +398,7 @@ func TestReviewCommandsPassModelEffortAndResumeThrough(t *testing.T) {
 	}{
 		{name: "review supplied", command: "review", model: "review-model", effort: "review-effort", resume: "job_killed"},
 		{name: "adversarial review omitted", command: "adversarial-review"},
+		{name: "adversarial review resumed", command: "adversarial-review", resume: "job_killed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeAgentbusClient{
