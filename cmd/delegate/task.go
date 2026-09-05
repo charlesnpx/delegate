@@ -20,18 +20,20 @@ import (
 // taskOptions contains the public task surface. Review supplies CWD and
 // LogicalWorkspace directly so it can share the same one-shot admission path.
 type taskOptions struct {
-	Backend    string
-	CWD        string
-	Write      bool
-	Model      string
-	Effort     string
-	Timeout    time.Duration
-	PromptFile string
-	SchemaFile string
-	RequestID  string
-	Tags       map[string]string
+	Backend     string
+	CWD         string
+	Write       bool
+	Model       string
+	Effort      string
+	Timeout     time.Duration
+	PromptFile  string
+	SchemaFile  string
+	RequestID   string
+	ResumeJobID string
+	Tags        map[string]string
 
 	LogicalWorkspace string
+	WorkspaceKey     string
 }
 
 const (
@@ -39,11 +41,12 @@ const (
 	readOnlyTaskHint   = "notice: task will run with a read-only backend profile; pass --write for edits or builds."
 )
 
-// taskSubmitReceipt is intentionally a direct projection of the Agentbus
-// admission response. In particular, Timeout retains Agentbus's milliseconds
-// and source string without local reinterpretation.
+// taskSubmitReceipt projects the Agentbus admission response together with the
+// workspace key sent to Agentbus. In particular, Timeout retains Agentbus's
+// milliseconds and source string without local reinterpretation.
 type taskSubmitReceipt struct {
 	RequestID    string             `json:"requestId"`
+	WorkspaceKey string             `json:"workspaceKey"`
 	JobID        string             `json:"jobId"`
 	State        client.PublicState `json:"state"`
 	Deduplicated bool               `json:"deduplicated"`
@@ -123,6 +126,7 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 func writeTaskSubmitReceipt(stdout io.Writer, opts taskOptions, submitted client.JobSubmitResult) error {
 	return writeJSONLine(stdout, taskSubmitReceipt{
 		RequestID:    opts.RequestID,
+		WorkspaceKey: opts.WorkspaceKey,
 		JobID:        submitted.JobID,
 		State:        submitted.State,
 		Deduplicated: submitted.Deduplicated,
@@ -153,6 +157,7 @@ func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
 	fs.StringVar(&opts.PromptFile, "prompt-file", "", "read prompt from file, or - for stdin")
 	fs.StringVar(&opts.SchemaFile, "schema-file", "", "read optional JSON Schema output contract from file")
 	fs.StringVar(&opts.RequestID, "request-id", "", "caller-owned request identity")
+	fs.StringVar(&opts.ResumeJobID, "resume", "", "resume a prior job; creates a new job with a fresh deadline")
 	fs.Var(&tags, "tag", "task tag in key=value form (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return taskOptions{}, err
@@ -282,6 +287,7 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema js
 	if err != nil {
 		return client.JobSubmitResult{}, nil, "", submissionError(opts.RequestID, err)
 	}
+	opts.WorkspaceKey = workspaceKey
 	c, hello, stateRoot, err := connectAgentbusCommand(ctx)
 	if err != nil {
 		return client.JobSubmitResult{}, nil, "", submissionError(opts.RequestID, err)
@@ -298,6 +304,7 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema js
 			Backend:      opts.Backend,
 			CWD:          opts.CWD,
 			Write:        opts.Write,
+			ResumeJobID:  opts.ResumeJobID,
 			Model:        optionalTaskSpecString(opts.Model),
 			Effort:       optionalTaskSpecString(opts.Effort),
 			Prompt:       prompt,

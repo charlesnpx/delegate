@@ -338,11 +338,11 @@ func TestSweepReviewWorkspacesLeavesWorkspaceWhenJobGetFails(t *testing.T) {
 	}
 }
 
-func TestReviewCommandsPassModelAndEffortThrough(t *testing.T) {
+func TestReviewCommandsPassModelEffortAndResumeThrough(t *testing.T) {
 	for _, tc := range []struct {
-		name, command, model, effort string
+		name, command, model, effort, resume string
 	}{
-		{name: "review supplied", command: "review", model: "review-model", effort: "review-effort"},
+		{name: "review supplied", command: "review", model: "review-model", effort: "review-effort", resume: "job_killed"},
 		{name: "adversarial review omitted", command: "adversarial-review"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -361,6 +361,9 @@ func TestReviewCommandsPassModelAndEffortThrough(t *testing.T) {
 			if tc.model != "" {
 				args = append(args, "--model", tc.model, "--effort", tc.effort)
 			}
+			if tc.resume != "" {
+				args = append(args, "--resume", tc.resume)
+			}
 			var stdout, stderr bytes.Buffer
 			if code := run(args, nil, &stdout, &stderr); code != 0 {
 				t.Fatalf("%s code=%d stderr=%q", tc.command, code, stderr.String())
@@ -368,8 +371,11 @@ func TestReviewCommandsPassModelAndEffortThrough(t *testing.T) {
 			if len(fake.submits) != 1 {
 				t.Fatalf("submits=%d, want 1", len(fake.submits))
 			}
-			if got := fake.submits[0].TaskSpec; taskSpecString(got.Model) != tc.model || taskSpecString(got.Effort) != tc.effort {
-				t.Fatalf("submitted model/effort=%#v/%#v, want %q/%q", got.Model, got.Effort, tc.model, tc.effort)
+			if got := fake.submits[0].TaskSpec; taskSpecString(got.Model) != tc.model || taskSpecString(got.Effort) != tc.effort || got.ResumeJobID != tc.resume {
+				t.Fatalf("submitted model/effort/resume=%#v/%#v/%q, want %q/%q/%q", got.Model, got.Effort, got.ResumeJobID, tc.model, tc.effort, tc.resume)
+			}
+			if tc.resume != "" && len(fake.gets) != 0 {
+				t.Fatalf("review locally inspected resume target: gets=%#v", fake.gets)
 			}
 		})
 	}
@@ -523,17 +529,17 @@ func assertTaskReceiptShape(t *testing.T, raw []byte, jobID string) {
 	if err := json.Unmarshal(raw, &receipt); err != nil {
 		t.Fatalf("receipt JSON invalid: %v; raw=%q", err, string(raw))
 	}
-	if receipt.JobID != jobID || receipt.State != publicStateQueued || receipt.Timeout == nil {
+	if receipt.JobID != jobID || receipt.State != publicStateQueued || receipt.Timeout == nil || receipt.WorkspaceKey == "" {
 		t.Fatalf("receipt=%#v", receipt)
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := len(fields), 7; got != want {
+	if got, want := len(fields), 8; got != want {
 		t.Fatalf("receipt fields=%#v, want exactly %d", fields, want)
 	}
-	for _, key := range []string{"requestId", "jobId", "state", "deduplicated", "model", "effort", "timeout"} {
+	for _, key := range []string{"requestId", "workspaceKey", "jobId", "state", "deduplicated", "model", "effort", "timeout"} {
 		if _, found := fields[key]; !found {
 			t.Fatalf("receipt fields=%#v, missing %q", fields, key)
 		}

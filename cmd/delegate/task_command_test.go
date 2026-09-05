@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,10 +34,11 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
 
+	cwd := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
-		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-",
-		"--request-id", "automation/retry-1", "--model", "unadvertised-model", "--effort", "unadvertised-effort",
+		"task", "--backend", "codex", "--cwd", cwd, "--prompt-file", "-",
+		"--request-id", "automation/retry-1", "--resume", "job_killed", "--model", "unadvertised-model", "--effort", "unadvertised-effort",
 		"--tag", "ticket=ABC-123", "--tag", "owner=qa",
 	}, strings.NewReader("inspect this"), &stdout, &stderr)
 	if code != 0 {
@@ -52,13 +54,20 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	if receipt.RequestID != "automation/retry-1" || receipt.JobID != "job_receipt" || receipt.State != publicStateQueued || receipt.Deduplicated {
 		t.Fatalf("receipt=%#v", receipt)
 	}
+	wantWorkspaceKey, err := workspaceKeyForLogicalWorkspace(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.WorkspaceKey != wantWorkspaceKey {
+		t.Fatalf("receipt workspace key=%q, want %q", receipt.WorkspaceKey, wantWorkspaceKey)
+	}
 	if receipt.Model != "unadvertised-model" || receipt.Effort != "unadvertised-effort" {
 		t.Fatalf("receipt model/effort=%q/%q", receipt.Model, receipt.Effort)
 	}
 	if receipt.Timeout == nil || receipt.Timeout.EffectiveMS != timeout.Effective || receipt.Timeout.Source != timeout.Source {
 		t.Fatalf("receipt timeout=%#v, want Agentbus effective/source %#v", receipt.Timeout, timeout)
 	}
-	const wantReceipt = "{\"requestId\":\"automation/retry-1\",\"jobId\":\"job_receipt\",\"state\":\"queued\",\"deduplicated\":false,\"model\":\"unadvertised-model\",\"effort\":\"unadvertised-effort\",\"timeout\":{\"effectiveMs\":1800000,\"source\":\"daemon_default\"}}\n"
+	wantReceipt := fmt.Sprintf("{\"requestId\":\"automation/retry-1\",\"workspaceKey\":\"%s\",\"jobId\":\"job_receipt\",\"state\":\"queued\",\"deduplicated\":false,\"model\":\"unadvertised-model\",\"effort\":\"unadvertised-effort\",\"timeout\":{\"effectiveMs\":1800000,\"source\":\"daemon_default\"}}\n", wantWorkspaceKey)
 	if got := stdout.String(); got != wantReceipt {
 		t.Fatalf("receipt bytes changed:\n got %q\nwant %q", got, wantReceipt)
 	}
@@ -66,10 +75,10 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	if err := json.Unmarshal(stdout.Bytes(), &receiptFields); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := len(receiptFields), 7; got != want {
+	if got, want := len(receiptFields), 8; got != want {
 		t.Fatalf("receipt fields=%#v, want exactly %d fields", receiptFields, want)
 	}
-	for _, key := range []string{"requestId", "jobId", "state", "deduplicated", "model", "effort", "timeout"} {
+	for _, key := range []string{"requestId", "workspaceKey", "jobId", "state", "deduplicated", "model", "effort", "timeout"} {
 		if _, found := receiptFields[key]; !found {
 			t.Fatalf("receipt fields=%#v, missing %q", receiptFields, key)
 		}
@@ -98,6 +107,9 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	params := fake.submits[0]
 	if params.RequestID != "automation/retry-1" || params.TaskSpec.Prompt != "inspect this" {
 		t.Fatalf("submitted params=%#v", params)
+	}
+	if params.WorkspaceKey != wantWorkspaceKey || params.TaskSpec.ResumeJobID != "job_killed" {
+		t.Fatalf("submitted workspace/resume=%q/%q, want %q/%q", params.WorkspaceKey, params.TaskSpec.ResumeJobID, wantWorkspaceKey, "job_killed")
 	}
 	if params.TaskSpec.Model == nil || *params.TaskSpec.Model != "unadvertised-model" || params.TaskSpec.Effort == nil || *params.TaskSpec.Effort != "unadvertised-effort" {
 		t.Fatalf("submitted model/effort=%#v/%#v", params.TaskSpec.Model, params.TaskSpec.Effort)
@@ -291,6 +303,26 @@ func TestTaskFailureReportsRequestIDAndDoesNotWriteLocalState(t *testing.T) {
 		}
 		if stdout.Len() != 0 || !strings.Contains(stderr.String(), "caller/retry-after-error") {
 			t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+	})
+
+	t.Run("typed daemon resume rejection", func(t *testing.T) {
+		var daemonErr client.RPCError
+		if err := json.Unmarshal([]byte(`{"Object":{"code":-32000,"message":"resume target job_killed is not resumable","data":{"code":"invalid_task_spec","jobId":"job_killed"}}}`), &daemonErr); err != nil {
+			t.Fatal(err)
+		}
+		fake := &fakeAgentbusClient{hello: helloWithBackends(), submitErr: &daemonErr}
+		restore := stubAgentbusGlobals(t, fake)
+		defer restore()
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", "--request-id", "caller/resume-after-error", "--resume", "job_killed"}, strings.NewReader("prompt"), &stdout, &stderr); code == 0 {
+			t.Fatal("task succeeded")
+		}
+		if stdout.Len() != 0 || !strings.Contains(stderr.String(), "caller/resume-after-error") || !strings.Contains(stderr.String(), daemonErr.Error()) {
+			t.Fatalf("stdout=%q stderr=%q, want request ID and daemon rejection %q", stdout.String(), stderr.String(), daemonErr.Error())
+		}
+		if len(fake.gets) != 0 {
+			t.Fatalf("task locally inspected resume target: gets=%#v", fake.gets)
 		}
 	})
 

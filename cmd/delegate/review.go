@@ -31,6 +31,7 @@ type reviewOptions struct {
 	Model             string
 	Effort            string
 	Timeout           time.Duration
+	ResumeJobID       string
 	Base              string
 	Scope             string
 	AllowLiveRepoRead bool
@@ -53,7 +54,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	if err != nil {
 		return 0, err
 	}
-	taskOpts := taskOptions{Backend: opts.Backend, Model: opts.Model, Effort: opts.Effort}
+	taskOpts := taskOptions{Backend: opts.Backend, Model: opts.Model, Effort: opts.Effort, ResumeJobID: opts.ResumeJobID}
 	contractMode := opts.RequestFile != ""
 	var schema json.RawMessage
 	logicalWorkspace := ""
@@ -184,6 +185,9 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
 	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout; 0 leaves the deadline to the daemon default")
+	if kind == reviewKind {
+		fs.StringVar(&opts.ResumeJobID, "resume", "", "resume a prior job; creates a new job with a fresh deadline")
+	}
 	fs.StringVar(&opts.Base, "base", "", "comparison base ref")
 	fs.StringVar(&opts.Scope, "scope", reviewpkg.ScopeAuto, "review scope: auto combines branch and working-tree changes; or working-tree, branch")
 	fs.BoolVar(&opts.AllowLiveRepoRead, "allow-live-repo-read", false, "use live repository as backend cwd (makes backend file reads easier; does not prevent backend file reads)")
