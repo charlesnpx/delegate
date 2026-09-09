@@ -2,6 +2,20 @@
 
 `delegate` is a thin, identified submitter for Agentbus. `delegate task` translates one convenient task invocation into one identified Agentbus `job.submit` call and prints the submit receipt; everything after task submission belongs to Agentbus.
 
+## Depends on / Depended on by
+
+**Depends on:**
+
+- `github.com/charlesnpx/agentbus` — imports `client/`, pinned `v0.15.0`; the installer invokes `agentbus configure-codex-sandbox`.
+- `github.com/charlesnpx/witness` — imports `contract/review`, the shared review contract; the pinned version is in `go.mod`.
+
+**Depended on by:** `feature-implement`, which invokes the `delegate` CLI
+(`task`, `review`, `adversarial-review`) and reads its submit receipts and the
+Agentbus job records they point to. The command surface, flag names, receipt
+fields, and exit codes are therefore a contract; removing or renaming any of
+them is a breaking change for Feature Implement. The `configure-codex-sandbox`
+removal in v0.11.0 is the recent example of exactly that kind of change.
+
 ## Install
 
 Install Agentbus before Delegate: Delegate submits work through Agentbus and cannot submit a task until Agentbus is available.
