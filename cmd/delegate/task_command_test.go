@@ -119,6 +119,51 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	}
 }
 
+func TestTaskRetainSessionSetsSubmittedSpec(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: helloWithBackends()}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", "--retain-session",
+	}, strings.NewReader("remember this"), &stdout, &stderr); code != 0 {
+		t.Fatalf("task code=%d stderr=%q", code, stderr.String())
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("submits=%d, want 1", len(fake.submits))
+	}
+	if !fake.submits[0].TaskSpec.RetainSession {
+		t.Fatalf("submitted retainSession=%v, want true", fake.submits[0].TaskSpec.RetainSession)
+	}
+}
+
+func TestTaskRetainSessionDefaultsFalse(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: helloWithBackends()}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-",
+	}, strings.NewReader("do not retain this"), &stdout, &stderr); code != 0 {
+		t.Fatalf("task code=%d stderr=%q", code, stderr.String())
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("submits=%d, want 1", len(fake.submits))
+	}
+	if fake.submits[0].TaskSpec.RetainSession {
+		t.Fatalf("submitted retainSession=%v, want false", fake.submits[0].TaskSpec.RetainSession)
+	}
+	raw, err := json.Marshal(fake.submits[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"retainSession"`) {
+		t.Fatalf("submitted JSON=%s, want retainSession omitted", raw)
+	}
+}
+
 func TestTaskReceiptWriteFailureIncludesGeneratedRequestID(t *testing.T) {
 	fake := &fakeAgentbusClient{hello: helloWithBackends()}
 	restore := stubAgentbusGlobals(t, fake)
