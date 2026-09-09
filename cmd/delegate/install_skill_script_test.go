@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -64,30 +63,51 @@ func TestDelegatedInstallerPlanReportsSetupWhenToolsMissing(t *testing.T) {
 	}
 }
 
-func TestDelegatedInstallerCodexPlanReportsSandboxRootsFromEnv(t *testing.T) {
-	tmp := privateTmpDir(t, "delegate-plan-sandbox-*")
-	home := filepath.Join(tmp, "home")
-	codexHome := filepath.Join(tmp, "codex-home")
-	stateHome := filepath.Join(tmp, "state")
-	agentbusState := filepath.Join(tmp, "agentbus-state")
-	cacheHome := filepath.Join(tmp, "cache")
-	agentbusCache := filepath.Join(cacheHome, "agentbus")
-	if runtime.GOOS == "darwin" {
-		agentbusCache = filepath.Join(home, "Library", "Caches", "agentbus")
+func TestDelegatedInstallerLiveCodexInstallInvokesAgentbusSandboxConfiguration(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
+	binDir := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "agentbus-args")
+	agentbusPath := filepath.Join(binDir, "agentbus")
+	if err := os.WriteFile(agentbusPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AGENTBUS_ARGS_FILE\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stateHome := filepath.Join(home, "state")
+	delegateState := filepath.Join(stateHome, "delegate")
 
-	result := runDelegatedInstallerScript(t, []string{"--plan", "--target", "codex", "--json"}, []string{
+	runDelegatedInstallerScript(t, []string{"--install", "--target", "codex", "--json", "--install-root", home}, []string{
 		"HOME=" + home,
-		"CODEX_HOME=" + codexHome,
 		"XDG_STATE_HOME=" + stateHome,
-		"AGENTBUS_STATE_ROOT=" + agentbusState,
-		"XDG_CACHE_HOME=" + cacheHome,
+		"AGENTBUS_ARGS_FILE=" + argsFile,
+		"PATH=" + binDir + string(os.PathListSeparator) + "/bin:/usr/bin",
 	})
-	wantWarning := "codex sandbox writable_roots would-configure: " +
-		agentbusState + ", " + agentbusCache + ", " + filepath.Join(stateHome, "delegate") +
-		" (config " + filepath.Join(codexHome, "config.toml") + ")"
-	if len(result.Warnings) != 1 || result.Warnings[0] != wantWarning {
-		t.Fatalf("warnings = %#v, want [%q]", result.Warnings, wantWarning)
+
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "configure-codex-sandbox\n--writable-root\n" + delegateState + "\n"
+	if string(args) != want {
+		t.Fatalf("agentbus argv = %q, want %q", args, want)
+	}
+}
+
+func TestDelegatedInstallerLiveCodexInstallSucceedsWithoutAgentbus(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateHome := filepath.Join(home, "state")
+	delegateState := filepath.Join(stateHome, "delegate")
+	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "codex", "--json", "--install-root", home}, []string{
+		"HOME=" + home,
+		"XDG_STATE_HOME=" + stateHome,
+		"PATH=" + t.TempDir() + string(os.PathListSeparator) + "/bin:/usr/bin",
+	})
+	if !containsInstallerWarning(installed.Warnings, "agentbus configure-codex-sandbox --writable-root "+delegateState) {
+		t.Fatalf("install warnings = %#v, want remediation command for missing agentbus", installed.Warnings)
 	}
 }
 
@@ -225,70 +245,6 @@ func TestDelegatedInstallerPlanShowsLegacyRemovals(t *testing.T) {
 		if !found {
 			t.Fatalf("plan did not identify retired removal %q: %#v", retired, removed)
 		}
-	}
-}
-
-func TestDelegatedInstallerLiveCodexInstallConfiguresSandbox(t *testing.T) {
-	home := t.TempDir()
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	codexHome := filepath.Join(home, "codex-home")
-	stateHome := filepath.Join(home, "state")
-	gocache := privateTmpDir(t, "delegate-gocache-*")
-	gomodcache := privateTmpDir(t, "delegate-gomodcache-*")
-	warmDelegateModuleCache(t, gomodcache, gocache)
-	env := []string{
-		"HOME=" + home,
-		"CODEX_HOME=" + codexHome,
-		"XDG_STATE_HOME=" + stateHome,
-		"GOCACHE=" + gocache,
-		"GOMODCACHE=" + gomodcache,
-		"GOPROXY=off",
-		"GOSUMDB=off",
-		"GOFLAGS=-modcacherw",
-	}
-
-	installed := runDelegatedInstallerScript(t, []string{"--install", "--target", "codex", "--json"}, env)
-	if !containsInstallerWarning(installed.Warnings, "codex sandbox writable_roots configured") {
-		t.Fatalf("install warnings = %#v, want configured sandbox", installed.Warnings)
-	}
-	liveSkillPath := filepath.Join(codexHome, "skills", "delegate", "SKILL.md")
-	if files := installed.Targets["codex"].Files; len(files) != 1 || files[0].Path != liveSkillPath {
-		t.Fatalf("live codex files = %#v, want %q", files, liveSkillPath)
-	}
-	if _, err := os.Stat(liveSkillPath); err != nil {
-		t.Fatalf("live codex skill missing at %q: %v", liveSkillPath, err)
-	}
-	configPath := filepath.Join(codexHome, "config.toml")
-	raw, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed, err := decodeCodexSandboxConfig(raw)
-	if err != nil {
-		t.Fatalf("configured config does not parse: %v\n%s", err, raw)
-	}
-	agentbusRoot, err := canonicalizeAgentbusStateRoot("test agentbus root", filepath.Join(stateHome, "agentbus"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantRoots := []string{agentbusRoot, filepath.Join(stateHome, "delegate")}
-	if !allWritableRootsPresent(parsed.SandboxWorkspaceWrite.WritableRoots, wantRoots) {
-		t.Fatalf("writable roots = %#v, want %#v", parsed.SandboxWorkspaceWrite.WritableRoots, wantRoots)
-	}
-
-	beforeUninstall := append([]byte(nil), raw...)
-	uninstalled := runDelegatedInstallerScript(t, []string{"--uninstall", "--target", "codex", "--json"}, env)
-	if !containsInstallerWarning(uninstalled.Warnings, "entries left in place") {
-		t.Fatalf("uninstall warnings = %#v, want leave-in-place note", uninstalled.Warnings)
-	}
-	afterUninstall, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(afterUninstall) != string(beforeUninstall) {
-		t.Fatal("uninstall changed Codex sandbox configuration")
 	}
 }
 

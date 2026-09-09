@@ -81,17 +81,6 @@ func resolveAgentbusStateRoot() (string, error) {
 	return resolveAgentbusStateRootFrom(os.Getenv, os.UserHomeDir)
 }
 
-func resolveAgentbusUserCacheRootFrom(userCacheDir func() (string, error)) (string, error) {
-	cacheDir, err := userCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user cache dir for Agentbus autostart locks: %w", err)
-	}
-	if cacheDir == "" {
-		return "", errors.New("user cache directory is empty")
-	}
-	return canonicalizeAgentbusStateRoot("user cache directory", filepath.Join(cacheDir, "agentbus"))
-}
-
 func resolveAgentbusStateRootFrom(env func(string) string, userHomeDir func() (string, error)) (string, error) {
 	if root := env("AGENTBUS_STATE_ROOT"); root != "" {
 		return canonicalizeAgentbusStateRoot("AGENTBUS_STATE_ROOT", root)

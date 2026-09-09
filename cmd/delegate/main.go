@@ -32,9 +32,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "adversarial-review":
 		code, err := runReview(adversarialReviewKind, args[1:], stdout, stderr)
 		return finishCommand(code, err, stderr)
-	case "configure-codex-sandbox":
-		code, err := runConfigureCodexSandbox(args[1:], stdout, stderr)
-		return finishCommand(code, err, stderr)
 	}
 	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
 		printUsage(stdout)
