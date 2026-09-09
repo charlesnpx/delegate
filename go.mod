@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/charlesnpx/agentbus v0.15.0
-	github.com/charlesnpx/witness v0.7.0
+	github.com/charlesnpx/witness v0.8.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 )
 

@@ -126,11 +126,11 @@ For `status --job` and `result`, exit code `2` means the job is still running. A
 
 ## Worker sandbox rules
 
-With `--write`, workspace-write access only inside its `--cwd` and no network are Codex-specific guarantees; enforcement depends on the selected Agentbus backend: Claude runs without a filesystem or network sandbox, and Cursor uses agent-mode permissions. For Go builds, set `GOCACHE` inside `--cwd` and leave `GOMODCACHE` at its default.
+With `--write`, workspace-write access only inside its `--cwd` and no network are Codex-specific guarantees; enforcement depends on the selected Agentbus backend: Claude runs without a filesystem or network sandbox, and Cursor uses agent-mode permissions. For Go builds, set `GOCACHE` under `/tmp` and leave it out of the reviewed workspace; leave `GOMODCACHE` at its default.
 
 ## Review commands
 
-Today `review` delegates a sanitized code review and `adversarial-review` delegates a refute-first review; both also support contract mode with caller-frozen `--request-file`, `--artifact-file`, and `--charter-file` inputs against the shared review contract and return the submit-receipt shape.
+Today `review` delegates a sanitized code review and `adversarial-review` delegates a refute-first review. Both support the caller-frozen contract inputs `--request-file`, `--artifact-file`, and `--charter-file`. A v1 request produces a schema-bound `review-report-v1`; a v2 request additionally takes `--reviewer <identifier>`, selects that identifier from the frozen recipe's `required_outputs`, and produces a recipe-bound `review-report-v2` with request, recipe, and reviewer constants in its output schema.
 
 Contract mode submits the caller's frozen bytes verbatim: Delegate does not run its secret-path, history, or content redaction on them, so screening is the caller's responsibility. Resubmitting the same request file from the same canonical `--cwd` replays the same job (`deduplicated: true`) instead of paying for a second review.
 
