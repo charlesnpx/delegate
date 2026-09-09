@@ -125,7 +125,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	}
 	if contractMode {
 		if contractInput.SchemaVersion == reviewcontract.ReviewRequestV2 {
-			prompt, err = reviewpkg.ComposeContractPromptV2(kind, contractInput.Recipe.Instructions, contractInput.FrozenRecipe, contractInput.RequestDigest, contractInput.RecipeDigest, contractInput.Reviewer, contractCharterHash, contractReviewInputDigest)
+			prompt, err = reviewpkg.ComposeContractPromptV2(kind, contractInput.Recipe.Instructions, contractInput.FrozenRecipe, contractInput.RequestDigest, contractInput.RecipeDigest, contractInput.Reviewer, contractCharterHash, contractReviewInputDigest, contractInput.ConsumerIdentity)
 		} else {
 			prompt, err = reviewpkg.ComposeContractPrompt(kind, contractCharterHash, contractReviewInputDigest)
 		}

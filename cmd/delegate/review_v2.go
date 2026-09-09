@@ -1,10 +1,7 @@
 package main
 
 import (
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"strings"
 
 	"github.com/charlesnpx/witness/contract/charter"
 	reviewcontract "github.com/charlesnpx/witness/contract/review"
@@ -15,28 +12,8 @@ import (
 // identifiers remain data, so adding one to a recipe does not require a code
 // change here.
 func reviewReportV2Schema(frozen charter.FrozenCharter, requestDigest, recipeDigest, reviewer, reviewInputDigest string, consumer reviewcontract.Identity) (json.RawMessage, error) {
-	for field, value := range map[string]string{
-		"request_digest":      requestDigest,
-		"recipe_digest":       recipeDigest,
-		"charter_hash":        frozen.CharterHash,
-		"review_input_digest": reviewInputDigest,
-	} {
-		if !validReviewDigest(value) {
-			return nil, fmt.Errorf("%s must be a sha256 digest", field)
-		}
-	}
-	if !validReviewStableID(reviewer) {
-		return nil, fmt.Errorf("reviewer must be a non-empty stable identifier")
-	}
-	if strings.TrimSpace(consumer.Kind) == "" || strings.TrimSpace(consumer.ID) == "" {
-		return nil, fmt.Errorf("consumer identity requires a non-empty kind and id")
-	}
-
 	goalIDs := make([]string, len(frozen.Charter.Goals))
 	for index, goal := range frozen.Charter.Goals {
-		if !validReviewStableID(goal.ID) {
-			return nil, fmt.Errorf("frozen charter goal %d has an invalid ID", index)
-		}
 		goalIDs[index] = goal.ID
 	}
 
@@ -219,28 +196,4 @@ func reviewMissingGoalQuestionsSchema() map[string]any {
 			"additionalProperties": false,
 		},
 	}
-}
-
-func validReviewDigest(value string) bool {
-	const digestLength = len("sha256:") + 64
-	if len(value) != digestLength || !strings.HasPrefix(value, "sha256:") {
-		return false
-	}
-	_, err := hex.DecodeString(value[len("sha256:"):])
-	return err == nil
-}
-
-func validReviewStableID(value string) bool {
-	if value == "" {
-		return false
-	}
-	for index, char := range value {
-		if (char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
-			continue
-		}
-		if index == 0 || !strings.ContainsRune("._:-", char) {
-			return false
-		}
-	}
-	return true
 }

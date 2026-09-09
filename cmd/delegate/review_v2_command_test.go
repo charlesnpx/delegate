@@ -79,6 +79,8 @@ func TestContractReviewV2BindsSubmittedSchemaAndPrompt(t *testing.T) {
 		fixture.recipeDigest,
 		fixture.reviewers[0],
 		"EXACTLY ONE review-report-v2 JSON object",
+		`consumer_identity must be {"kind":"delegate","id":"delegate-contract-v2-test"}`,
+		"source_identity must be an object with non-empty kind and id",
 	} {
 		if !strings.Contains(spec.Prompt, want) {
 			t.Fatalf("v2 prompt missing %q:\n%s", want, spec.Prompt)

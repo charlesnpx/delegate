@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -559,7 +560,7 @@ func ComposeContractPrompt(kind, charterHash, reviewInputDigest string) (string,
 // ComposeContractPromptV2 builds the recipe-bound exact-input review
 // instruction. The recipe instructions and JSON are supplied by the caller's
 // validated request and are carried without screening or interpretation here.
-func ComposeContractPromptV2(kind, instructions string, frozenRecipe []byte, requestDigest, recipeDigest, reviewer, charterHash, reviewInputDigest string) (string, error) {
+func ComposeContractPromptV2(kind, instructions string, frozenRecipe []byte, requestDigest, recipeDigest, reviewer, charterHash, reviewInputDigest string, consumer reviewcontract.Identity) (string, error) {
 	if kind != KindReview && kind != KindAdversarialReview {
 		return "", fmt.Errorf("unsupported review kind %q", kind)
 	}
@@ -568,6 +569,10 @@ func ComposeContractPromptV2(kind, instructions string, frozenRecipe []byte, req
 	}
 	if strings.TrimSpace(reviewer) == "" {
 		return "", fmt.Errorf("reviewer identifier is empty")
+	}
+	consumerIdentity, err := json.Marshal(consumer)
+	if err != nil {
+		return "", fmt.Errorf("marshal consumer identity: %w", err)
 	}
 	var prompt strings.Builder
 	prompt.WriteString("Perform a read-only code review. Do not modify files, apply fixes, commit, or change repository state.\n")
@@ -593,7 +598,7 @@ func ComposeContractPromptV2(kind, instructions string, frozenRecipe []byte, req
 		}
 		prompt.WriteString("--- END FROZEN RECIPE JSON ---\n")
 	}
-	prompt.WriteString("Emit EXACTLY ONE review-report-v2 JSON object and nothing else. Its request_digest must be " + strconv.Quote(requestDigest) + ", recipe_digest must be " + strconv.Quote(recipeDigest) + ", reviewer must be " + strconv.Quote(reviewer) + ", charter_hash must be " + strconv.Quote(charterHash) + ", and review_input_digest must be " + strconv.Quote(reviewInputDigest) + ". The output schema supplies the remaining report contract and consumer binding.\n")
+	prompt.WriteString("Emit EXACTLY ONE review-report-v2 JSON object and nothing else. Its request_digest must be " + strconv.Quote(requestDigest) + ", recipe_digest must be " + strconv.Quote(recipeDigest) + ", reviewer must be " + strconv.Quote(reviewer) + ", charter_hash must be " + strconv.Quote(charterHash) + ", and review_input_digest must be " + strconv.Quote(reviewInputDigest) + ". Its consumer_identity must be " + string(consumerIdentity) + ". Its source_identity must be an object with non-empty kind and id.\n")
 	return prompt.String(), nil
 }
 
