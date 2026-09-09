@@ -20,17 +20,18 @@ import (
 // taskOptions contains the public task surface. Review supplies CWD and
 // LogicalWorkspace directly so it can share the same one-shot admission path.
 type taskOptions struct {
-	Backend     string
-	CWD         string
-	Write       bool
-	Model       string
-	Effort      string
-	Timeout     time.Duration
-	PromptFile  string
-	SchemaFile  string
-	RequestID   string
-	ResumeJobID string
-	Tags        map[string]string
+	Backend       string
+	CWD           string
+	Write         bool
+	Model         string
+	Effort        string
+	Timeout       time.Duration
+	PromptFile    string
+	SchemaFile    string
+	RequestID     string
+	ResumeJobID   string
+	RetainSession bool
+	Tags          map[string]string
 
 	LogicalWorkspace string
 	WorkspaceKey     string
@@ -158,6 +159,7 @@ func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
 	fs.StringVar(&opts.SchemaFile, "schema-file", "", "read optional JSON Schema output contract from file")
 	fs.StringVar(&opts.RequestID, "request-id", "", "caller-owned request identity")
 	fs.StringVar(&opts.ResumeJobID, "resume", "", "resume a prior job; creates a new job with a fresh deadline")
+	fs.BoolVar(&opts.RetainSession, "retain-session", false, "keep the backend session after completion so this job can be resumed; the session directory is left in place until removed")
 	fs.Var(&tags, "tag", "task tag in key=value form (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return taskOptions{}, err
@@ -301,16 +303,17 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema js
 		WorkspaceKey: workspaceKey,
 		RequestID:    opts.RequestID,
 		TaskSpec: client.TaskSpec{
-			Backend:      opts.Backend,
-			CWD:          opts.CWD,
-			Write:        opts.Write,
-			ResumeJobID:  opts.ResumeJobID,
-			Model:        optionalTaskSpecString(opts.Model),
-			Effort:       optionalTaskSpecString(opts.Effort),
-			Prompt:       prompt,
-			OutputSchema: append(json.RawMessage(nil), schema...),
-			Tags:         optionalTaskSpecTags(opts.Tags),
-			TimeoutMS:    timeoutMillis(opts.Timeout),
+			Backend:       opts.Backend,
+			CWD:           opts.CWD,
+			Write:         opts.Write,
+			ResumeJobID:   opts.ResumeJobID,
+			RetainSession: opts.RetainSession,
+			Model:         optionalTaskSpecString(opts.Model),
+			Effort:        optionalTaskSpecString(opts.Effort),
+			Prompt:        prompt,
+			OutputSchema:  append(json.RawMessage(nil), schema...),
+			Tags:          optionalTaskSpecTags(opts.Tags),
+			TimeoutMS:     timeoutMillis(opts.Timeout),
 		},
 	}
 	submitted, err := c.JobSubmit(ctx, params)

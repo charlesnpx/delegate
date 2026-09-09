@@ -13,11 +13,23 @@ printf '%s' "$PROMPT" | delegate task --backend <name> --cwd <abs> --prompt-file
 
 `--prompt-file -` reads the prompt from stdin. The submit receipt is JSON on stdout; notices and errors go to stderr.
 
-Task flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, and `--tag`. `--resume <jobId>`: resume a prior job; creates a new job with a fresh deadline.
+Task flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, and `--tag`. `--resume <jobId>` resumes a prior job and creates a new job with a fresh deadline. `--retain-session` keeps the backend session after completion so this job can be resumed; the session directory is left in place until removed.
+
+Continue the same backend conversation in two steps:
+
+```sh
+# submit, keeping the session for a follow-up
+printf '%s' "$PROMPT" | delegate task --backend codex --retain-session --cwd <abs> --prompt-file -
+
+# read the result, then continue the same conversation
+printf '%s' "$FOLLOWUP" | delegate task --backend codex --resume <jobId> --cwd <abs> --prompt-file -
+```
+
+Without `--retain-session`, a completed job cannot be resumed. This is not a bug; the session is cleaned up when the job completes. `--resume` creates a new job with a fresh deadline and its own result; the original job's result is unchanged and remains final. A retained session directory stays on disk until an operator removes it. `--retain-session` is accepted only by `delegate task`; the review commands are schema/report workflows, not conversations to continue.
 
 Contract mode for `delegate review` and `delegate adversarial-review` uses `--request-file <request.json> --artifact-file <review.patch> --charter-file <charter.json>`; the command returns the asynchronous submit receipt, its schema-enforced `review-report-v1` result is later available through `agentbus result --job <id> --json`, and Delegate does not run secret-path, history, or content redaction on those caller-frozen inputs, so callers are responsible for screening them.
 
-Submission is asynchronous. After an ambiguous submission, reuse the same `--request-id` and run from the same canonical `--cwd` (the replay key is their pair); a replay returns `deduplicated: true` and the original job ID. Observe a job with Agentbus:
+Submission is asynchronous. After an ambiguous submission, reuse the same `--request-id` and run from the same canonical `--cwd` (the replay key is their pair); a replay returns `deduplicated: true` and the original job ID. The immutable task specification is hashed too, so enabling `--retain-session` is a different replay identity, while omitting it preserves existing replay behavior. Observe a job with Agentbus:
 
 ```sh
 agentbus status --job <id> --json

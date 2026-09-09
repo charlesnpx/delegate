@@ -29,7 +29,7 @@ delegate version [--json]
 
 delegate task --backend <name> [--cwd <abs>] [--write] [--model <model>] [--effort <effort>]
               [--timeout <duration>] --prompt-file <path|-> [--schema-file <path>]
-              [--request-id <id>] [--resume <jobId>] [--tag <key=value>]...
+              [--request-id <id>] [--resume <jobId>] [--retain-session] [--tag <key=value>]...
 
 delegate review --backend <name> [--cwd <abs>] [--base <ref>]
                 [--scope auto|working-tree|branch] [--allow-live-repo-read]
@@ -42,9 +42,23 @@ delegate adversarial-review --backend <name> [--cwd <abs>] [--base <ref>]
 
 `version` prints the installed Delegate version; `--version`, `-version`, and `-V` are equivalent aliases. `--json` makes `version` emit an object with its `version` field.
 
-`task` needs `--backend` and `--prompt-file`. Its eleven flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, and `--tag`. `--cwd` must be absolute when supplied; otherwise the current directory is used. `--prompt-file -` reads the prompt from standard input, `--schema-file` supplies an optional JSON Schema output contract, and `--tag key=value` can be repeated. `--timeout 0` leaves the deadline to Agentbus's default.
+`task` needs `--backend` and `--prompt-file`. Its twelve flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, and `--tag`. `--cwd` must be absolute when supplied; otherwise the current directory is used. `--prompt-file -` reads the prompt from standard input, `--schema-file` supplies an optional JSON Schema output contract, and `--tag key=value` can be repeated. `--timeout 0` leaves the deadline to Agentbus's default.
 
 `task` and `review` accept `--resume <jobId>` to continue a prior backend thread. A resume creates a new job with a fresh deadline; it does not extend the named job. Agentbus validates the resume target, and changing `--resume` while reusing an explicit `--request-id` returns Agentbus's conflict response.
+
+`--retain-session` is accepted only by `task`. It keeps the backend session after completion so the job can be resumed; the session directory is left in place until an operator removes it. Without `--retain-session`, a completed job cannot be resumed: its session is cleaned up when the job completes. `--resume` creates a new job with a fresh deadline and its own result; the original job's result is unchanged and remains final.
+
+Continue the same backend conversation in two steps:
+
+```sh
+# submit, keeping the session for a follow-up
+printf '%s' "$PROMPT" | delegate task --backend codex --retain-session --cwd <abs> --prompt-file -
+
+# read the result, then continue the same conversation
+printf '%s' "$FOLLOWUP" | delegate task --backend codex --resume <jobId> --cwd <abs> --prompt-file -
+```
+
+The retained session directory stays on disk until an operator removes it.
 
 For example, submit a prompt without placing it in the process arguments:
 
@@ -78,7 +92,7 @@ Each successful `task`, `review`, or `adversarial-review` submission writes one 
 
 `model` and `effort` are omitted when their flags were not supplied. The timeout values are Agentbus's returned values, not a local interpretation. `workspaceKey` lets an operator scope Agentbus status queries to the workspace that submitted the job with `agentbus status --workspace-key <key>`.
 
-For replay safety, Agentbus's replay key is the pair of request ID and working directory: after an ambiguous submission, reuse that exact `--request-id` and run against the same working directory. If it has already been accepted, the replay receipt has `deduplicated: true` and carries the original job ID. Without the flag, Delegate generates an ID and includes it in the receipt. That is convenient for a normal one-off invocation, but it has a deliberate trade-off: if a manually run command is hard-killed before its generated receipt is visible, Delegate has not retained that generated ID for a later replay. Use an explicit request ID whenever replay matters.
+For replay safety, Agentbus's replay key is the pair of request ID and working directory: after an ambiguous submission, reuse that exact `--request-id` and run against the same working directory. If it has already been accepted, the replay receipt has `deduplicated: true` and carries the original job ID. Agentbus also hashes the immutable task specification, so enabling `--retain-session` changes the replay identity and is a conflict rather than a replay; leaving it absent preserves the existing hash. Without the flag, Delegate generates an ID and includes it in the receipt. That is convenient for a normal one-off invocation, but it has a deliberate trade-off: if a manually run command is hard-killed before its generated receipt is visible, Delegate has not retained that generated ID for a later replay. Use an explicit request ID whenever replay matters.
 
 ## Observe jobs with Agentbus
 

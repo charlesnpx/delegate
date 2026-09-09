@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/charlesnpx/agentbus v0.13.1
+	github.com/charlesnpx/agentbus v0.14.5-0.20260909061133-8f4147a4f27f
 	github.com/charlesnpx/witness v0.7.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 )
