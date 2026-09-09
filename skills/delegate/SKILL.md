@@ -27,7 +27,38 @@ printf '%s' "$FOLLOWUP" | delegate task --backend codex --resume <jobId> --cwd <
 
 Without `--retain-session`, a completed job cannot be resumed. This is not a bug; the session is cleaned up when the job completes. `--resume` creates a new job with a fresh deadline and its own result; the original job's result is unchanged and remains final. A retained session directory stays on disk until an operator removes it. `--retain-session` is accepted only by `delegate task`; the review commands are schema/report workflows, not conversations to continue.
 
-Contract mode for `delegate review` and `delegate adversarial-review` uses `--request-file <request.json> --artifact-file <review.patch> --charter-file <charter.json>`; the command returns the asynchronous submit receipt, its schema-enforced `review-report-v1` result is later available through `agentbus result --job <id> --json`, and Delegate does not run secret-path, history, or content redaction on those caller-frozen inputs, so callers are responsible for screening them.
+Contract mode has two request forms. The v1 request/artifact form uses
+`--request-file <review-request-v1.json> --artifact-file <review.patch>
+--charter-file <charter.json>`; the separate charter file is still required.
+It returns an asynchronous submit receipt whose schema-enforced
+`review-report-v1` result is later available through
+`agentbus result --job <id> --json`; v1 has no `--reviewer` selection.
+
+The v2 form uses the same three files plus
+`--reviewer <identifier>`:
+
+```sh
+delegate review --backend <name> --cwd <abs> \
+  --request-file <review-request-v2.json> \
+  --artifact-file <review.patch> --charter-file <charter.json> \
+  --reviewer <declared-reviewer>
+```
+
+Delegate detects the form from the request document's `schema_version`. The
+selected reviewer must occur in the request's frozen recipe
+`required_outputs`; an undeclared identifier is refused. The submitted v2
+schema binds `request_digest`, `recipe_digest`, `reviewer`, `charter_hash`,
+`review_input_digest`, and the requesting consumer identity. The prompt carries
+the frozen recipe instructions verbatim, so reviewer names are open data rather
+than a Delegate registry. The v2 result is a `review-report-v2` object and is
+later read by the host through Agentbus.
+
+Both forms carry caller-frozen request, artifact, and charter inputs verbatim.
+Delegate does not run secret-path, history, or content redaction on them, so
+callers are responsible for screening them. Delegate only submits and returns
+the receipt; it does not wait, poll, fetch a result, or construct a completion
+document. A v2 submission's replay identity includes its reviewer, so separate
+reviewers from one recipe are separate tasks.
 
 Submission is asynchronous. After an ambiguous submission, reuse the same `--request-id` and run from the same canonical `--cwd` (the replay key is their pair); a replay returns `deduplicated: true` and the original job ID. The immutable task specification is hashed too, so enabling `--retain-session` is a different replay identity, while omitting it preserves existing replay behavior. Observe a job with Agentbus:
 
@@ -45,4 +76,4 @@ Without `--job`, `status` lists summaries from every workspace unless filtered. 
 
 For a selected job, `status`/`result` exit with the job-state code, not a command success/failure code: 0=completed, 2=queued/running, 3=completed-noncompliant, 4=failed, 5=timeout, 6=interrupted, 7=canceled, 14=unknown, and 15=result-artifact-unavailable (completed, but its artifact is unavailable). Codes 10=unknown-job, 11=daemon-startup-failure, and 13=shutdown-deadline are CLI/daemon failures. A listing exits 0 once printed, regardless of member states.
 
-With `--write`, workspace-write access only inside its `--cwd` and no network are Codex-specific guarantees; enforcement depends on the selected Agentbus backend: Claude runs without a filesystem or network sandbox, and Cursor uses agent-mode permissions. For Go builds, set `GOCACHE` inside `--cwd` and leave `GOMODCACHE` at its default.
+With `--write`, workspace-write access only inside its `--cwd` and no network are Codex-specific guarantees; enforcement depends on the selected Agentbus backend: Claude runs without a filesystem or network sandbox, and Cursor uses agent-mode permissions. For Go builds, set `GOCACHE` under `/tmp` and leave it out of the reviewed workspace; leave `GOMODCACHE` at its default.

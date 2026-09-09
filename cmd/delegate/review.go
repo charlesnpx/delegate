@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -38,6 +39,7 @@ type reviewOptions struct {
 	RequestFile       string
 	ArtifactFile      string
 	CharterFile       string
+	Reviewer          string
 }
 
 type contractReviewInput struct {
@@ -47,6 +49,11 @@ type contractReviewInput struct {
 	RequestDigest     string
 	ReviewInputDigest string
 	ConsumerIdentity  reviewcontract.Identity
+	SchemaVersion     string
+	Recipe            reviewcontract.ReviewRecipe
+	FrozenRecipe      json.RawMessage
+	RecipeDigest      string
+	Reviewer          string
 }
 
 func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error) {
@@ -62,12 +69,13 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	var prompt string
 	contractCharterHash := ""
 	contractReviewInputDigest := ""
+	var contractInput contractReviewInput
 	if contractMode {
-		input, err := loadContractReviewInput(opts)
+		contractInput, err = loadContractReviewInput(opts)
 		if err != nil {
 			return 0, err
 		}
-		taskOpts.RequestID, err = contractReviewRequestID(input.RequestDigest, opts.ResumeJobID)
+		taskOpts.RequestID, err = contractReviewRequestID(contractInput.RequestDigest, contractInput.Reviewer, opts.ResumeJobID)
 		if err != nil {
 			return 0, err
 		}
@@ -75,20 +83,27 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		if err != nil {
 			return 0, err
 		}
-		schema, err = reviewcontract.DefaultReviewerSchema(input.FrozenCharter, input.ReviewInputDigest, input.ConsumerIdentity)
-		if err != nil {
-			return 0, fmt.Errorf("build review-report-v1 schema: %w", err)
+		if contractInput.SchemaVersion == reviewcontract.ReviewRequestV2 {
+			schema, err = reviewReportV2Schema(contractInput.FrozenCharter, contractInput.RequestDigest, contractInput.RecipeDigest, contractInput.Reviewer, contractInput.ReviewInputDigest, contractInput.ConsumerIdentity)
+			if err != nil {
+				return 0, fmt.Errorf("build review-report-v2 schema: %w", err)
+			}
+		} else {
+			schema, err = reviewcontract.DefaultReviewerSchema(contractInput.FrozenCharter, contractInput.ReviewInputDigest, contractInput.ConsumerIdentity)
+			if err != nil {
+				return 0, fmt.Errorf("build review-report-v1 schema: %w", err)
+			}
 		}
 		assembled, err = reviewpkg.PrepareContractWorkspace(reviewpkg.ContractWorkspaceOptions{
-			RequestDigest: input.RequestDigest,
-			Charter:       input.FrozenCharterJSON,
-			Artifact:      input.Artifact,
+			RequestDigest: contractInput.RequestDigest,
+			Charter:       contractInput.FrozenCharterJSON,
+			Artifact:      contractInput.Artifact,
 		})
 		if err != nil {
 			return 0, err
 		}
-		contractCharterHash = input.FrozenCharter.CharterHash
-		contractReviewInputDigest = input.ReviewInputDigest
+		contractCharterHash = contractInput.FrozenCharter.CharterHash
+		contractReviewInputDigest = contractInput.ReviewInputDigest
 	} else {
 		assembled, err = reviewpkg.Assemble(context.Background(), reviewpkg.Options{
 			CWD:               opts.CWD,
@@ -109,7 +124,11 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		}
 	}
 	if contractMode {
-		prompt, err = reviewpkg.ComposeContractPrompt(kind, contractCharterHash, contractReviewInputDigest)
+		if contractInput.SchemaVersion == reviewcontract.ReviewRequestV2 {
+			prompt, err = reviewpkg.ComposeContractPromptV2(kind, contractInput.Recipe.Instructions, contractInput.FrozenRecipe, contractInput.RequestDigest, contractInput.RecipeDigest, contractInput.Reviewer, contractCharterHash, contractReviewInputDigest)
+		} else {
+			prompt, err = reviewpkg.ComposeContractPrompt(kind, contractCharterHash, contractReviewInputDigest)
+		}
 	} else {
 		prompt, err = reviewpkg.ComposePrompt(kind, assembled)
 	}
@@ -189,9 +208,10 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	fs.StringVar(&opts.Base, "base", "", "comparison base ref")
 	fs.StringVar(&opts.Scope, "scope", reviewpkg.ScopeAuto, "review scope: auto combines branch and working-tree changes; or working-tree, branch")
 	fs.BoolVar(&opts.AllowLiveRepoRead, "allow-live-repo-read", false, "use live repository as backend cwd (makes backend file reads easier; does not prevent backend file reads)")
-	fs.StringVar(&opts.RequestFile, "request-file", "", "review-request-v1 file for exact-input contract mode")
+	fs.StringVar(&opts.RequestFile, "request-file", "", "review-request-v1 or review-request-v2 file for exact-input contract mode")
 	fs.StringVar(&opts.ArtifactFile, "artifact-file", "", "exact review artifact file for contract mode")
 	fs.StringVar(&opts.CharterFile, "charter-file", "", "review charter file for contract mode")
+	fs.StringVar(&opts.Reviewer, "reviewer", "", "reviewer identifier selected from a review-request-v2 recipe")
 	if err := fs.Parse(args); err != nil {
 		return reviewOptions{}, err
 	}
@@ -221,6 +241,8 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 				return reviewOptions{}, fmt.Errorf("--%s cannot be used with --request-file/--artifact-file/--charter-file contract mode", name)
 			}
 		}
+	} else if provided["reviewer"] {
+		return reviewOptions{}, fmt.Errorf("--reviewer requires --request-file contract mode")
 	}
 	if opts.Scope == reviewpkg.ScopeWorkingTree && opts.Base != "" {
 		return reviewOptions{}, fmt.Errorf("--base cannot be used with --scope working-tree")
@@ -252,16 +274,64 @@ func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
 	if err != nil {
 		return contractReviewInput{}, fmt.Errorf("read --request-file %q: %w", opts.RequestFile, err)
 	}
-	request, err := reviewcontract.DecodeAndValidateReviewRequest(requestData)
+	schemaVersion, err := reviewRequestSchemaVersion(requestData)
 	if err != nil {
-		return contractReviewInput{}, fmt.Errorf("validate --request-file %q: %w", opts.RequestFile, err)
+		return contractReviewInput{}, fmt.Errorf("detect schema_version in --request-file %q: %w", opts.RequestFile, err)
 	}
-	requestDigest, err := reviewcontract.ReviewRequestDigest(request)
-	if err != nil {
-		return contractReviewInput{}, fmt.Errorf("digest --request-file %q: %w", opts.RequestFile, err)
+
+	input := contractReviewInput{SchemaVersion: schemaVersion}
+	requestCharterHash := ""
+	requestReviewInputDigest := ""
+	switch schemaVersion {
+	case reviewcontract.ReviewRequestV1:
+		if opts.Reviewer != "" {
+			return contractReviewInput{}, fmt.Errorf("--reviewer is only valid for review-request-v2; review-request-v1 has no reviewers")
+		}
+		request, decodeErr := reviewcontract.DecodeAndValidateReviewRequest(requestData)
+		if decodeErr != nil {
+			return contractReviewInput{}, fmt.Errorf("validate --request-file %q: %w", opts.RequestFile, decodeErr)
+		}
+		input.RequestDigest, err = reviewcontract.ReviewRequestDigest(request)
+		if err != nil {
+			return contractReviewInput{}, fmt.Errorf("digest --request-file %q: %w", opts.RequestFile, err)
+		}
+		input.ReviewInputDigest = request.ReviewInputDigest
+		input.ConsumerIdentity = request.ConsumerIdentity
+		requestCharterHash = request.CharterHash
+		requestReviewInputDigest = request.ReviewInputDigest
+	case reviewcontract.ReviewRequestV2:
+		request, decodeErr := reviewcontract.DecodeAndValidateReviewRequestV2(requestData)
+		if decodeErr != nil {
+			return contractReviewInput{}, fmt.Errorf("validate --request-file %q: %w", opts.RequestFile, decodeErr)
+		}
+		if opts.Reviewer == "" {
+			return contractReviewInput{}, fmt.Errorf("review-request-v2 requires --reviewer; declared reviewers: %s", declaredReviewers(request.RequiredOutputs))
+		}
+		if !containsReviewer(request.RequiredOutputs, opts.Reviewer) {
+			return contractReviewInput{}, fmt.Errorf("reviewer %q is not declared by review-request-v2; declared reviewers: %s", opts.Reviewer, declaredReviewers(request.RequiredOutputs))
+		}
+		recipe, recipeErr := reviewcontract.ReviewRequestV2Recipe(request)
+		if recipeErr != nil {
+			return contractReviewInput{}, fmt.Errorf("decode frozen recipe in --request-file %q: %w", opts.RequestFile, recipeErr)
+		}
+		input.RequestDigest, err = reviewcontract.ReviewRequestV2Digest(request)
+		if err != nil {
+			return contractReviewInput{}, fmt.Errorf("digest --request-file %q: %w", opts.RequestFile, err)
+		}
+		input.ReviewInputDigest = request.ReviewInputDigest
+		input.ConsumerIdentity = request.ConsumerIdentity
+		input.Recipe = recipe
+		input.FrozenRecipe = append(json.RawMessage(nil), request.FrozenRecipe...)
+		input.RecipeDigest = request.RecipeDigest
+		input.Reviewer = opts.Reviewer
+		requestCharterHash = request.CharterHash
+		requestReviewInputDigest = request.ReviewInputDigest
+	default:
+		return contractReviewInput{}, fmt.Errorf("unsupported review request schema_version %q; expected %q or %q", schemaVersion, reviewcontract.ReviewRequestV1, reviewcontract.ReviewRequestV2)
 	}
-	if request.CharterHash != frozen.CharterHash {
-		return contractReviewInput{}, fmt.Errorf("review request charter hash mismatch: request %s does not match frozen charter %s", request.CharterHash, frozen.CharterHash)
+
+	if requestCharterHash != frozen.CharterHash {
+		return contractReviewInput{}, fmt.Errorf("review request charter hash mismatch: request %s does not match frozen charter %s", requestCharterHash, frozen.CharterHash)
 	}
 
 	artifact, err := readContractReviewArtifact(opts.ArtifactFile)
@@ -270,8 +340,8 @@ func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
 	}
 	sum := sha256.Sum256(artifact)
 	artifactDigest := "sha256:" + hex.EncodeToString(sum[:])
-	if artifactDigest != request.ReviewInputDigest {
-		return contractReviewInput{}, fmt.Errorf("review artifact digest mismatch: got %s, request review_input_digest is %s", artifactDigest, request.ReviewInputDigest)
+	if artifactDigest != requestReviewInputDigest {
+		return contractReviewInput{}, fmt.Errorf("review artifact digest mismatch: got %s, request review_input_digest is %s", artifactDigest, requestReviewInputDigest)
 	}
 
 	frozenJSON, err := json.Marshal(frozen)
@@ -282,18 +352,56 @@ func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
 		FrozenCharter:     frozen,
 		FrozenCharterJSON: frozenJSON,
 		Artifact:          artifact,
-		RequestDigest:     requestDigest,
-		ReviewInputDigest: request.ReviewInputDigest,
-		ConsumerIdentity:  request.ConsumerIdentity,
+		RequestDigest:     input.RequestDigest,
+		ReviewInputDigest: input.ReviewInputDigest,
+		ConsumerIdentity:  input.ConsumerIdentity,
+		SchemaVersion:     input.SchemaVersion,
+		Recipe:            input.Recipe,
+		FrozenRecipe:      input.FrozenRecipe,
+		RecipeDigest:      input.RecipeDigest,
+		Reviewer:          input.Reviewer,
 	}, nil
+}
+
+func reviewRequestSchemaVersion(data []byte) (string, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return "", err
+	}
+	raw, ok := envelope["schema_version"]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", fmt.Errorf("request schema_version is required")
+	}
+	var schemaVersion string
+	if err := json.Unmarshal(raw, &schemaVersion); err != nil {
+		return "", fmt.Errorf("request schema_version must be a string: %w", err)
+	}
+	if schemaVersion == "" {
+		return "", fmt.Errorf("request schema_version must be non-empty")
+	}
+	return schemaVersion, nil
+}
+
+func containsReviewer(declared []string, reviewer string) bool {
+	for _, candidate := range declared {
+		if candidate == reviewer {
+			return true
+		}
+	}
+	return false
+}
+
+func declaredReviewers(declared []string) string {
+	return strings.Join(declared, ", ")
 }
 
 // contractReviewRequestID derives a contract review's replay identity. A resume
 // is a distinct identity, because agentbus hashes the whole task spec and would
 // otherwise reject the resumed submission as a replay conflict before it ever
-// validated the resume target. It stays replay-stable: the same digest and the
-// same target always derive the same id.
-func contractReviewRequestID(requestDigest, resumeJobID string) (string, error) {
+// validated the resume target. It stays replay-stable: the same digest, reviewer,
+// and target always derive the same id. An empty reviewer is the v1 path and
+// deliberately retains its previous identity format.
+func contractReviewRequestID(requestDigest, reviewer, resumeJobID string) (string, error) {
 	const digestPrefix = "sha256:"
 	const digestHexLength = 64
 	const requestIDPrefix = "delegate-review-"
@@ -305,11 +413,18 @@ func contractReviewRequestID(requestDigest, resumeJobID string) (string, error) 
 	if _, err := hex.DecodeString(digestHex); err != nil {
 		return "", fmt.Errorf("invalid contract review request digest %q: %w", requestDigest, err)
 	}
-	if resumeJobID == "" {
+	if reviewer == "" && resumeJobID == "" {
 		return requestIDPrefix + digestHex[:32], nil
 	}
-	resumeIdentity := sha256.Sum256([]byte(requestDigest + "\x00" + resumeJobID))
-	return requestIDPrefix + hex.EncodeToString(resumeIdentity[:])[:32], nil
+	identity := requestDigest
+	if reviewer != "" {
+		identity += "\x00" + reviewer
+	}
+	if resumeJobID != "" {
+		identity += "\x00" + resumeJobID
+	}
+	requestIdentity := sha256.Sum256([]byte(identity))
+	return requestIDPrefix + hex.EncodeToString(requestIdentity[:])[:32], nil
 }
 
 func readContractReviewArtifact(path string) ([]byte, error) {
