@@ -3,7 +3,7 @@ module github.com/charlesnpx/delegate
 go 1.26
 
 require (
-	github.com/charlesnpx/agentbus v0.14.5-0.20260909061133-8f4147a4f27f
+	github.com/charlesnpx/agentbus v0.15.0
 	github.com/charlesnpx/witness v0.7.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 )
