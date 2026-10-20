@@ -74,6 +74,14 @@ printf '%s' "$FOLLOWUP" | delegate task --backend codex --resume <jobId> --cwd <
 
 The retained session directory stays on disk until an operator removes it.
 
+### Follow-up instructions while a job is running
+
+Neither Delegate nor Agentbus exposes live steering or a `send_input` command. Native subagent tools may support `send_input`, but a Delegate receipt's `jobId` identifies an Agentbus job, not a native subagent. Check the installed CLI's help or usage before assuming those tools share capabilities.
+
+When additional instructions arrive, keep the running job active and state that the instructions have not been delivered. `agentbus cancel` stops the job; it does not deliver instructions or schedule a follow-up. Use cancellation when the user requests stopping work.
+
+For a follow-up in the same conversation, wait until the job is terminal, read its result, and submit `delegate task --backend <same-backend> --resume <jobId>` with the follow-up prompt. Agentbus requires a retained session and a recorded backend session ID. Add `--retain-session` to each resumed task if further follow-ups will be needed. Completed jobs without retention cannot be resumed; submit a fresh task with the relevant context instead. Failed, canceled, and unknown terminal jobs retain their session directories, but still need a recorded backend session ID to resume. Cancellation alone does not guarantee resumability, and resumption always creates a new job.
+
 For example, submit a prompt without placing it in the process arguments:
 
 ```sh

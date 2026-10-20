@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Submit one asynchronous task through delegate.
+description: Submit asynchronous tasks through delegate and observe or continue them with Agentbus.
 ---
 
 # delegate
@@ -12,6 +12,16 @@ printf '%s' "$PROMPT" | delegate task --backend <name> --cwd <abs> --prompt-file
 ```
 
 `--prompt-file -` reads the prompt from stdin. The submit receipt is JSON on stdout; notices and errors go to stderr.
+
+## Follow-up instructions and job control
+
+Delegate and Agentbus do not expose live steering or a `send_input` command. Native subagent tools may support `send_input`, but that capability does not apply to jobs submitted through this CLI. Use the receipt's `jobId` with Agentbus; it is not a native subagent ID. Check `delegate --help`, `delegate task -h`, and Agentbus's usage output for the installed command surface before assuming a capability exists.
+
+When additional instructions arrive for a queued or running job, keep the job running and report that the instructions have not been delivered. `agentbus cancel` stops work; it does not send a message or arrange a follow-up. Cancel when the user requests stopping the job, not merely to add instructions.
+
+To deliver a follow-up in the same backend conversation, wait for the original job to become terminal, read its result, and submit a new task with `--resume <jobId>`. This requires a retained backend session, a recorded backend session ID, and the same backend. If the session is unavailable, submit a fresh task with the relevant context and additional instructions. A fresh task starts a separate conversation. Do not claim instructions were delivered until the follow-up submission is accepted.
+
+## Submit and continue tasks
 
 Task flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, and `--tag`. `--resume <jobId>` resumes a prior job and creates a new job with a fresh deadline. `--retain-session` keeps the backend session after completion so this job can be resumed; the session directory is left in place until removed.
 
@@ -26,6 +36,8 @@ printf '%s' "$FOLLOWUP" | delegate task --backend codex --resume <jobId> --cwd <
 ```
 
 Without `--retain-session`, a completed job cannot be resumed. This is not a bug; the session is cleaned up when the job completes. `--resume` creates a new job with a fresh deadline and its own result; the original job's result is unchanged and remains final. A retained session directory stays on disk until an operator removes it. `--retain-session` is accepted only by `delegate task`; the review commands are schema/report workflows, not conversations to continue.
+
+Add `--retain-session` to each resumed task too if another follow-up will be needed after it completes. Retention cannot be added retroactively to a completed job whose session was cleaned up. Failed, canceled, and unknown terminal jobs retain session directories, but resumption still requires a recorded backend session ID; cancellation alone does not guarantee resumability.
 
 Contract mode has two request forms. The v1 request/artifact form uses
 `--request-file <review-request-v1.json> --artifact-file <review.patch>
