@@ -1557,8 +1557,9 @@ func prepareFileContent(repoRoot string, files []changedFile, remaining int) ([]
 
 func redactSourceText(raw []byte) ([]byte, bool) {
 	text := string(raw)
-	redacted := RedactSecretLikeDiagnostic(text)
-	return []byte(redacted), redacted != text
+	withoutPrivateKeys, privateKeysRedacted := redactPEMPrivateKeyBlocks(text)
+	redacted := RedactSecretLikeDiagnostic(withoutPrivateKeys)
+	return []byte(redacted), privateKeysRedacted || redacted != text
 }
 
 func truncateUTF8(raw []byte, maxBytes int) []byte {
@@ -1620,6 +1621,8 @@ func partialSourceExcerpt(path string, diff []byte, maxBytes int) []byte {
 	var out bytes.Buffer
 	lineNo, rangeIndex := 0, 0
 	previousIncluded := false
+	activePrivateKeyLabel := ""
+	privateKeyMarkerEmitted := false
 	for scanner.Scan() {
 		lineNo++
 		for rangeIndex < len(merged) && lineNo > merged[rangeIndex].end {
@@ -1629,7 +1632,32 @@ func partialSourceExcerpt(path string, diff []byte, maxBytes int) []byte {
 			break
 		}
 		include := lineNo >= merged[rangeIndex].start && lineNo <= merged[rangeIndex].end
-		if !include {
+		line := scanner.Bytes()
+		if activePrivateKeyLabel != "" {
+			isEnd := isMatchingPrivateKeyEndLine(line, activePrivateKeyLabel)
+			if !include || privateKeyMarkerEmitted {
+				previousIncluded = include
+				if isEnd {
+					activePrivateKeyLabel = ""
+					privateKeyMarkerEmitted = false
+				}
+				continue
+			}
+			line = []byte(secretRedactionMarker)
+			privateKeyMarkerEmitted = true
+			if isEnd {
+				activePrivateKeyLabel = ""
+				privateKeyMarkerEmitted = false
+			}
+		} else if label, isBegin := privateKeyLabelFromBeginLine(line); isBegin {
+			activePrivateKeyLabel = label
+			privateKeyMarkerEmitted = include
+			if !include {
+				previousIncluded = false
+				continue
+			}
+			line = []byte(secretRedactionMarker)
+		} else if !include {
 			previousIncluded = false
 			continue
 		}
@@ -1639,7 +1667,6 @@ func partialSourceExcerpt(path string, diff []byte, maxBytes int) []byte {
 			}
 			out.WriteString("...\n")
 		}
-		line := scanner.Bytes()
 		prefix := []byte(fmt.Sprintf("%6d | ", lineNo))
 		remaining := maxBytes - out.Len()
 		if remaining <= len(prefix) {

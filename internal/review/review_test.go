@@ -643,6 +643,60 @@ func TestDirectPacketSuppliesBoundedSourceManifestAndCriteria(t *testing.T) {
 	}
 }
 
+func TestDirectPacketRedactsCompletePEMPrivateKeyBlock(t *testing.T) {
+	repo := newGitFixture(t)
+	const privateKeyBody = "PRIVATE_KEY_BODY_MUST_NOT_LEAK\nSECOND_PRIVATE_KEY_LINE_MUST_NOT_LEAK"
+	content := "ordinary-before\n-----BEGIN RSA PRIVATE KEY-----\n" + privateKeyBody + "\n-----END RSA PRIVATE KEY-----\nordinary-after\n"
+	writeFixtureFile(t, repo, "pem.txt", content)
+
+	assembled, err := Assemble(context.Background(), Options{
+		CWD:      repo,
+		Scope:    ScopeWorkingTree,
+		StateDir: filepath.Join(t.TempDir(), "state"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	packet := assembled.Inline
+	if assembled.ArtifactPath != "" {
+		raw, readErr := os.ReadFile(assembled.ArtifactPath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		packet = string(raw)
+	}
+	for _, want := range []string{"ordinary-before", secretRedactionMarker, "ordinary-after"} {
+		if !strings.Contains(packet, want) {
+			t.Fatalf("source context missing %q:\n%s", want, packet)
+		}
+	}
+	for _, secretLine := range strings.Split(privateKeyBody, "\n") {
+		if strings.Contains(packet, secretLine) {
+			t.Fatalf("source context leaked private-key body line %q:\n%s", secretLine, packet)
+		}
+	}
+	var manifestEntry *ManifestEntry
+	for i := range assembled.Manifest {
+		if assembled.Manifest[i].Path == "pem.txt" {
+			manifestEntry = &assembled.Manifest[i]
+			break
+		}
+	}
+	if manifestEntry == nil {
+		t.Fatal("manifest is missing the PEM source file")
+	}
+	if !strings.Contains(packet, `"path":"pem.txt"`) {
+		t.Fatalf("review packet is missing the PEM manifest entry:\n%s", packet)
+	}
+	if manifestEntry.ByteSize != int64(len(content)) || manifestEntry.SHA256 != digestBytes([]byte(content)) {
+		t.Fatalf("PEM manifest entry=%#v, want source byte size and digest", *manifestEntry)
+	}
+	if strings.Contains(fmt.Sprintf("%#v", *manifestEntry), privateKeyBody) {
+		t.Fatalf("manifest entry contains private-key material: %#v", *manifestEntry)
+	}
+}
+
 func TestUnbornWorkingTreeReviewUsesEmptyTreeBase(t *testing.T) {
 	repo := t.TempDir()
 	gitFixture(t, repo, "init", "-b", "main")
