@@ -116,7 +116,7 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 	if err != nil {
 		return 0, err
 	}
-	if !opts.Write {
+	if !opts.Write && !opts.Verify {
 		if _, err := fmt.Fprintln(stderr, readOnlyTaskHint); err != nil {
 			return 0, err
 		}

@@ -224,6 +224,9 @@ func TestTaskVerifySubmitsVerifyTrue(t *testing.T) {
 	}, strings.NewReader("run the checks"), &stdout, &stderr); code != 0 {
 		t.Fatalf("task code=%d stderr=%q", code, stderr.String())
 	}
+	if strings.Contains(stderr.String(), "pass --write") {
+		t.Fatalf("verify stderr=%q, must not suggest --write", stderr.String())
+	}
 	if len(fake.submits) != 1 || !fake.submits[0].TaskSpec.Verify {
 		t.Fatalf("submits=%#v, want one submission with verify true", fake.submits)
 	}
