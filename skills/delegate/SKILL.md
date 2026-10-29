@@ -15,7 +15,7 @@ printf '%s' "$PROMPT" | delegate task --backend <name> --cwd <abs> --prompt-file
 
 ## Steering active tasks and job control
 
-`delegate task` jobs are steerable by default. Send a message to a queued or running job with Agentbus:
+`delegate task` jobs are steerable by default, but Agentbus accepts steering only while a job is running. Check `agentbus status --job "$JOB_ID" --json` and wait for `state=running` before sending a message. If Agentbus rejects a message with `not_running`, it stores that rejection under the message ID; send any retry with a new `--request-id`:
 
 ```sh
 printf '%s' "$FOLLOWUP" | agentbus steer --job "$JOB_ID" \

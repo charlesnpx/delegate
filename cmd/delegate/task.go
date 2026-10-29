@@ -326,9 +326,6 @@ func submissionError(requestID string, err error) error {
 // submitTask is the one-shot Agentbus admission primitive shared by task and
 // review. It deliberately does no retry, polling, persistence, or cleanup.
 func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema json.RawMessage) (client.JobSubmitResult, agentbusClient, string, error) {
-	if opts.InputMode != taskInputModeFixed && opts.InputMode != taskInputModeSteerable {
-		return client.JobSubmitResult{}, nil, "", fmt.Errorf("invalid task input mode %q", opts.InputMode)
-	}
 	if err := ensureTaskRequestID(opts); err != nil {
 		return client.JobSubmitResult{}, nil, "", err
 	}
