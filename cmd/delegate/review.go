@@ -62,7 +62,13 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	if err != nil {
 		return 0, err
 	}
-	taskOpts := taskOptions{Backend: opts.Backend, Model: opts.Model, Effort: opts.Effort, ResumeJobID: opts.ResumeJobID}
+	taskOpts := taskOptions{
+		Backend:     opts.Backend,
+		InputMode:   taskInputModeFixed,
+		Model:       opts.Model,
+		Effort:      opts.Effort,
+		ResumeJobID: opts.ResumeJobID,
+	}
 	contractMode := opts.RequestFile != ""
 	var schema json.RawMessage
 	logicalWorkspace := ""

@@ -24,6 +24,7 @@ type taskOptions struct {
 	Backend       string
 	CWD           string
 	Write         bool
+	InputMode     client.InputMode
 	Model         string
 	Effort        string
 	Timeout       time.Duration
@@ -39,8 +40,10 @@ type taskOptions struct {
 }
 
 const (
-	agentbusMaxTimeout = 4 * time.Hour
-	readOnlyTaskHint   = "notice: task will run with a read-only backend profile; pass --write for edits or builds."
+	agentbusMaxTimeout                      = 4 * time.Hour
+	readOnlyTaskHint                        = "notice: task will run with a read-only backend profile; pass --write for edits or builds."
+	taskInputModeFixed     client.InputMode = "fixed"
+	taskInputModeSteerable client.InputMode = "steerable"
 )
 
 // taskSubmitReceipt projects the Agentbus admission response together with the
@@ -52,6 +55,7 @@ type taskSubmitReceipt struct {
 	JobID        string             `json:"jobId"`
 	State        client.PublicState `json:"state"`
 	Deduplicated bool               `json:"deduplicated"`
+	InputMode    client.InputMode   `json:"inputMode"`
 	Model        string             `json:"model,omitempty"`
 	Effort       string             `json:"effort,omitempty"`
 	Timeout      *taskSubmitTimeout `json:"timeout"`
@@ -132,6 +136,7 @@ func writeTaskSubmitReceipt(stdout io.Writer, opts taskOptions, submitted client
 		JobID:        submitted.JobID,
 		State:        submitted.State,
 		Deduplicated: submitted.Deduplicated,
+		InputMode:    opts.InputMode,
 		Model:        opts.Model,
 		Effort:       opts.Effort,
 		Timeout:      taskSubmitTimeoutFromAgentbus(submitted.Timeout),
@@ -146,13 +151,15 @@ func taskSubmitTimeoutFromAgentbus(timeout *engine.TimeoutResolution) *taskSubmi
 }
 
 func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
-	var opts taskOptions
+	opts := taskOptions{InputMode: taskInputModeSteerable}
 	var tags taskTagsFlag
+	var noSteer bool
 	fs := flag.NewFlagSet("delegate task", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.StringVar(&opts.Backend, "backend", "", "backend name")
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute working directory")
 	fs.BoolVar(&opts.Write, "write", false, "allow backend writes")
+	fs.BoolVar(&noSteer, "no-steer", false, "submit a fixed-input task that cannot be steered")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
 	fs.Func("timeout", "backend timeout with an explicit unit; 0s leaves the deadline to the daemon default", func(raw string) error {
@@ -173,6 +180,9 @@ func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
 	}
 	if fs.NArg() != 0 {
 		return taskOptions{}, fmt.Errorf("delegate task does not accept positional arguments")
+	}
+	if noSteer {
+		opts.InputMode = taskInputModeFixed
 	}
 	if opts.Backend == "" {
 		return taskOptions{}, fmt.Errorf("delegate task requires --backend")
@@ -344,6 +354,7 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema js
 			Backend:       opts.Backend,
 			CWD:           opts.CWD,
 			Write:         opts.Write,
+			InputMode:     opts.InputMode,
 			ResumeJobID:   opts.ResumeJobID,
 			RetainSession: opts.RetainSession,
 			Model:         optionalTaskSpecString(opts.Model),
@@ -357,12 +368,27 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema js
 	submitted, err := c.JobSubmit(ctx, params)
 	if err != nil {
 		_ = c.Close()
+		if opts.InputMode == taskInputModeSteerable && rejectsInputMode(err) {
+			return client.JobSubmitResult{}, nil, stateRoot, fmt.Errorf(
+				"submission failed for requestId %s: the running agentbus daemon does not support steerable tasks because it rejects inputMode and must be upgraded; on a compatible daemon, --no-steer submits a fixed task",
+				opts.RequestID,
+			)
+		}
 		if opts.ResumeJobID != "" && submissionJobID(err) == opts.ResumeJobID {
 			return client.JobSubmitResult{}, nil, stateRoot, err
 		}
 		return client.JobSubmitResult{}, nil, stateRoot, &submissionUnresolvedError{err: submissionError(opts.RequestID, err)}
 	}
 	return submitted, c, stateRoot, nil
+}
+
+func rejectsInputMode(err error) bool {
+	var rpcErr *client.RPCError
+	if !errors.As(err, &rpcErr) || rpcErr == nil || rpcErr.Object.Data.Code != "invalid_task_spec" {
+		return false
+	}
+	message := rpcErr.Object.Message
+	return strings.Contains(message, "unknown field") && strings.Contains(message, `"inputMode"`)
 }
 
 func cloneTaskTags(tags map[string]string) map[string]string {

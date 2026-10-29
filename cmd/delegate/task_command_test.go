@@ -64,7 +64,7 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	if receipt.Timeout == nil || receipt.Timeout.EffectiveMS != timeout.Effective || receipt.Timeout.Source != timeout.Source {
 		t.Fatalf("receipt timeout=%#v, want Agentbus effective/source %#v", receipt.Timeout, timeout)
 	}
-	wantReceipt := fmt.Sprintf("{\"requestId\":\"automation/retry-1\",\"workspaceKey\":\"%s\",\"jobId\":\"job_receipt\",\"state\":\"queued\",\"deduplicated\":false,\"model\":\"unadvertised-model\",\"effort\":\"unadvertised-effort\",\"timeout\":{\"effectiveMs\":1800000,\"source\":\"daemon_default\"}}\n", wantWorkspaceKey)
+	wantReceipt := fmt.Sprintf("{\"requestId\":\"automation/retry-1\",\"workspaceKey\":\"%s\",\"jobId\":\"job_receipt\",\"state\":\"queued\",\"deduplicated\":false,\"inputMode\":\"steerable\",\"model\":\"unadvertised-model\",\"effort\":\"unadvertised-effort\",\"timeout\":{\"effectiveMs\":1800000,\"source\":\"daemon_default\"}}\n", wantWorkspaceKey)
 	if got := stdout.String(); got != wantReceipt {
 		t.Fatalf("receipt bytes changed:\n got %q\nwant %q", got, wantReceipt)
 	}
@@ -72,10 +72,10 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	if err := json.Unmarshal(stdout.Bytes(), &receiptFields); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := len(receiptFields), 8; got != want {
+	if got, want := len(receiptFields), 9; got != want {
 		t.Fatalf("receipt fields=%#v, want exactly %d fields", receiptFields, want)
 	}
-	for _, key := range []string{"requestId", "workspaceKey", "jobId", "state", "deduplicated", "model", "effort", "timeout"} {
+	for _, key := range []string{"requestId", "workspaceKey", "jobId", "state", "deduplicated", "inputMode", "model", "effort", "timeout"} {
 		if _, found := receiptFields[key]; !found {
 			t.Fatalf("receipt fields=%#v, missing %q", receiptFields, key)
 		}
@@ -102,6 +102,9 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 		t.Fatalf("submits=%d, want 1", len(fake.submits))
 	}
 	params := fake.submits[0]
+	if got := params.TaskSpec.InputMode; got != taskInputModeSteerable {
+		t.Fatalf("submitted inputMode=%q, want %q", got, taskInputModeSteerable)
+	}
 	if params.RequestID != "automation/retry-1" || params.TaskSpec.Prompt != "inspect this" {
 		t.Fatalf("submitted params=%#v", params)
 	}
@@ -161,6 +164,34 @@ func TestTaskRetainSessionDefaultsFalse(t *testing.T) {
 	}
 	if strings.Contains(string(raw), `"retainSession"`) {
 		t.Fatalf("submitted JSON=%s, want retainSession omitted", raw)
+	}
+}
+
+func TestTaskNoSteerSubmitsFixedIndependentOfWriteAndResume(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: helloWithBackends()}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-",
+		"--no-steer", "--write", "--resume", "job_previous",
+	}, strings.NewReader("verify this change"), &stdout, &stderr); code != 0 {
+		t.Fatalf("task code=%d stderr=%q", code, stderr.String())
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("submits=%d, want 1", len(fake.submits))
+	}
+	spec := fake.submits[0].TaskSpec
+	if spec.InputMode != taskInputModeFixed || !spec.Write || spec.ResumeJobID != "job_previous" {
+		t.Fatalf("submitted input mode/write/resume=%q/%v/%q", spec.InputMode, spec.Write, spec.ResumeJobID)
+	}
+	var receipt taskSubmitReceipt
+	if err := json.Unmarshal(stdout.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.InputMode != taskInputModeFixed {
+		t.Fatalf("receipt inputMode=%q, want %q", receipt.InputMode, taskInputModeFixed)
 	}
 }
 
@@ -324,7 +355,7 @@ func TestTaskRemovedFlagsAndPositionalPromptAreRejected(t *testing.T) {
 	removed := []string{
 		"--background", "--wait", "--json", "--prompt", "--prompt-stdin", "--handoff-prompt-file",
 		"--output-schema", "--output-schema-stdin", "--output-schema-file", "--strict-model", "--origin",
-		"--parent-client", "--parent-session", "--recover-request",
+		"--parent-client", "--parent-session", "--recover-request", "--steerable",
 	}
 	for _, flagName := range removed {
 		t.Run(flagName, func(t *testing.T) {
@@ -417,6 +448,65 @@ func TestTaskFailureReportsRequestIDAndDoesNotWriteLocalState(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestTaskOldDaemonRejectingInputModeExplainsUpgradeWithoutRetry(t *testing.T) {
+	var daemonErr client.RPCError
+	if err := json.Unmarshal([]byte(`{"Object":{"code":-32000,"message":"json: unknown field \"inputMode\"","data":{"code":"invalid_task_spec"}}}`), &daemonErr); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAgentbusClient{hello: helloWithBackends(), submitErr: &daemonErr}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-",
+		"--request-id", "caller/steerable-task",
+	}, strings.NewReader("inspect"), &stdout, &stderr)
+	if code == 0 || stdout.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q, want failed submission without receipt", code, stdout.String())
+	}
+	for _, want := range []string{
+		"running agentbus daemon does not support steerable tasks",
+		"must be upgraded",
+		"--no-steer submits a fixed task",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr=%q, missing %q", stderr.String(), want)
+		}
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("submit attempts=%d, want exactly one", len(fake.submits))
+	}
+}
+
+func TestTaskUnrelatedInvalidTaskSpecKeepsDaemonError(t *testing.T) {
+	var daemonErr client.RPCError
+	if err := json.Unmarshal([]byte(`{"Object":{"code":-32000,"message":"taskSpec.prompt is empty","data":{"code":"invalid_task_spec"}}}`), &daemonErr); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeAgentbusClient{hello: helloWithBackends(), submitErr: &daemonErr}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-",
+		"--request-id", "caller/invalid-prompt",
+	}, strings.NewReader("inspect"), &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("task succeeded, want daemon rejection")
+	}
+	if !strings.Contains(stderr.String(), daemonErr.Error()) {
+		t.Fatalf("stderr=%q, want original daemon error %q", stderr.String(), daemonErr.Error())
+	}
+	if strings.Contains(stderr.String(), "does not support steerable tasks") || strings.Contains(stderr.String(), "--no-steer to submit") {
+		t.Fatalf("stderr=%q, unrelated invalid_task_spec was misclassified", stderr.String())
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("submit attempts=%d, want exactly one", len(fake.submits))
+	}
 }
 
 func mapsEqual(got, want map[string]string) bool {
