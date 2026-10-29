@@ -1426,6 +1426,19 @@ func prepareFileContent(repoRoot string, files []changedFile, remaining int) ([]
 		if !filepath.IsLocal(file.Path) {
 			return nil, remaining, fmt.Errorf("changed review path %q is not local to the repository", file.Path)
 		}
+		if len(file.Status) > 0 && file.Status[0] == 'D' {
+			digest := digestBytes(nil)
+			if file.Redacted {
+				reason := "secret-path"
+				if !IsSecretPath(file.Path) && !IsSecretPath(file.sourcePath) {
+					reason = "secret-screening-failed"
+				}
+				add(ManifestEntry{Path: file.Path, SHA256: digest, Status: "omitted", Reason: reason})
+			} else {
+				add(ManifestEntry{Path: file.Path, SHA256: digest, Status: "omitted", Reason: "deleted"})
+			}
+			continue
+		}
 		metadata, err := inspectSourcePath(path, false)
 		if err != nil {
 			return nil, remaining, fmt.Errorf("inspect changed review path %q: %w", file.Path, err)
@@ -1496,8 +1509,7 @@ func prepareFileContent(repoRoot string, files []changedFile, remaining int) ([]
 				entry.Status = "full"
 			}
 			if len(content) > remaining {
-				partial, _ := redactSourceText(partialSourceExcerpt(path, file.diff, remaining))
-				file.content = truncateUTF8(partial, remaining)
+				file.content = truncateUTF8(partialSourceExcerpt(path, file.diff, remaining), remaining)
 				file.contentStatus = "partial"
 				file.contentReason = "over-budget"
 				entry.Status = "partial"
@@ -1512,7 +1524,6 @@ func prepareFileContent(repoRoot string, files []changedFile, remaining int) ([]
 			if metadata.byteSize > 0 && remaining > 0 && len(file.content) == 0 {
 				return nil, remaining, fmt.Errorf("read changed review path %q for a partial context excerpt", file.Path)
 			}
-			file.content, _ = redactSourceText(file.content)
 			file.content = truncateUTF8(file.content, remaining)
 			file.contentStatus = "partial"
 			file.contentReason = "over-budget"
@@ -1660,6 +1671,8 @@ func partialSourceExcerpt(path string, diff []byte, maxBytes int) []byte {
 		} else if !include {
 			previousIncluded = false
 			continue
+		} else {
+			line = []byte(RedactSecretLikeDiagnostic(string(line)))
 		}
 		if out.Len() > 0 && !previousIncluded {
 			if out.Len()+4 > maxBytes {
