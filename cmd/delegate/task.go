@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -154,7 +155,13 @@ func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
 	fs.BoolVar(&opts.Write, "write", false, "allow backend writes")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
-	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout; 0 leaves the deadline to the daemon default")
+	fs.Func("timeout", "backend timeout with an explicit unit; 0s leaves the deadline to the daemon default", func(raw string) error {
+		parsed, err := parseTimeoutDuration(raw)
+		if err == nil {
+			opts.Timeout = parsed
+		}
+		return err
+	})
 	fs.StringVar(&opts.PromptFile, "prompt-file", "", "read prompt from file, or - for stdin")
 	fs.StringVar(&opts.SchemaFile, "schema-file", "", "read optional JSON Schema output contract from file")
 	fs.StringVar(&opts.RequestID, "request-id", "", "caller-owned request identity")
@@ -206,6 +213,37 @@ func validateTimeoutOption(timeout time.Duration) error {
 		return fmt.Errorf("--timeout must be at most %s", agentbusMaxTimeout)
 	}
 	return nil
+}
+
+func parseTimeoutDuration(raw string) (time.Duration, error) {
+	value := strings.TrimSpace(raw)
+	numeric := value != ""
+	for index, character := range value {
+		if index == 0 && (character == '+' || character == '-') {
+			continue
+		}
+		if character < '0' || character > '9' {
+			numeric = false
+			break
+		}
+	}
+	if numeric {
+		seconds, err := strconv.ParseInt(value, 10, 64)
+		if err == nil && seconds >= 0 {
+			secondsSuggestion := strconv.FormatInt(seconds, 10) + "s"
+			message := fmt.Sprintf("--timeout %s is missing a duration unit; use %s", value, secondsSuggestion)
+			if seconds > 0 && seconds%60 == 0 {
+				message += fmt.Sprintf(" or %dm", seconds/60)
+			}
+			return 0, fmt.Errorf("%s", message)
+		}
+		return 0, fmt.Errorf("--timeout %s is missing a duration unit; use an explicit duration such as 40m or 2400s", value)
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid --timeout %q: %w", raw, err)
+	}
+	return duration, nil
 }
 
 func readTaskPrompt(path string, stdin io.Reader) (string, error) {

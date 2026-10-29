@@ -47,16 +47,18 @@ delegate task --backend <name> [--cwd <abs>] [--write] [--model <model>] [--effo
 
 delegate review --backend <name> [--cwd <abs>] [--base <ref>]
                 [--scope auto|working-tree|branch] [--allow-live-repo-read]
+                [--criteria-file <path>]
                 [--model <model>] [--effort <effort>] [--timeout <duration>] [--resume <jobId>]
 
 delegate adversarial-review --backend <name> [--cwd <abs>] [--base <ref>]
                             [--scope auto|working-tree|branch] [--allow-live-repo-read]
+                            [--criteria-file <path>]
                             [--model <model>] [--effort <effort>] [--timeout <duration>]
 ```
 
 `version` prints the installed Delegate version; `--version`, `-version`, and `-V` are equivalent aliases. `--json` makes `version` emit an object with its `version` field.
 
-`task` needs `--backend` and `--prompt-file`. Its twelve flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, and `--tag`. `--cwd` must be absolute when supplied; otherwise the current directory is used. `--prompt-file -` reads the prompt from standard input, `--schema-file` supplies an optional JSON Schema output contract, and `--tag key=value` can be repeated. `--timeout 0` leaves the deadline to Agentbus's default.
+`task` needs `--backend` and `--prompt-file`. Its twelve flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, and `--tag`. `--cwd` must be absolute when supplied; otherwise the current directory is used. `--prompt-file -` reads the prompt from standard input, `--schema-file` supplies an optional JSON Schema output contract, and `--tag key=value` can be repeated. Timeout values require explicit units: use `--timeout 90m`, `--timeout 2400s`, or `--timeout 0s` to leave the deadline to Agentbus's default. A bare number such as `2400` is rejected with unit suggestions.
 
 `task` and `review` accept `--resume <jobId>` to continue a prior backend thread. A resume creates a new job with a fresh deadline; it does not extend the named job. Agentbus validates the resume target, and changing `--resume` while reusing an explicit `--request-id` returns Agentbus's conflict response.
 
@@ -138,9 +140,17 @@ With `--write`, workspace-write access only inside its `--cwd` and no network ar
 
 ## Review commands
 
-Today `review` delegates a sanitized code review and `adversarial-review` delegates a refute-first review. Both support the caller-frozen contract inputs `--request-file`, `--artifact-file`, and `--charter-file`. A v1 request produces a schema-bound `review-report-v1`; a v2 request additionally takes `--reviewer <identifier>`, selects that identifier from the frozen recipe's `required_outputs`, and produces a recipe-bound `review-report-v2` with request, recipe, and reviewer constants in its output schema.
+`review` delegates a sanitized code review and `adversarial-review` uses refute-first framing. Direct reviews accept `--base`, `--scope`, `--allow-live-repo-read`, `--criteria-file`, model/effort/timeout, and `--resume`. They do not accept task flags such as `--write`, `--prompt-file`, `--schema-file`, `--request-id`, `--retain-session`, or `--tag`. A review `--timeout` also requires an explicit unit.
 
-Contract mode submits the caller's frozen bytes verbatim: Delegate does not run its secret-path, history, or content redaction on them, so screening is the caller's responsibility. Resubmitting the same request file from the same canonical `--cwd` replays the same job (`deduplicated: true`) instead of paying for a second review.
+Direct mode includes the diff, full post-change text for files up to 128 KiB each within a 512 KiB combined source-and-criteria budget, and a manifest with each supplied path's original byte size, SHA-256, and `full`, `partial`, or `omitted` status. Oversized files receive a partial excerpt around changed hunks (up to 32 KiB per file); binary files, secret paths, and deleted paths are listed without source content and with an omission reason. Existing secret scanning also redacts secret-like content. These limits cover added source context; the diff remains included.
+
+Use `--criteria-file <path>` to supply acceptance criteria that were fetched beforehand. Delegate reads up to 256 KiB of UTF-8 text locally and includes its bytes and hash in the packet; it does not fetch criteria from a network service. This flag is for direct mode only. `--allow-live-repo-read` affects direct mode's backend working directory and does not add live repository bytes to exact-input contract reviews.
+
+Working-tree review works before the first commit and uses Git's empty-tree object as its base; it does not create a commit. `--cwd` may name a repository subdirectory; Delegate discovers and reviews its parent repository. Branch scope supplies the committed branch snapshot and refuses changed paths that also differ in the working tree, so the source text and diff describe the same revision.
+
+Contract mode uses `--request-file`, `--artifact-file`, and `--charter-file` together. The charter file must be a plain `charter.json` input document (`review-charter-v2`); a frozen `charter.freeze.json` envelope is rejected with a shape-specific error. Delegate freezes the plain input for the review contract. A v1 request produces a schema-bound `review-report-v1`; a v2 request additionally takes `--reviewer <identifier>`, selects that identifier from the frozen recipe's `required_outputs`, and produces a recipe-bound `review-report-v2` with request, recipe, and reviewer constants in its output schema. Contract mode does not accept `--criteria-file`.
+
+Contract mode submits the caller's request, artifact, and plain charter inputs through its existing contract path without direct-mode secret-path, history, or content redaction; screening remains the caller's responsibility. The contract prompts and digests bind those supplied inputs. Resubmitting the same request file from the same canonical `--cwd` replays the same job (`deduplicated: true`) instead of paying for a second review.
 
 ## Managed skill
 

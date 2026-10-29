@@ -275,6 +275,102 @@ func TestContractReviewRequiresAllInputFiles(t *testing.T) {
 	}
 }
 
+func TestFrozenEnvelopeIsRejectedByPlainCharterFlag(t *testing.T) {
+	fixture := newContractReviewFixture(t)
+	frozenBytes, err := json.Marshal(fixture.frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozenPath := filepath.Join(t.TempDir(), "charter.freeze.json")
+	if err := os.WriteFile(frozenPath, frozenBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = loadContractReviewInput(reviewOptions{
+		RequestFile:  fixture.requestPath,
+		ArtifactFile: fixture.artifactPath,
+		CharterFile:  frozenPath,
+	})
+	if err == nil {
+		t.Fatal("frozen envelope passed as --charter-file unexpectedly accepted")
+	}
+	for _, want := range []string{"plain charter.json", "frozen charter.freeze.json"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("charter shape error=%q, want %q", err, want)
+		}
+	}
+}
+
+func TestReviewCriteriaFlagIsDirectModeOnly(t *testing.T) {
+	criteriaPath := filepath.Join(t.TempDir(), "acceptance.md")
+	options, err := parseReviewOptions(reviewKind, []string{"--backend", "codex", "--criteria-file", criteriaPath}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.CriteriaFile != criteriaPath {
+		t.Fatalf("criteria file=%q, want %q", options.CriteriaFile, criteriaPath)
+	}
+
+	fixture := newContractReviewFixture(t)
+	args := []string{
+		"--backend", "codex",
+		"--request-file", fixture.requestPath,
+		"--artifact-file", fixture.artifactPath,
+		"--charter-file", fixture.charterPath,
+		"--criteria-file", criteriaPath,
+	}
+	if _, err := parseReviewOptions(reviewKind, args, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "only valid for direct review mode") {
+		t.Fatalf("contract mode criteria error=%v, want direct-mode-only error", err)
+	}
+}
+
+func TestDirectReviewSubmitsPreFetchedCriteriaAndManifest(t *testing.T) {
+	fake := &fakeAgentbusClient{
+		hello: helloWithBackends(),
+		submitResult: client.JobSubmitResult{
+			JobID:   "job_direct_criteria",
+			State:   publicStateQueued,
+			Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
+		},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	repo := t.TempDir()
+	runReviewGit(t, repo, "init", "-b", "main")
+	runReviewGit(t, repo, "config", "user.name", "Delegate Test")
+	runReviewGit(t, repo, "config", "user.email", "delegate@example.invalid")
+	if err := os.WriteFile(filepath.Join(repo, "source.txt"), []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runReviewGit(t, repo, "add", "source.txt")
+	runReviewGit(t, repo, "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(repo, "source.txt"), []byte("after direct review\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	criteria := []byte("The public command name remains stable.")
+	criteriaPath := filepath.Join(t.TempDir(), "criteria.md")
+	if err := os.WriteFile(criteriaPath, criteria, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	args := []string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--criteria-file", criteriaPath}
+	if code := run(args, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("direct review code=%d stderr=%q", code, stderr.String())
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("submits=%d, want 1", len(fake.submits))
+	}
+	prompt := fake.submits[0].TaskSpec.Prompt
+	if !strings.Contains(prompt, string(criteria)) || !strings.Contains(prompt, "\"path\":\""+criteriaPath+"\"") {
+		t.Fatalf("criteria bytes or manifest path missing from prompt:\n%s", prompt)
+	}
+	sum := sha256.Sum256(criteria)
+	if !strings.Contains(prompt, hex.EncodeToString(sum[:])) {
+		t.Fatalf("criteria sha256 missing from prompt:\n%s", prompt)
+	}
+}
+
 func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) {
 	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
 	fake := &fakeAgentbusClient{
