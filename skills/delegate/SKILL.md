@@ -13,17 +13,24 @@ printf '%s' "$PROMPT" | delegate task --backend <name> --cwd <abs> --prompt-file
 
 `--prompt-file -` reads the prompt from stdin. The submit receipt is JSON on stdout; notices and errors go to stderr.
 
-## Follow-up instructions and job control
+## Steering active tasks and job control
 
-Delegate and Agentbus do not expose live steering or a `send_input` command. Native subagent tools may support `send_input`, but that capability does not apply to jobs submitted through this CLI. Use the receipt's `jobId` with Agentbus; it is not a native subagent ID. Check `delegate --help`, `delegate task -h`, and Agentbus's usage output for the installed command surface before assuming a capability exists.
+`delegate task` jobs are steerable by default. Send a message to a queued or running job with Agentbus:
 
-When additional instructions arrive for a queued or running job, keep the job running and report that the instructions have not been delivered. `agentbus cancel` stops work; it does not send a message or arrange a follow-up. Cancel when the user requests stopping the job, not merely to add instructions.
+```sh
+printf '%s' "$FOLLOWUP" | agentbus steer --job "$JOB_ID" \
+  --request-id "$MESSAGE_ID" --message-file -
+```
 
-To deliver a follow-up in the same backend conversation, wait for the original job to become terminal, read its result, and submit a new task with `--resume <jobId>`. This requires a retained backend session, a recorded backend session ID, and the same backend. If the session is unavailable, submit a fresh task with the relevant context and additional instructions. A fresh task starts a separate conversation. Do not claim instructions were delivered until the follow-up submission is accepted.
+Receipts report `admitted`, `delivered`, `rejected`, or `unknown`. `admitted` means Agentbus accepted the message; `delivered` confirms provider delivery. Exit code 17 means `rejected`, and 18 means `unknown`. A successful write to Agentbus does not prove provider delivery.
+
+`--no-steer` submits a fixed task. Reviews are always fixed; new review instructions or evidence need a new review. A generic `delegate task` used as a review must pass `--no-steer`. Cancel stops work and does not deliver a message.
+
+Delegate sends the `inputMode` field and does not silently remove it or downgrade a task. The running Agentbus daemon must support this field; upgrade it if Delegate reports that it does not support steerable tasks. `--no-steer` selects fixed mode on a daemon that supports the field and is not an old-daemon compatibility option.
 
 ## Submit and continue tasks
 
-Task flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, and `--tag`. `--resume <jobId>` resumes a prior job and creates a new job with a fresh deadline. `--retain-session` keeps the backend session after completion so this job can be resumed; the session directory is left in place until removed.
+Task flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, `--no-steer`, and `--tag`. Tasks are steerable by default, and `--no-steer` makes one fixed. This setting is independent of `--write` and `--resume`. `--resume <jobId>` resumes a terminal job and creates a new job with a fresh deadline. `--retain-session` keeps the backend session after completion so this job can be resumed; the session directory is left in place until removed.
 
 Timeouts require explicit units. Use values such as `--timeout 90m`, `--timeout 2400s`, or `--timeout 0s` for the Agentbus default. A bare value such as `2400` is rejected; Delegate suggests `2400s` and `40m`.
 
@@ -38,6 +45,8 @@ printf '%s' "$FOLLOWUP" | delegate task --backend codex --resume <jobId> --cwd <
 ```
 
 Without `--retain-session`, a completed job cannot be resumed. This is not a bug; the session is cleaned up when the job completes. `--resume` creates a new job with a fresh deadline and its own result; the original job's result is unchanged and remains final. A retained session directory stays on disk until an operator removes it. `--retain-session` is accepted only by `delegate task`; the review commands are schema/report workflows, not conversations to continue.
+
+For a follow-up after a job becomes terminal, read its result and submit another task with `--resume <jobId>`. Resumption requires a retained session, a recorded backend session ID, and the same backend. If the session is unavailable, submit a fresh task with the relevant context. A fresh task starts a separate conversation.
 
 Add `--retain-session` to each resumed task too if another follow-up will be needed after it completes. Retention cannot be added retroactively to a completed job whose session was cleaned up. Failed, canceled, and unknown terminal jobs retain session directories, but resumption still requires a recorded backend session ID; cancellation alone does not guarantee resumability.
 

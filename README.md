@@ -43,7 +43,8 @@ delegate version [--json]
 
 delegate task --backend <name> [--cwd <abs>] [--write] [--model <model>] [--effort <effort>]
               [--timeout <duration>] --prompt-file <path|-> [--schema-file <path>]
-              [--request-id <id>] [--resume <jobId>] [--retain-session] [--tag <key=value>]...
+              [--request-id <id>] [--resume <jobId>] [--retain-session] [--no-steer]
+              [--tag <key=value>]...
 
 delegate review --backend <name> [--cwd <abs>] [--base <ref>]
                 [--scope auto|working-tree|branch] [--allow-live-repo-read]
@@ -58,7 +59,7 @@ delegate adversarial-review --backend <name> [--cwd <abs>] [--base <ref>]
 
 `version` prints the installed Delegate version; `--version`, `-version`, and `-V` are equivalent aliases. `--json` makes `version` emit an object with its `version` field.
 
-`task` needs `--backend` and `--prompt-file`. Its twelve flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, and `--tag`. `--cwd` must be absolute when supplied; otherwise the current directory is used. `--prompt-file -` reads the prompt from standard input, `--schema-file` supplies an optional JSON Schema output contract, and `--tag key=value` can be repeated. Timeout values require explicit units: use `--timeout 90m`, `--timeout 2400s`, or `--timeout 0s` to leave the deadline to Agentbus's default. A bare number such as `2400` is rejected with unit suggestions.
+`task` needs `--backend` and `--prompt-file`. Its thirteen flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, `--no-steer`, and `--tag`. `delegate task` submits steerable work by default; `--no-steer` submits a fixed-input task. This choice is independent of `--write` and `--resume`. `--cwd` must be absolute when supplied; otherwise the current directory is used. `--prompt-file -` reads the prompt from standard input, `--schema-file` supplies an optional JSON Schema output contract, and `--tag key=value` can be repeated. Timeout values require explicit units: use `--timeout 90m`, `--timeout 2400s`, or `--timeout 0s` to leave the deadline to Agentbus's default. A bare number such as `2400` is rejected with unit suggestions.
 
 `task` and `review` accept `--resume <jobId>` to continue a prior backend thread. A resume creates a new job with a fresh deadline; it does not extend the named job. Agentbus validates the resume target, and changing `--resume` while reusing an explicit `--request-id` returns Agentbus's conflict response.
 
@@ -78,11 +79,20 @@ The retained session directory stays on disk until an operator removes it.
 
 ### Follow-up instructions while a job is running
 
-Neither Delegate nor Agentbus exposes live steering or a `send_input` command. Native subagent tools may support `send_input`, but a Delegate receipt's `jobId` identifies an Agentbus job, not a native subagent. Check the installed CLI's help or usage before assuming those tools share capabilities.
+`delegate task` jobs are steerable by default. Send a message to a queued or running steerable job through Agentbus:
 
-When additional instructions arrive, keep the running job active and state that the instructions have not been delivered. `agentbus cancel` stops the job; it does not deliver instructions or schedule a follow-up. Use cancellation when the user requests stopping work.
+```sh
+printf '%s' "$FOLLOWUP" | agentbus steer --job "$JOB_ID" \
+  --request-id "$MESSAGE_ID" --message-file -
+```
 
-For a follow-up in the same conversation, wait until the job is terminal, read its result, and submit `delegate task --backend <same-backend> --resume <jobId>` with the follow-up prompt. Agentbus requires a retained session and a recorded backend session ID. Add `--retain-session` to each resumed task if further follow-ups will be needed. Completed jobs without retention cannot be resumed; submit a fresh task with the relevant context instead. Failed, canceled, and unknown terminal jobs retain their session directories, but still need a recorded backend session ID to resume. Cancellation alone does not guarantee resumability, and resumption always creates a new job.
+The receipt status is `admitted`, `delivered`, `rejected`, or `unknown`. `admitted` means Agentbus accepted the message; `delivered` confirms provider delivery. Exit code 17 means `rejected`, and 18 means `unknown`. A successful write to Agentbus is not itself proof that the provider received the message.
+
+`--no-steer` submits a fixed job. Reviews are always fixed; new review instructions or evidence require a new review. If a review is submitted through generic `delegate task`, pass `--no-steer`. A fixed job cannot receive steering; `agentbus cancel` stops it but does not deliver instructions or schedule a follow-up.
+
+Delegate sends the `inputMode` field to Agentbus and does not silently remove it or downgrade a steerable task. The running Agentbus daemon must support this field; upgrade it if Delegate reports that it does not support steerable tasks. `--no-steer` selects fixed input mode on a daemon that supports the field; it is not an old-daemon compatibility option.
+
+For a terminal job, a follow-up in the same conversation uses `delegate task --backend <same-backend> --resume <jobId>` with the follow-up prompt. Agentbus requires a retained session and a recorded backend session ID. Add `--retain-session` to each resumed task if further follow-ups will be needed. Completed jobs without retention cannot be resumed; submit a fresh task with the relevant context instead. Failed, canceled, and unknown terminal jobs retain their session directories, but still need a recorded backend session ID to resume. Cancellation alone does not guarantee resumability, and resumption always creates a new job.
 
 For example, submit a prompt without placing it in the process arguments:
 
@@ -105,6 +115,7 @@ Each successful `task`, `review`, or `adversarial-review` submission writes one 
   "jobId": "job_receipt",
   "state": "queued",
   "deduplicated": false,
+  "inputMode": "steerable",
   "model": "unadvertised-model",
   "effort": "unadvertised-effort",
   "timeout": {
