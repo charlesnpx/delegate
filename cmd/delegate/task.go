@@ -24,6 +24,8 @@ type taskOptions struct {
 	Backend       string
 	CWD           string
 	Write         bool
+	LocalIPC      bool
+	Verify        bool
 	InputMode     client.InputMode
 	Model         string
 	Effort        string
@@ -56,6 +58,8 @@ type taskSubmitReceipt struct {
 	State        client.PublicState `json:"state"`
 	Deduplicated bool               `json:"deduplicated"`
 	InputMode    client.InputMode   `json:"inputMode"`
+	LocalIPC     bool               `json:"localIPC,omitempty"`
+	Verify       bool               `json:"verify,omitempty"`
 	Model        string             `json:"model,omitempty"`
 	Effort       string             `json:"effort,omitempty"`
 	Timeout      *taskSubmitTimeout `json:"timeout"`
@@ -112,7 +116,7 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 	if err != nil {
 		return 0, err
 	}
-	if !opts.Write {
+	if !opts.Write && !opts.Verify {
 		if _, err := fmt.Fprintln(stderr, readOnlyTaskHint); err != nil {
 			return 0, err
 		}
@@ -137,6 +141,8 @@ func writeTaskSubmitReceipt(stdout io.Writer, opts taskOptions, submitted client
 		State:        submitted.State,
 		Deduplicated: submitted.Deduplicated,
 		InputMode:    opts.InputMode,
+		LocalIPC:     opts.LocalIPC,
+		Verify:       opts.Verify,
 		Model:        opts.Model,
 		Effort:       opts.Effort,
 		Timeout:      taskSubmitTimeoutFromAgentbus(submitted.Timeout),
@@ -159,6 +165,8 @@ func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
 	fs.StringVar(&opts.Backend, "backend", "", "backend name")
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute working directory")
 	fs.BoolVar(&opts.Write, "write", false, "allow backend writes")
+	fs.BoolVar(&opts.LocalIPC, "local-ipc", false, "allow local IPC for supported Codex tasks")
+	fs.BoolVar(&opts.Verify, "verify", false, "run in a disposable copy without writing the submitted source")
 	fs.BoolVar(&noSteer, "no-steer", false, "submit a fixed-input task that cannot be steered")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
@@ -183,6 +191,9 @@ func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
 	}
 	if noSteer {
 		opts.InputMode = taskInputModeFixed
+	}
+	if opts.Verify && opts.Write {
+		return taskOptions{}, fmt.Errorf("--verify runs in a disposable copy and cannot write the source; remove --write")
 	}
 	if opts.Backend == "" {
 		return taskOptions{}, fmt.Errorf("delegate task requires --backend")
@@ -354,6 +365,8 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema js
 			Backend:       opts.Backend,
 			CWD:           opts.CWD,
 			Write:         opts.Write,
+			LocalIPC:      opts.LocalIPC,
+			Verify:        opts.Verify,
 			InputMode:     opts.InputMode,
 			ResumeJobID:   opts.ResumeJobID,
 			RetainSession: opts.RetainSession,
@@ -374,6 +387,18 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema js
 				opts.RequestID,
 			)
 		}
+		if opts.LocalIPC && rejectsLocalIPC(err) {
+			return client.JobSubmitResult{}, nil, stateRoot, fmt.Errorf(
+				"submission failed for requestId %s: the running agentbus daemon does not support --local-ipc because it rejects the localIPC field and must be upgraded",
+				opts.RequestID,
+			)
+		}
+		if opts.Verify && rejectsVerify(err) {
+			return client.JobSubmitResult{}, nil, stateRoot, fmt.Errorf(
+				"submission failed for requestId %s: the running agentbus daemon does not support --verify because it rejects the verify field and must be upgraded",
+				opts.RequestID,
+			)
+		}
 		if opts.ResumeJobID != "" && submissionJobID(err) == opts.ResumeJobID {
 			return client.JobSubmitResult{}, nil, stateRoot, err
 		}
@@ -383,12 +408,24 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema js
 }
 
 func rejectsInputMode(err error) bool {
+	return rejectsUnknownTaskSpecField(err, "inputMode")
+}
+
+func rejectsLocalIPC(err error) bool {
+	return rejectsUnknownTaskSpecField(err, "localIPC")
+}
+
+func rejectsVerify(err error) bool {
+	return rejectsUnknownTaskSpecField(err, "verify")
+}
+
+func rejectsUnknownTaskSpecField(err error, field string) bool {
 	var rpcErr *client.RPCError
 	if !errors.As(err, &rpcErr) || rpcErr == nil || rpcErr.Object.Data.Code != "invalid_task_spec" {
 		return false
 	}
 	message := rpcErr.Object.Message
-	return strings.Contains(message, "unknown field") && strings.Contains(message, `"inputMode"`)
+	return strings.Contains(message, "unknown field") && strings.Contains(message, `"`+field+`"`)
 }
 
 func cloneTaskTags(tags map[string]string) map[string]string {

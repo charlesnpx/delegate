@@ -167,6 +167,124 @@ func TestTaskRetainSessionDefaultsFalse(t *testing.T) {
 	}
 }
 
+func TestTaskLocalIPCSubmissionAndDefaultWireOmission(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		flag      string
+		wantLocal bool
+	}{
+		{name: "default"},
+		{name: "requested", flag: "--local-ipc", wantLocal: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeAgentbusClient{hello: helloWithBackends()}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+
+			args := []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-"}
+			if test.flag != "" {
+				args = append(args, test.flag)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run(args, strings.NewReader("run the test runner"), &stdout, &stderr); code != 0 {
+				t.Fatalf("task code=%d stderr=%q", code, stderr.String())
+			}
+			if len(fake.submits) != 1 {
+				t.Fatalf("submits=%d, want 1", len(fake.submits))
+			}
+			spec := fake.submits[0].TaskSpec
+			if spec.LocalIPC != test.wantLocal {
+				t.Fatalf("submitted localIPC=%v, want %v", spec.LocalIPC, test.wantLocal)
+			}
+			if !test.wantLocal && spec.Verify {
+				t.Fatalf("submitted verify=%v by default, want false", spec.Verify)
+			}
+			raw, err := json.Marshal(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.wantLocal && !strings.Contains(string(raw), `"localIPC":true`) {
+				t.Fatalf("submitted TaskSpec JSON=%s, want localIPC true", raw)
+			}
+			if !test.wantLocal && (strings.Contains(string(raw), `"localIPC"`) || strings.Contains(string(raw), `"verify"`)) {
+				t.Fatalf("submitted TaskSpec JSON=%s, want localIPC and verify omitted", raw)
+			}
+		})
+	}
+}
+
+func TestTaskVerifySubmitsVerifyTrue(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: helloWithBackends()}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", "--verify",
+	}, strings.NewReader("run the checks"), &stdout, &stderr); code != 0 {
+		t.Fatalf("task code=%d stderr=%q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "pass --write") {
+		t.Fatalf("verify stderr=%q, must not suggest --write", stderr.String())
+	}
+	if len(fake.submits) != 1 || !fake.submits[0].TaskSpec.Verify {
+		t.Fatalf("submits=%#v, want one submission with verify true", fake.submits)
+	}
+}
+
+func TestTaskVerifyWriteIsRejectedBeforeConnecting(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: helloWithBackends()}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+	oldConnect := connectAgentbus
+	connectCalls := 0
+	connectAgentbus = func(context.Context, client.Options) (agentbusClient, error) {
+		connectCalls++
+		return fake, nil
+	}
+	defer func() { connectAgentbus = oldConnect }()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", "--verify", "--write",
+	}, strings.NewReader("run the checks"), &stdout, &stderr); code == 0 {
+		t.Fatalf("task code=0 stdout=%q, want contradictory options rejected", stdout.String())
+	}
+	for _, want := range []string{"--verify", "disposable copy", "cannot write the source"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr=%q, missing %q", stderr.String(), want)
+		}
+	}
+	if connectCalls != 0 || len(fake.submits) != 0 {
+		t.Fatalf("connect calls=%d submissions=%d, want neither", connectCalls, len(fake.submits))
+	}
+}
+
+func TestTaskReceiptIncludesRequestedExecutionFlags(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: helloWithBackends()}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", "--verify", "--local-ipc",
+	}, strings.NewReader("run the checks"), &stdout, &stderr); code != 0 {
+		t.Fatalf("task code=%d stderr=%q", code, stderr.String())
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &fields); err != nil {
+		t.Fatalf("receipt JSON: %v; raw=%q", err, stdout.String())
+	}
+	for key, want := range map[string]string{"localIPC": "true", "verify": "true"} {
+		if got := string(fields[key]); got != want {
+			t.Fatalf("receipt %s=%s, want %s; fields=%v", key, got, want, fields)
+		}
+	}
+	if len(fake.submits) != 1 || !fake.submits[0].TaskSpec.LocalIPC || !fake.submits[0].TaskSpec.Verify {
+		t.Fatalf("submits=%#v, want both requested flags", fake.submits)
+	}
+}
+
 func TestTaskNoSteerSubmitsFixedIndependentOfWriteAndResume(t *testing.T) {
 	fake := &fakeAgentbusClient{hello: helloWithBackends()}
 	restore := stubAgentbusGlobals(t, fake)
@@ -478,6 +596,47 @@ func TestTaskOldDaemonRejectingInputModeExplainsUpgradeWithoutRetry(t *testing.T
 	}
 	if len(fake.submits) != 1 {
 		t.Fatalf("submit attempts=%d, want exactly one", len(fake.submits))
+	}
+}
+
+func TestTaskOldDaemonRejectingExecutionFlagsExplainsUpgradeWithoutRetry(t *testing.T) {
+	for _, test := range []struct {
+		flag  string
+		field string
+	}{
+		{flag: "--verify", field: "verify"},
+		{flag: "--local-ipc", field: "localIPC"},
+	} {
+		t.Run(test.field, func(t *testing.T) {
+			message, err := json.Marshal(fmt.Sprintf(`json: unknown field %q`, test.field))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rawErr := fmt.Sprintf(`{"Object":{"code":-32000,"message":%s,"data":{"code":"invalid_task_spec"}}}`, message)
+			var daemonErr client.RPCError
+			if err := json.Unmarshal([]byte(rawErr), &daemonErr); err != nil {
+				t.Fatal(err)
+			}
+			fake := &fakeAgentbusClient{hello: helloWithBackends(), submitErr: &daemonErr}
+			restore := stubAgentbusGlobals(t, fake)
+			defer restore()
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{
+				"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", test.flag,
+			}, strings.NewReader("run the checks"), &stdout, &stderr)
+			if code == 0 || stdout.Len() != 0 {
+				t.Fatalf("code=%d stdout=%q, want failed submission without receipt", code, stdout.String())
+			}
+			for _, want := range []string{test.flag, "must be upgraded"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr=%q, missing %q", stderr.String(), want)
+				}
+			}
+			if len(fake.submits) != 1 {
+				t.Fatalf("submit attempts=%d, want exactly one", len(fake.submits))
+			}
+		})
 	}
 }
 

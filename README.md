@@ -44,6 +44,7 @@ delegate version [--json]
 delegate task --backend <name> [--cwd <abs>] [--write] [--model <model>] [--effort <effort>]
               [--timeout <duration>] --prompt-file <path|-> [--schema-file <path>]
               [--request-id <id>] [--resume <jobId>] [--retain-session] [--no-steer]
+              [--verify] [--local-ipc]
               [--tag <key=value>]...
 
 delegate review --backend <name> [--cwd <abs>] [--base <ref>]
@@ -59,7 +60,11 @@ delegate adversarial-review --backend <name> [--cwd <abs>] [--base <ref>]
 
 `version` prints the installed Delegate version; `--version`, `-version`, and `-V` are equivalent aliases. `--json` makes `version` emit an object with its `version` field.
 
-`task` needs `--backend` and `--prompt-file`. Its thirteen flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, `--no-steer`, and `--tag`. `delegate task` submits steerable work by default; `--no-steer` submits a fixed-input task. This choice is independent of `--write` and `--resume`. `--cwd` must be absolute when supplied; otherwise the current directory is used. `--prompt-file -` reads the prompt from standard input, `--schema-file` supplies an optional JSON Schema output contract, and `--tag key=value` can be repeated. Timeout values require explicit units: use `--timeout 90m`, `--timeout 2400s`, or `--timeout 0s` to leave the deadline to Agentbus's default. A bare number such as `2400` is rejected with unit suggestions.
+`task` needs `--backend` and `--prompt-file`. Its fifteen flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, `--no-steer`, `--verify`, `--local-ipc`, and `--tag`. `delegate task` submits steerable work by default; `--no-steer` submits a fixed-input task. This choice is independent of `--write` and `--resume`. `--cwd` must be absolute when supplied; otherwise the current directory is used. `--prompt-file -` reads the prompt from standard input, `--schema-file` supplies an optional JSON Schema output contract, and `--tag key=value` can be repeated. Timeout values require explicit units: use `--timeout 90m`, `--timeout 2400s`, or `--timeout 0s` to leave the deadline to Agentbus's default. A bare number such as `2400` is rejected with unit suggestions.
+
+`--verify` runs a Codex task read-only against a daemon-created disposable copy of the tracked and untracked, non-ignored files in `--cwd`, with private per-job writable caches and a shared Go module cache for reads. The submitted source is not writable. This protects the source through workflow arrangement and does not provide a stronger isolation boundary than the Codex sandbox. The job's `execution` posture fields `intent: verify`, `frozenCopy`, and `frozenSource` show that it ran in a copy.
+
+`--local-ipc` grants Codex a private short socket directory and loopback TCP for test runners that need IPC, such as Node's test runner. It is available for `--write` or `--verify` tasks on macOS; Linux refuses it.
 
 `task` and `review` accept `--resume <jobId>` to continue a prior backend thread. A resume creates a new job with a fresh deadline; it does not extend the named job. Agentbus validates the resume target, and changing `--resume` while reusing an explicit `--request-id` returns Agentbus's conflict response.
 
@@ -90,7 +95,7 @@ The receipt status is `admitted`, `delivered`, `rejected`, or `unknown`. `admitt
 
 `--no-steer` submits a fixed job. Reviews are always fixed; new review instructions or evidence require a new review. If a review is submitted through generic `delegate task`, pass `--no-steer`. A fixed job cannot receive steering; `agentbus cancel` stops it but does not deliver instructions or schedule a follow-up.
 
-Delegate sends the `inputMode` field to Agentbus and does not silently remove it or downgrade a steerable task. The running Agentbus daemon must support this field; upgrade it if Delegate reports that it does not support steerable tasks. `--no-steer` selects fixed input mode on a daemon that supports the field; it is not an old-daemon compatibility option.
+Delegate sends the `inputMode` field to Agentbus and does not silently remove it or downgrade a steerable task. The running Agentbus daemon must support this field; upgrade it if Delegate reports that it does not support steerable tasks. The daemon must also support requested `--verify` and `--local-ipc` fields; Delegate reports an unknown field and requires an upgrade without retrying without it. `--no-steer` selects fixed input mode on a daemon that supports the field; it is not an old-daemon compatibility option.
 
 For a terminal job, a follow-up in the same conversation uses `delegate task --backend <same-backend> --resume <jobId>` with the follow-up prompt. Agentbus requires a retained session and a recorded backend session ID. Add `--retain-session` to each resumed task if further follow-ups will be needed. Completed jobs without retention cannot be resumed; submit a fresh task with the relevant context instead. Failed, canceled, and unknown terminal jobs retain their session directories, but still need a recorded backend session ID to resume. Cancellation alone does not guarantee resumability, and resumption always creates a new job.
 
@@ -147,11 +152,11 @@ For `status --job` and `result`, exit code `2` means the job is still running. A
 
 ## Worker sandbox rules
 
-With `--write`, workspace-write access only inside its `--cwd` and no network are Codex-specific guarantees; enforcement depends on the selected Agentbus backend: Claude runs without a filesystem or network sandbox, and Cursor uses agent-mode permissions. For Go builds, set `GOCACHE` under `/tmp` and leave it out of the reviewed workspace; leave `GOMODCACHE` at its default.
+With `--write`, workspace-write access only inside its `--cwd` and no network are Codex-specific guarantees; enforcement depends on the selected Agentbus backend: Claude runs without a filesystem or network sandbox, and Cursor uses agent-mode permissions. Writable Codex task jobs, including Verify, get a managed per-job `GOCACHE` outside the repository and use the populated daemon `GOMODCACHE` for reads. Agentbus does not replace the module cache with an empty per-job directory; missing modules fail offline.
 
 ## Review commands
 
-`review` delegates a sanitized code review and `adversarial-review` uses refute-first framing. Direct reviews accept `--base`, `--scope`, `--allow-live-repo-read`, `--criteria-file`, model/effort/timeout, and `--resume`. They do not accept task flags such as `--write`, `--prompt-file`, `--schema-file`, `--request-id`, `--retain-session`, or `--tag`. A review `--timeout` also requires an explicit unit.
+`review` delegates a sanitized code review and `adversarial-review` uses refute-first framing. Direct reviews accept `--base`, `--scope`, `--allow-live-repo-read`, `--criteria-file`, model/effort/timeout, and `--resume`. They do not accept task flags such as `--write`, `--verify`, `--local-ipc`, `--prompt-file`, `--schema-file`, `--request-id`, `--retain-session`, or `--tag`. A review `--timeout` also requires an explicit unit.
 
 Direct mode includes the diff, full post-change text for files up to 128 KiB each within a 512 KiB combined source-and-criteria budget, and a manifest with each supplied path's original byte size, SHA-256, and `full`, `partial`, or `omitted` status. Oversized files receive a partial excerpt around changed hunks (up to 32 KiB per file); binary files, secret paths, and deleted paths are listed without source content and with an omission reason. Existing secret scanning also redacts secret-like content. These limits cover added source context; the diff remains included.
 
