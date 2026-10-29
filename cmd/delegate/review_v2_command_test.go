@@ -40,6 +40,9 @@ func TestContractReviewV2BindsSubmittedSchemaAndPrompt(t *testing.T) {
 		t.Fatalf("submits=%d, want 1", len(fake.submits))
 	}
 	spec := fake.submits[0].TaskSpec
+	if spec.InputMode != taskInputModeFixed {
+		t.Fatalf("v2 review inputMode=%q, want %q", spec.InputMode, taskInputModeFixed)
+	}
 	var schema map[string]any
 	if err := json.Unmarshal(spec.OutputSchema, &schema); err != nil {
 		t.Fatalf("v2 schema is invalid JSON: %v", err)

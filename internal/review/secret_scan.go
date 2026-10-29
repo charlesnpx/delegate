@@ -24,7 +24,7 @@ type secretPattern struct {
 var secretContentPatterns = []secretPattern{
 	{name: "aws-access-key", expression: regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
 	{name: "generic-secret-assignment", expression: regexp.MustCompile(`(?i)\b(?:api[_-]?key|token|secret)\b[[:space:]]*[:=][[:space:]]*["']?([A-Za-z0-9_./+=-]{16,})`), valueSubmatch: 1, minEntropy: 3.5},
-	{name: "private-key-header", expression: regexp.MustCompile(`-----BEGIN(?:[[:space:]]+[A-Z0-9]+)*[[:space:]]+PRIVATE[[:space:]]+KEY-----`)},
+	{name: "private-key-header", expression: privateKeyHeaderPattern},
 	{name: "jwt", expression: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b`)},
 	{name: "github-token", expression: regexp.MustCompile(`\bgh[ops]_[A-Za-z0-9]{30,}\b`)},
 	{name: "slack-token", expression: regexp.MustCompile(`\bxox[A-Za-z]-[A-Za-z0-9-]{10,}\b`)},
@@ -35,7 +35,54 @@ var secretContentPatterns = []secretPattern{
 	{name: "base64-assignment", expression: regexp.MustCompile(`\b[A-Za-z_][A-Za-z0-9_.-]*[[:space:]]*[:=][[:space:]]*["']?([A-Za-z0-9+/_=-]{33,})`), valueSubmatch: 1, minEntropy: 4.3, validate: isBase64Value},
 }
 
+var privateKeyHeaderPattern = regexp.MustCompile(`-----BEGIN(?:[[:space:]]+[A-Z0-9]+)*[[:space:]]+PRIVATE[[:space:]]+KEY-----`)
 var allHexValue = regexp.MustCompile(`^[A-Fa-f0-9]+$`)
+
+func privateKeyLabelFromBeginLine(line []byte) (string, bool) {
+	header := privateKeyHeaderPattern.Find(line)
+	if len(header) == 0 {
+		return "", false
+	}
+	label := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(string(header), "-----BEGIN"), "-----"))
+	return strings.Join(strings.Fields(label), " "), true
+}
+
+func isMatchingPrivateKeyEndLine(line []byte, label string) bool {
+	endLine := strings.Join(strings.Fields(strings.TrimSpace(string(line))), " ")
+	return endLine == "-----END "+label+"-----"
+}
+
+// redactPEMPrivateKeyBlocks replaces each private-key block, including its
+// body and matching END line, with one marker line. An unterminated block
+// extends through the end of the source text.
+func redactPEMPrivateKeyBlocks(content string) (string, bool) {
+	var out strings.Builder
+	activeLabel := ""
+	redacted := false
+	for _, line := range strings.SplitAfter(content, "\n") {
+		lineContent := strings.TrimSuffix(line, "\n")
+		if activeLabel != "" {
+			if isMatchingPrivateKeyEndLine([]byte(lineContent), activeLabel) {
+				activeLabel = ""
+			}
+			continue
+		}
+		label, isBegin := privateKeyLabelFromBeginLine([]byte(lineContent))
+		if !isBegin {
+			out.WriteString(line)
+			continue
+		}
+		redacted = true
+		activeLabel = label
+		out.WriteString(secretRedactionMarker)
+		if strings.HasSuffix(line, "\r\n") {
+			out.WriteString("\r\n")
+		} else if strings.HasSuffix(line, "\n") {
+			out.WriteByte('\n')
+		}
+	}
+	return out.String(), redacted
+}
 
 // RedactSecretLikeDiagnostic applies the review secret patterns to arbitrary
 // diagnostic text while preserving non-secret context around each match.

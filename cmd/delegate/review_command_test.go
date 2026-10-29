@@ -90,6 +90,11 @@ func TestContractReviewResumeUsesDistinctReplayStableRequestID(t *testing.T) {
 		t.Fatalf("submits=%d, want 3", len(fake.submits))
 	}
 	first, resumed, replayed := fake.submits[0], fake.submits[1], fake.submits[2]
+	for _, submitted := range fake.submits {
+		if submitted.TaskSpec.InputMode != taskInputModeFixed {
+			t.Fatalf("contract review inputMode=%q, want %q", submitted.TaskSpec.InputMode, taskInputModeFixed)
+		}
+	}
 	wantRequestID := "delegate-review-" + strings.TrimPrefix(fixture.requestDigest, "sha256:")[:32]
 	if first.RequestID != wantRequestID {
 		t.Fatalf("initial request ID=%q, want %q", first.RequestID, wantRequestID)
@@ -275,6 +280,105 @@ func TestContractReviewRequiresAllInputFiles(t *testing.T) {
 	}
 }
 
+func TestFrozenEnvelopeIsRejectedByPlainCharterFlag(t *testing.T) {
+	fixture := newContractReviewFixture(t)
+	frozenBytes, err := json.Marshal(fixture.frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozenPath := filepath.Join(t.TempDir(), "charter.freeze.json")
+	if err := os.WriteFile(frozenPath, frozenBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = loadContractReviewInput(reviewOptions{
+		RequestFile:  fixture.requestPath,
+		ArtifactFile: fixture.artifactPath,
+		CharterFile:  frozenPath,
+	})
+	if err == nil {
+		t.Fatal("frozen envelope passed as --charter-file unexpectedly accepted")
+	}
+	for _, want := range []string{"plain charter.json", "frozen charter.freeze.json"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("charter shape error=%q, want %q", err, want)
+		}
+	}
+}
+
+func TestReviewCriteriaFlagIsDirectModeOnly(t *testing.T) {
+	criteriaPath := filepath.Join(t.TempDir(), "acceptance.md")
+	options, err := parseReviewOptions(reviewKind, []string{"--backend", "codex", "--criteria-file", criteriaPath}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.CriteriaFile != criteriaPath {
+		t.Fatalf("criteria file=%q, want %q", options.CriteriaFile, criteriaPath)
+	}
+
+	fixture := newContractReviewFixture(t)
+	args := []string{
+		"--backend", "codex",
+		"--request-file", fixture.requestPath,
+		"--artifact-file", fixture.artifactPath,
+		"--charter-file", fixture.charterPath,
+		"--criteria-file", criteriaPath,
+	}
+	if _, err := parseReviewOptions(reviewKind, args, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "only valid for direct review mode") {
+		t.Fatalf("contract mode criteria error=%v, want direct-mode-only error", err)
+	}
+}
+
+func TestDirectReviewSubmitsPreFetchedCriteriaAndManifest(t *testing.T) {
+	fake := &fakeAgentbusClient{
+		hello: helloWithBackends(),
+		submitResult: client.JobSubmitResult{
+			JobID:   "job_direct_criteria",
+			State:   publicStateQueued,
+			Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
+		},
+	}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	repo := t.TempDir()
+	runReviewGit(t, repo, "init", "-b", "main")
+	runReviewGit(t, repo, "config", "user.name", "Delegate Test")
+	runReviewGit(t, repo, "config", "user.email", "delegate@example.invalid")
+	if err := os.WriteFile(filepath.Join(repo, "source.txt"), []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runReviewGit(t, repo, "add", "source.txt")
+	runReviewGit(t, repo, "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(repo, "source.txt"), []byte("after direct review\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	criteria := []byte("The public command name remains stable.")
+	criteriaPath := filepath.Join(t.TempDir(), "criteria.md")
+	if err := os.WriteFile(criteriaPath, criteria, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	args := []string{"review", "--backend", "codex", "--cwd", repo, "--scope", "working-tree", "--criteria-file", criteriaPath}
+	if code := run(args, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("direct review code=%d stderr=%q", code, stderr.String())
+	}
+	if len(fake.submits) != 1 {
+		t.Fatalf("submits=%d, want 1", len(fake.submits))
+	}
+	if fake.submits[0].TaskSpec.InputMode != taskInputModeFixed {
+		t.Fatalf("direct review inputMode=%q, want %q", fake.submits[0].TaskSpec.InputMode, taskInputModeFixed)
+	}
+	prompt := fake.submits[0].TaskSpec.Prompt
+	if !strings.Contains(prompt, string(criteria)) || !strings.Contains(prompt, "\"path\":\""+criteriaPath+"\"") {
+		t.Fatalf("criteria bytes or manifest path missing from prompt:\n%s", prompt)
+	}
+	sum := sha256.Sum256(criteria)
+	if !strings.Contains(prompt, hex.EncodeToString(sum[:])) {
+		t.Fatalf("criteria sha256 missing from prompt:\n%s", prompt)
+	}
+}
+
 func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) {
 	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
 	fake := &fakeAgentbusClient{
@@ -297,6 +401,9 @@ func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) 
 		t.Fatalf("review code=%d stderr=%q", code, firstErr.String())
 	}
 	assertTaskReceiptShape(t, firstOut.Bytes(), "job_review")
+	if fake.submits[0].TaskSpec.InputMode != taskInputModeFixed {
+		t.Fatalf("review inputMode=%q, want %q", fake.submits[0].TaskSpec.InputMode, taskInputModeFixed)
+	}
 	if got := len(fake.gets); got != 0 {
 		t.Fatalf("review job reads=%d, want none before a workspace is retained", got)
 	}
@@ -326,6 +433,9 @@ func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) 
 		t.Fatalf("adversarial-review code=%d stderr=%q", code, secondErr.String())
 	}
 	assertTaskReceiptShape(t, secondOut.Bytes(), "job_adversarial")
+	if fake.submits[1].TaskSpec.InputMode != taskInputModeFixed {
+		t.Fatalf("adversarial review inputMode=%q, want %q", fake.submits[1].TaskSpec.InputMode, taskInputModeFixed)
+	}
 	if got := len(fake.gets); got != 1 {
 		t.Fatalf("later review job reads=%d, want one one-shot cleanup check", got)
 	}
@@ -429,10 +539,36 @@ func TestReviewCommandsPassModelEffortAndResumeThrough(t *testing.T) {
 			if got := fake.submits[0].TaskSpec; taskSpecString(got.Model) != tc.model || taskSpecString(got.Effort) != tc.effort || got.ResumeJobID != tc.resume {
 				t.Fatalf("submitted model/effort/resume=%#v/%#v/%q, want %q/%q/%q", got.Model, got.Effort, got.ResumeJobID, tc.model, tc.effort, tc.resume)
 			}
+			if got := fake.submits[0].TaskSpec.InputMode; got != taskInputModeFixed {
+				t.Fatalf("review inputMode=%q, want %q", got, taskInputModeFixed)
+			}
 			if tc.resume != "" && len(fake.gets) != 0 {
 				t.Fatalf("review locally inspected resume target: gets=%#v", fake.gets)
 			}
 		})
+	}
+}
+
+func TestReviewCommandsRejectSteeringToggles(t *testing.T) {
+	for _, command := range []string{"review", "adversarial-review"} {
+		for _, flagName := range []string{"--no-steer", "--steerable"} {
+			t.Run(command+"/"+flagName, func(t *testing.T) {
+				fake := &fakeAgentbusClient{hello: helloWithBackends()}
+				restore := stubAgentbusGlobals(t, fake)
+				defer restore()
+
+				var stdout, stderr bytes.Buffer
+				code := run([]string{
+					command, "--backend", "codex", "--cwd", t.TempDir(), flagName,
+				}, nil, &stdout, &stderr)
+				if code == 0 || !strings.Contains(stderr.String(), "flag provided but not defined") {
+					t.Fatalf("code=%d stderr=%q, want unknown steering flag", code, stderr.String())
+				}
+				if len(fake.submits) != 0 {
+					t.Fatalf("submits=%d, want no submission", len(fake.submits))
+				}
+			})
+		}
 	}
 }
 
@@ -632,10 +768,13 @@ func assertTaskReceiptShape(t *testing.T, raw []byte, jobID string) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := len(fields), 8; got != want {
+	if got, want := len(fields), 9; got != want {
 		t.Fatalf("receipt fields=%#v, want exactly %d", fields, want)
 	}
-	for _, key := range []string{"requestId", "workspaceKey", "jobId", "state", "deduplicated", "model", "effort", "timeout"} {
+	if receipt.InputMode != taskInputModeFixed {
+		t.Fatalf("receipt inputMode=%q, want %q", receipt.InputMode, taskInputModeFixed)
+	}
+	for _, key := range []string{"requestId", "workspaceKey", "jobId", "state", "deduplicated", "inputMode", "model", "effort", "timeout"} {
 		if _, found := fields[key]; !found {
 			t.Fatalf("receipt fields=%#v, missing %q", fields, key)
 		}
