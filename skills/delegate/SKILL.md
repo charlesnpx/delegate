@@ -26,11 +26,15 @@ Receipts report `admitted`, `delivered`, `rejected`, or `unknown`. `admitted` me
 
 `--no-steer` submits a fixed task. Reviews are always fixed; new review instructions or evidence need a new review. A generic `delegate task` used as a review must pass `--no-steer`. Cancel stops work and does not deliver a message.
 
-Delegate sends the `inputMode` field and does not silently remove it or downgrade a task. The running Agentbus daemon must support this field; upgrade it if Delegate reports that it does not support steerable tasks. `--no-steer` selects fixed mode on a daemon that supports the field and is not an old-daemon compatibility option.
+Delegate sends the `inputMode` field and does not silently remove it or downgrade a task. The running Agentbus daemon must support this field; upgrade it if Delegate reports that it does not support steerable tasks. The daemon must also support requested `--verify` and `--local-ipc` fields; Delegate reports an unknown field and requires an upgrade without retrying without it. `--no-steer` selects fixed mode on a daemon that supports the field and is not an old-daemon compatibility option.
 
 ## Submit and continue tasks
 
-Task flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, `--no-steer`, and `--tag`. Tasks are steerable by default, and `--no-steer` makes one fixed. This setting is independent of `--write` and `--resume`. `--resume <jobId>` resumes a terminal job and creates a new job with a fresh deadline. `--retain-session` keeps the backend session after completion so this job can be resumed; the session directory is left in place until removed.
+Task flags (15 total) are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, `--no-steer`, `--verify`, `--local-ipc`, and `--tag`. Tasks are steerable by default, and `--no-steer` makes one fixed. This setting is independent of `--write` and `--resume`. `--resume <jobId>` resumes a terminal job and creates a new job with a fresh deadline. `--retain-session` keeps the backend session after completion so this job can be resumed; the session directory is left in place until removed.
+
+`--verify` runs a Codex task read-only against a daemon-created disposable copy of the tracked and untracked, non-ignored files in `--cwd`, with private per-job writable caches and a shared Go module cache for reads. The submitted source is not writable. This protects the source through workflow arrangement and does not provide a stronger isolation boundary than the Codex sandbox. The job's `execution` posture fields `intent: verify`, `frozenCopy`, and `frozenSource` show that it ran in a copy.
+
+`--local-ipc` grants Codex a private short socket directory and loopback TCP for test runners that need IPC, such as Node's test runner. It is available for `--write` or `--verify` tasks on macOS; Linux refuses it.
 
 Timeouts require explicit units. Use values such as `--timeout 90m`, `--timeout 2400s`, or `--timeout 0s` for the Agentbus default. A bare value such as `2400` is rejected; Delegate suggests `2400s` and `40m`.
 
@@ -55,7 +59,7 @@ Add `--retain-session` to each resumed task too if another follow-up will be nee
 Direct `delegate review` and `delegate adversarial-review` accept `--base`,
 `--scope`, `--allow-live-repo-read`, and `--criteria-file`, along with backend,
 cwd, model, effort, and timeout. Both accept `--resume`. They do not
-take task flags such as `--write`, `--prompt-file`, `--schema-file`,
+take task flags such as `--write`, `--verify`, `--local-ipc`, `--prompt-file`, `--schema-file`,
 `--request-id`, `--retain-session`, or `--tag`.
 
 Direct review packets include the diff, full changed text files up to 128 KiB
@@ -130,4 +134,4 @@ Without `--job`, `status` lists summaries from every workspace unless filtered. 
 
 For a selected job, `status`/`result` exit with the job-state code, not a command success/failure code: 0=completed, 2=queued/running, 3=completed-noncompliant, 4=failed, 5=timeout, 6=interrupted, 7=canceled, 14=unknown, and 15=result-artifact-unavailable (completed, but its artifact is unavailable). Codes 10=unknown-job, 11=daemon-startup-failure, and 13=shutdown-deadline are CLI/daemon failures. A listing exits 0 once printed, regardless of member states.
 
-With `--write`, workspace-write access only inside its `--cwd` and no network are Codex-specific guarantees; enforcement depends on the selected Agentbus backend: Claude runs without a filesystem or network sandbox, and Cursor uses agent-mode permissions. For Go builds, set `GOCACHE` under `/tmp` and leave it out of the reviewed workspace; leave `GOMODCACHE` at its default.
+With `--write`, workspace-write access only inside its `--cwd` and no network are Codex-specific guarantees; enforcement depends on the selected Agentbus backend: Claude runs without a filesystem or network sandbox, and Cursor uses agent-mode permissions. Writable Codex task jobs, including Verify, get a managed per-job `GOCACHE` outside the repository and use the populated daemon `GOMODCACHE` for reads. Agentbus does not replace the module cache with an empty per-job directory; missing modules fail offline.
