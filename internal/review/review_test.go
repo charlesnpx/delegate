@@ -268,6 +268,43 @@ func TestAssembleAutoUsesUntrackedRecreationOverBranchDeletion(t *testing.T) {
 	}
 }
 
+func TestAssembleBranchDeletionOmitsUntrackedRecreation(t *testing.T) {
+	repo := newGitFixture(t)
+	writeFixtureFile(t, repo, "recreated.txt", "tracked base content\n")
+	gitFixture(t, repo, "add", "recreated.txt")
+	gitFixture(t, repo, "commit", "-m", "add tracked file")
+	base := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+	gitFixture(t, repo, "switch", "-c", "feature")
+	gitFixture(t, repo, "rm", "recreated.txt")
+	gitFixture(t, repo, "commit", "-m", "delete tracked file")
+	writeFixtureFile(t, repo, "recreated.txt", "UNTRACKED_REPLACEMENT_MUST_NOT_APPEAR\n")
+
+	assembled, err := Assemble(context.Background(), Options{
+		CWD:      repo,
+		Base:     base,
+		Scope:    ScopeBranch,
+		StateDir: filepath.Join(t.TempDir(), "state"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+
+	var entry *ManifestEntry
+	for i := range assembled.Manifest {
+		if assembled.Manifest[i].Path == "recreated.txt" {
+			entry = &assembled.Manifest[i]
+			break
+		}
+	}
+	if entry == nil || entry.Status != "omitted" || entry.Reason != "deleted" {
+		t.Fatalf("recreated.txt manifest entry = %#v, want omitted/deleted", entry)
+	}
+	if strings.Contains(assembled.Inline, "UNTRACKED_REPLACEMENT_MUST_NOT_APPEAR") {
+		t.Fatalf("branch context included untracked replacement content:\n%s", assembled.Inline)
+	}
+}
+
 func TestAssembleSanitizesTrackedAndUntrackedSecretPathsBeforeArtifact(t *testing.T) {
 	repo := newGitFixture(t)
 	writeFixtureFile(t, repo, ".env.production", "TRACKED_SECRET_OLD=never\n")
@@ -640,6 +677,73 @@ func TestDirectPacketSuppliesBoundedSourceManifestAndCriteria(t *testing.T) {
 	criteriaEntry := entries[criteriaPath]
 	if criteriaEntry.Status != "full" || criteriaEntry.SHA256 != digestBytes(criteria) || criteriaEntry.ByteSize != int64(len(criteria)) || !strings.Contains(packet, string(criteria)) {
 		t.Fatalf("criteria content or manifest missing: entry=%#v", criteriaEntry)
+	}
+}
+
+func TestDirectPacketRedactsConnectionStringCutByExcerptBudget(t *testing.T) {
+	repo := newGitFixture(t)
+	const (
+		lineWidth       = 800
+		lineCount       = 180
+		targetLineIndex = 39
+	)
+	linePrefixBytes := len(fmt.Sprintf("%6d | ", 1))
+	bytesBeforeTarget := targetLineIndex * (lineWidth + linePrefixBytes + 1)
+	targetPayloadBytes := MaxPartialFileBytes - bytesBeforeTarget - linePrefixBytes
+	credentialPrefix := "postgres://user:hunter2xyz"
+	paddingBytes := targetPayloadBytes - len(credentialPrefix) - 1
+	if paddingBytes < 0 {
+		t.Fatalf("excerpt budget leaves no room for credential fixture: %d bytes", targetPayloadBytes)
+	}
+
+	lines := make([]string, lineCount)
+	for i := range lines {
+		lines[i] = strings.Repeat("x", lineWidth)
+	}
+	// Place the delimiter exactly beyond the excerpt budget after its line
+	// number prefix, so redacting only the already-truncated excerpt misses it.
+	lines[targetLineIndex] = strings.Repeat("x", paddingBytes) + " " + credentialPrefix + "@host/db"
+	if got := strings.Index(lines[targetLineIndex], "@"); got != targetPayloadBytes {
+		t.Fatalf("fixture @ offset = %d, want excerpt cut at %d bytes", got, targetPayloadBytes)
+	}
+	writeFixtureFile(t, repo, "large.txt", strings.Join(lines, "\n")+"\n")
+	gitFixture(t, repo, "add", "large.txt")
+	gitFixture(t, repo, "commit", "-m", "add oversized fixture")
+	lines[0] = "y" + lines[0][1:]
+	writeFixtureFile(t, repo, "large.txt", strings.Join(lines, "\n")+"\n")
+
+	assembled, err := Assemble(context.Background(), Options{
+		CWD:      repo,
+		Scope:    ScopeWorkingTree,
+		StateDir: filepath.Join(t.TempDir(), "state"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	packet := assembled.Inline
+	if assembled.ArtifactPath != "" {
+		raw, readErr := os.ReadFile(assembled.ArtifactPath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		packet = string(raw)
+	}
+	var entry *ManifestEntry
+	for i := range assembled.Manifest {
+		if assembled.Manifest[i].Path == "large.txt" {
+			entry = &assembled.Manifest[i]
+			break
+		}
+	}
+	if entry == nil || entry.Status != "partial" || entry.Reason != "over-budget" {
+		t.Fatalf("large.txt manifest entry = %#v, want partial/over-budget", entry)
+	}
+	if strings.Contains(packet, "hunter2xyz") {
+		t.Fatalf("packet leaked connection-string password:\n%s", packet)
+	}
+	if !strings.Contains(packet, "[redacted: secret-like") {
+		t.Fatalf("packet did not include a redacted source excerpt:\n%s", packet)
 	}
 }
 
