@@ -39,6 +39,7 @@ type reviewOptions struct {
 	RequestFile       string
 	ArtifactFile      string
 	CharterFile       string
+	CriteriaFile      string
 	Reviewer          string
 }
 
@@ -110,6 +111,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 			Base:              opts.Base,
 			Scope:             opts.Scope,
 			AllowLiveRepoRead: opts.AllowLiveRepoRead,
+			CriteriaFile:      opts.CriteriaFile,
 		})
 		if err != nil {
 			return 0, err
@@ -203,7 +205,13 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute repository working directory")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
-	fs.DurationVar(&opts.Timeout, "timeout", 0, "backend timeout; 0 leaves the deadline to the daemon default")
+	fs.Func("timeout", "backend timeout with an explicit unit; 0s leaves the deadline to the daemon default", func(raw string) error {
+		parsed, err := parseTimeoutDuration(raw)
+		if err == nil {
+			opts.Timeout = parsed
+		}
+		return err
+	})
 	fs.StringVar(&opts.ResumeJobID, "resume", "", "resume a prior job; creates a new job with a fresh deadline")
 	fs.StringVar(&opts.Base, "base", "", "comparison base ref")
 	fs.StringVar(&opts.Scope, "scope", reviewpkg.ScopeAuto, "review scope: auto combines branch and working-tree changes; or working-tree, branch")
@@ -211,6 +219,7 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	fs.StringVar(&opts.RequestFile, "request-file", "", "review-request-v1 or review-request-v2 file for exact-input contract mode")
 	fs.StringVar(&opts.ArtifactFile, "artifact-file", "", "exact review artifact file for contract mode")
 	fs.StringVar(&opts.CharterFile, "charter-file", "", "review charter file for contract mode")
+	fs.StringVar(&opts.CriteriaFile, "criteria-file", "", "pre-fetched acceptance criteria for direct mode")
 	fs.StringVar(&opts.Reviewer, "reviewer", "", "reviewer identifier selected from a review-request-v2 recipe")
 	if err := fs.Parse(args); err != nil {
 		return reviewOptions{}, err
@@ -236,6 +245,9 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 		return reviewOptions{}, fmt.Errorf("contract mode requires non-empty --request-file, --artifact-file, and --charter-file together")
 	}
 	if opts.RequestFile != "" {
+		if provided["criteria-file"] {
+			return reviewOptions{}, fmt.Errorf("--criteria-file is only valid for direct review mode and cannot be used with --request-file contract mode")
+		}
 		for _, name := range []string{"base", "scope", "allow-live-repo-read"} {
 			if provided[name] {
 				return reviewOptions{}, fmt.Errorf("--%s cannot be used with --request-file/--artifact-file/--charter-file contract mode", name)
@@ -243,6 +255,8 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 		}
 	} else if provided["reviewer"] {
 		return reviewOptions{}, fmt.Errorf("--reviewer requires --request-file contract mode")
+	} else if provided["criteria-file"] && opts.CriteriaFile == "" {
+		return reviewOptions{}, fmt.Errorf("--criteria-file requires a non-empty path")
 	}
 	if opts.Scope == reviewpkg.ScopeWorkingTree && opts.Base != "" {
 		return reviewOptions{}, fmt.Errorf("--base cannot be used with --scope working-tree")
@@ -261,9 +275,16 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 }
 
 func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
-	inputCharter, err := charter.ReadFile(opts.CharterFile)
+	charterBytes, err := os.ReadFile(opts.CharterFile)
 	if err != nil {
 		return contractReviewInput{}, fmt.Errorf("read --charter-file %q: %w", opts.CharterFile, err)
+	}
+	if isFrozenCharterEnvelope(charterBytes) {
+		return contractReviewInput{}, fmt.Errorf("--charter-file expects a plain charter.json document (%s), got a frozen charter.freeze.json envelope (%s)", charter.SchemaVersion, charter.FrozenSchemaVersion)
+	}
+	inputCharter, err := charter.ReadBytes(charterBytes)
+	if err != nil {
+		return contractReviewInput{}, fmt.Errorf("read --charter-file %q as a plain charter.json document: %w", opts.CharterFile, err)
 	}
 	frozen, err := charter.Freeze(inputCharter, nil)
 	if err != nil {
@@ -361,6 +382,24 @@ func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
 		RecipeDigest:      input.RecipeDigest,
 		Reviewer:          input.Reviewer,
 	}, nil
+}
+
+func isFrozenCharterEnvelope(data []byte) bool {
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal(data, &shape); err != nil {
+		return false
+	}
+	if _, ok := shape["charter_hash"]; ok {
+		return true
+	}
+	if _, ok := shape["digest_profile"]; ok {
+		return true
+	}
+	var version string
+	if raw, ok := shape["schema_version"]; ok && json.Unmarshal(raw, &version) == nil {
+		return version == charter.FrozenSchemaVersion
+	}
+	return false
 }
 
 func reviewRequestSchemaVersion(data []byte) (string, error) {

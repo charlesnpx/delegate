@@ -297,6 +297,29 @@ func TestTaskSchemaFileAndTimeoutReachAgentbus(t *testing.T) {
 	}
 }
 
+func TestBareNumberTimeoutIsRejectedWithUnitSuggestions(t *testing.T) {
+	want := []string{"2400s", "40m"}
+	_, taskErr := parseTaskOptions([]string{"--backend", "codex", "--prompt-file", "-", "--timeout", "2400"}, &bytes.Buffer{})
+	if taskErr == nil {
+		t.Fatal("bare numeric task timeout unexpectedly accepted")
+	}
+	for _, fragment := range want {
+		if !strings.Contains(taskErr.Error(), fragment) {
+			t.Fatalf("task timeout error=%q, want %q", taskErr, fragment)
+		}
+	}
+
+	_, reviewErr := parseReviewOptions(reviewKind, []string{"--backend", "codex", "--timeout", "2400"}, &bytes.Buffer{})
+	if reviewErr == nil {
+		t.Fatal("bare numeric review timeout unexpectedly accepted")
+	}
+	for _, fragment := range want {
+		if !strings.Contains(reviewErr.Error(), fragment) {
+			t.Fatalf("review timeout error=%q, want %q", reviewErr, fragment)
+		}
+	}
+}
+
 func TestTaskRemovedFlagsAndPositionalPromptAreRejected(t *testing.T) {
 	removed := []string{
 		"--background", "--wait", "--json", "--prompt", "--prompt-stdin", "--handoff-prompt-file",

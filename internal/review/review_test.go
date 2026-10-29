@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -564,6 +565,112 @@ func TestAssembleInlineSanitizedContextAndThresholdBoundaries(t *testing.T) {
 	}
 	if assembled.BackendCWD != assembled.Workspace || assembled.BackendCWD == repo {
 		t.Fatalf("safe backend cwd = %q, workspace=%q repo=%q", assembled.BackendCWD, assembled.Workspace, repo)
+	}
+}
+
+func TestDirectPacketSuppliesBoundedSourceManifestAndCriteria(t *testing.T) {
+	repo := newGitFixture(t)
+	lines := make([]string, 2400)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("source-line-%04d-%s", i+1, strings.Repeat("x", 96))
+	}
+	writeFixtureFile(t, repo, "large.txt", strings.Join(lines, "\n")+"\n")
+	gitFixture(t, repo, "add", "large.txt")
+	gitFixture(t, repo, "commit", "-m", "add large fixture")
+	lines[999] = "large-file-change-marker"
+	writeFixtureFile(t, repo, "large.txt", strings.Join(lines, "\n")+"\n")
+
+	const fullContent = "FULL_POST_CHANGE_CONTENT_MARKER\n"
+	writeFixtureFile(t, repo, "full.txt", fullContent)
+	const secretContent = "SECRET_PATH_CONTENT_MUST_NOT_APPEAR\n"
+	writeFixtureFile(t, repo, ".env.local", secretContent)
+
+	criteriaPath := filepath.Join(t.TempDir(), "criteria.md")
+	criteria := []byte("Acceptance: preserve the public interface verbatim.")
+	if err := os.WriteFile(criteriaPath, criteria, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assembled, err := Assemble(context.Background(), Options{
+		CWD:          repo,
+		Scope:        ScopeWorkingTree,
+		StateDir:     filepath.Join(t.TempDir(), "state"),
+		CriteriaFile: criteriaPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	packet := assembled.Inline
+	if assembled.ArtifactPath != "" {
+		raw, readErr := os.ReadFile(assembled.ArtifactPath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		packet = string(raw)
+	}
+
+	entries := make(map[string]ManifestEntry, len(assembled.Manifest))
+	for _, entry := range assembled.Manifest {
+		entries[entry.Path] = entry
+	}
+	full := entries["full.txt"]
+	if full.Status != "full" || full.SHA256 != digestBytes([]byte(fullContent)) || full.ByteSize != int64(len(fullContent)) {
+		t.Fatalf("full.txt manifest entry=%#v", full)
+	}
+	if !strings.Contains(packet, fullContent) {
+		t.Fatalf("packet does not contain complete changed text file:\n%s", packet)
+	}
+
+	large := entries["large.txt"]
+	largeBytes := []byte(strings.Join(lines, "\n") + "\n")
+	if large.Status != "partial" || large.Reason != "over-budget" || large.SHA256 != digestBytes(largeBytes) || large.ByteSize != int64(len(largeBytes)) {
+		t.Fatalf("large.txt manifest entry=%#v, want bounded partial with original digest", large)
+	}
+	if !strings.Contains(packet, "large-file-change-marker") || !strings.Contains(packet, "source-line-0960-") {
+		t.Fatalf("partial packet omitted changed hunk or generous surrounding context")
+	}
+
+	secret := entries[".env.local"]
+	if secret.Status != "omitted" || secret.Reason != "secret-path" || secret.SHA256 != digestBytes([]byte(secretContent)) || secret.ByteSize != int64(len(secretContent)) {
+		t.Fatalf("secret path manifest entry=%#v", secret)
+	}
+	if strings.Contains(packet, secretContent) {
+		t.Fatalf("packet leaked secret-path content")
+	}
+	criteriaEntry := entries[criteriaPath]
+	if criteriaEntry.Status != "full" || criteriaEntry.SHA256 != digestBytes(criteria) || criteriaEntry.ByteSize != int64(len(criteria)) || !strings.Contains(packet, string(criteria)) {
+		t.Fatalf("criteria content or manifest missing: entry=%#v", criteriaEntry)
+	}
+}
+
+func TestUnbornWorkingTreeReviewUsesEmptyTreeBase(t *testing.T) {
+	repo := t.TempDir()
+	gitFixture(t, repo, "init", "-b", "main")
+	gitFixture(t, repo, "config", "user.name", "Delegate Test")
+	gitFixture(t, repo, "config", "user.email", "delegate@example.invalid")
+	writeFixtureFile(t, repo, "new.txt", "unborn-working-tree-change\n")
+	emptyTree := gitFixtureOutput(t, repo, "hash-object", "-t", "tree", "/dev/null")
+
+	assembled, err := Assemble(context.Background(), Options{
+		CWD:      repo,
+		Scope:    ScopeWorkingTree,
+		StateDir: filepath.Join(t.TempDir(), "state"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	if assembled.Base.Source != "empty-tree" || assembled.Base.Commit != emptyTree || assembled.ComparisonBase != emptyTree {
+		t.Fatalf("unborn review base=%#v comparison=%q, want empty tree %s", assembled.Base, assembled.ComparisonBase, emptyTree)
+	}
+	if !strings.Contains(assembled.Inline, "unborn-working-tree-change") {
+		t.Fatalf("unborn working-tree change missing from packet: %q", assembled.Inline)
+	}
+	if !strings.Contains(assembled.Inline, "empty_tree_base\t"+emptyTree) {
+		t.Fatalf("unborn packet did not identify the empty-tree base: %q", assembled.Inline)
+	}
+	if err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Run(); err == nil {
+		t.Fatal("unborn review created a commit")
 	}
 }
 

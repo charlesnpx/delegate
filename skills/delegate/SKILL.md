@@ -25,6 +25,8 @@ To deliver a follow-up in the same backend conversation, wait for the original j
 
 Task flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, and `--tag`. `--resume <jobId>` resumes a prior job and creates a new job with a fresh deadline. `--retain-session` keeps the backend session after completion so this job can be resumed; the session directory is left in place until removed.
 
+Timeouts require explicit units. Use values such as `--timeout 90m`, `--timeout 2400s`, or `--timeout 0s` for the Agentbus default. A bare value such as `2400` is rejected; Delegate suggests `2400s` and `40m`.
+
 Continue the same backend conversation in two steps:
 
 ```sh
@@ -38,6 +40,33 @@ printf '%s' "$FOLLOWUP" | delegate task --backend codex --resume <jobId> --cwd <
 Without `--retain-session`, a completed job cannot be resumed. This is not a bug; the session is cleaned up when the job completes. `--resume` creates a new job with a fresh deadline and its own result; the original job's result is unchanged and remains final. A retained session directory stays on disk until an operator removes it. `--retain-session` is accepted only by `delegate task`; the review commands are schema/report workflows, not conversations to continue.
 
 Add `--retain-session` to each resumed task too if another follow-up will be needed after it completes. Retention cannot be added retroactively to a completed job whose session was cleaned up. Failed, canceled, and unknown terminal jobs retain session directories, but resumption still requires a recorded backend session ID; cancellation alone does not guarantee resumability.
+
+## Review commands
+
+Direct `delegate review` and `delegate adversarial-review` accept `--base`,
+`--scope`, `--allow-live-repo-read`, and `--criteria-file`, along with backend,
+cwd, model, effort, and timeout. Both accept `--resume`. They do not
+take task flags such as `--write`, `--prompt-file`, `--schema-file`,
+`--request-id`, `--retain-session`, or `--tag`.
+
+Direct review packets include the diff, full changed text files up to 128 KiB
+each within a 512 KiB combined source-and-criteria budget, and a manifest with
+path, original byte size, SHA-256, and `full`, `partial`, or `omitted` status.
+Oversized files get changed-hunk context with up to 40 surrounding lines and a
+32 KiB per-file excerpt limit. Binary files, secret paths, and deleted paths
+are listed with an omission reason. Secret-like content is redacted.
+
+Use `--criteria-file <path>` to include pre-fetched UTF-8 acceptance criteria
+in the direct packet. The file is limited to 256 KiB; its content and hash
+appear in the packet manifest. Delegate does not fetch criteria over the
+network. The flag is not valid with contract mode. `--allow-live-repo-read` applies to direct reviews only; it
+does not supplement exact-input contract reviews.
+
+A working-tree review supports a repository with no commits by using Git's
+empty tree as the comparison base without creating a dummy commit. A `--cwd`
+inside a repository subdirectory still resolves to that parent repository.
+Branch scope refuses changed paths that also differ in the working tree so its
+diff and supplied source content describe the same committed snapshot.
 
 Contract mode has two request forms. The v1 request/artifact form uses
 `--request-file <review-request-v1.json> --artifact-file <review.patch>
@@ -65,12 +94,16 @@ the frozen recipe instructions verbatim, so reviewer names are open data rather
 than a Delegate registry. The v2 result is a `review-report-v2` object and is
 later read by the host through Agentbus.
 
-Both forms carry caller-frozen request, artifact, and charter inputs verbatim.
-Delegate does not run secret-path, history, or content redaction on them, so
-callers are responsible for screening them. Delegate only submits and returns
-the receipt; it does not wait, poll, fetch a result, or construct a completion
-document. A v2 submission's replay identity includes its reviewer, so separate
-reviewers from one recipe are separate tasks.
+Both forms require `--charter-file` to contain a plain `charter.json`
+(`review-charter-v2`) input. Delegate rejects a frozen `charter.freeze.json`
+envelope with an error naming the expected and received shapes. Delegate
+freezes the plain charter for the contract workflow. Direct-mode packet
+construction does not change contract prompts, digests, or artifact handling.
+Delegate does not run secret-path, history, or content redaction on contract
+inputs, so callers are responsible for screening them. Delegate only submits
+and returns the receipt; it does not wait, poll, fetch a result, or construct a
+completion document. A v2 submission's replay identity includes its reviewer,
+so separate reviewers from one recipe are separate tasks.
 
 Submission is asynchronous. After an ambiguous submission, reuse the same `--request-id` and run from the same canonical `--cwd` (the replay key is their pair); a replay returns `deduplicated: true` and the original job ID. The immutable task specification is hashed too, so enabling `--retain-session` is a different replay identity, while omitting it preserves existing replay behavior. Observe a job with Agentbus:
 
