@@ -135,6 +135,11 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 	if err := writeTaskSubmitReceipt(stdout, opts, submitted); err != nil {
 		return 0, submissionError(opts.RequestID, err)
 	}
+	if submitted.Queue != nil {
+		queue := submitted.Queue
+		_, _ = fmt.Fprintf(stderr, "notice: job is queued at position %d for backend %s (%d of %d backend slots in use, %d of %d daemon slots); it starts when a slot frees.\n",
+			queue.Position, opts.Backend, queue.BackendRunning, queue.BackendLimit, queue.Running, queue.Limit)
+	}
 	return 0, nil
 }
 
