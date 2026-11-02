@@ -92,8 +92,8 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 			t.Fatalf("timeout fields=%#v, missing %q", timeoutFields, key)
 		}
 	}
-	if !strings.Contains(stderr.String(), readOnlyTaskHint) {
-		t.Fatalf("stderr=%q, want read-only notice", stderr.String())
+	if got, want := stderr.String(), readOnlyTaskHint+"\n"; got != want {
+		t.Fatalf("stderr=%q, want unchanged non-Claude read-only notice %q", got, want)
 	}
 	if strings.Contains(stderr.String(), "unadvertised") {
 		t.Fatalf("stderr=%q, task must not validate model/effort catalogs", stderr.String())
@@ -119,6 +119,20 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	}
 	if len(fake.gets) != 0 {
 		t.Fatalf("task inspected jobs after submit: gets=%d", len(fake.gets))
+	}
+}
+
+func TestTaskClaudeReadOnlyNoticeNamesShellRestriction(t *testing.T) {
+	fake := &fakeAgentbusClient{hello: helloWithBackends()}
+	restore := stubAgentbusGlobals(t, fake)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"task", "--backend", "claude", "--cwd", t.TempDir(), "--prompt-file", "-"}, strings.NewReader("investigate this"), &stdout, &stderr); code != 0 {
+		t.Fatalf("task code=%d stderr=%q", code, stderr.String())
+	}
+	if got, want := stderr.String(), claudeReadOnlyTaskHint+"\n"; got != want {
+		t.Fatalf("stderr=%q, want Claude read-only notice %q", got, want)
 	}
 }
 

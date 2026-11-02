@@ -44,6 +44,7 @@ type taskOptions struct {
 const (
 	agentbusMaxTimeout                      = 4 * time.Hour
 	readOnlyTaskHint                        = "notice: task will run with a read-only backend profile; pass --write for edits or builds."
+	claudeReadOnlyTaskHint                  = "notice: task will run with a read-only backend profile; for claude this also restricts the shell to simple read commands (no pipes, compound commands, or web fetch). Pass --write for edits, builds, or investigation that needs a shell."
 	taskInputModeFixed     client.InputMode = "fixed"
 	taskInputModeSteerable client.InputMode = "steerable"
 )
@@ -117,7 +118,11 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 		return 0, err
 	}
 	if !opts.Write && !opts.Verify {
-		if _, err := fmt.Fprintln(stderr, readOnlyTaskHint); err != nil {
+		hint := readOnlyTaskHint
+		if opts.Backend == "claude" {
+			hint = claudeReadOnlyTaskHint
+		}
+		if _, err := fmt.Fprintln(stderr, hint); err != nil {
 			return 0, err
 		}
 	}
