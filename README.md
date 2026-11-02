@@ -134,6 +134,8 @@ Each successful `task`, `review`, or `adversarial-review` submission writes one 
 
 `model` and `effort` are omitted when their flags were not supplied. The timeout values are Agentbus's returned values, not a local interpretation. `workspaceKey` lets an operator scope Agentbus status queries to the workspace that submitted the job with `agentbus status --workspace-key <key>`.
 
+When Agentbus reports that a task cannot start at once, Delegate prints a queue notice to stderr. Use `agentbus status --job <id>` to see its current queue position.
+
 For replay safety, Agentbus's replay key is the pair of request ID and working directory: after an ambiguous submission, reuse that exact `--request-id` and run against the same working directory. If it has already been accepted, the replay receipt has `deduplicated: true` and carries the original job ID. Agentbus also hashes the immutable task specification, so enabling `--retain-session` changes the replay identity and is a conflict rather than a replay; leaving it absent preserves the existing hash. Without the flag, Delegate generates an ID and includes it in the receipt. That is convenient for a normal one-off invocation, but it has a deliberate trade-off: if a manually run command is hard-killed before its generated receipt is visible, Delegate has not retained that generated ID for a later replay. Use an explicit request ID whenever replay matters.
 
 ## Observe jobs with Agentbus

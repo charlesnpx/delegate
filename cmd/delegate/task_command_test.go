@@ -22,6 +22,10 @@ const (
 
 func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) {
 	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
+	var queueResult client.JobSubmitResult
+	if err := json.Unmarshal([]byte(`{"queue":{"position":2,"backendRunning":2,"backendLimit":2,"running":4,"limit":4}}`), &queueResult); err != nil {
+		t.Fatalf("decode queue projection: %v", err)
+	}
 	fake := &fakeAgentbusClient{
 		hello: helloWithBackends(),
 		submitResult: client.JobSubmitResult{
@@ -29,6 +33,7 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 			State:        publicStateQueued,
 			Deduplicated: false,
 			Timeout:      timeout,
+			Queue:        queueResult.Queue,
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)
@@ -92,8 +97,9 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 			t.Fatalf("timeout fields=%#v, missing %q", timeoutFields, key)
 		}
 	}
-	if got, want := stderr.String(), readOnlyTaskHint+"\n"; got != want {
-		t.Fatalf("stderr=%q, want unchanged non-Claude read-only notice %q", got, want)
+	wantQueueNotice := "notice: job is queued at position 2 for backend codex (2 of 2 backend slots in use, 4 of 4 daemon slots); it starts when a slot frees.\n"
+	if got, want := stderr.String(), readOnlyTaskHint+"\n"+wantQueueNotice; got != want {
+		t.Fatalf("stderr=%q, want read-only notice and queued notice %q", got, want)
 	}
 	if strings.Contains(stderr.String(), "unadvertised") {
 		t.Fatalf("stderr=%q, task must not validate model/effort catalogs", stderr.String())

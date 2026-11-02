@@ -11,7 +11,7 @@ Submit one task by piping its prompt to stdin:
 printf '%s' "$PROMPT" | delegate task --backend <name> --cwd <abs> --prompt-file -
 ```
 
-`--prompt-file -` reads the prompt from stdin. The submit receipt is JSON on stdout; notices and errors go to stderr.
+`--prompt-file -` reads the prompt from stdin. The submit receipt is JSON on stdout; notices and errors go to stderr. When Agentbus reports that a task cannot start at once, Delegate prints a queue notice; `agentbus status --job <id>` shows its current queue position.
 
 ## Steering active tasks and job control
 
