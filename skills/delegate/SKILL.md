@@ -11,7 +11,7 @@ Submit one task by piping its prompt to stdin:
 printf '%s' "$PROMPT" | delegate task --backend <name> --cwd <abs> --prompt-file -
 ```
 
-`--prompt-file -` reads the prompt from stdin. The submit receipt is JSON on stdout; notices and errors go to stderr.
+`--prompt-file -` reads the prompt from stdin. The submit receipt is JSON on stdout; notices and errors go to stderr. When Agentbus reports that a task cannot start at once, Delegate prints a queue notice; `agentbus status --job <id>` shows its current queue position.
 
 ## Steering active tasks and job control
 
@@ -31,6 +31,8 @@ Delegate sends the `inputMode` field and does not silently remove it or downgrad
 ## Submit and continue tasks
 
 Task flags (15 total) are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, `--no-steer`, `--verify`, `--local-ipc`, and `--tag`. Tasks are steerable by default, and `--no-steer` makes one fixed. This setting is independent of `--write` and `--resume`. `--resume <jobId>` resumes a terminal job and creates a new job with a fresh deadline. `--retain-session` keeps the backend session after completion so this job can be resumed; the session directory is left in place until removed.
+
+Without `--write`, the Claude backend restricts shell commands to a short read-only allow list. Use `--write` for investigation tasks that need a general shell.
 
 `--verify` runs a Codex task read-only against a daemon-created disposable copy of the tracked and untracked, non-ignored files in `--cwd`, with private per-job writable caches and a shared Go module cache for reads. The submitted source is not writable. This protects the source through workflow arrangement and does not provide a stronger isolation boundary than the Codex sandbox. The job's `execution` posture fields `intent: verify`, `frozenCopy`, and `frozenSource` show that it ran in a copy.
 

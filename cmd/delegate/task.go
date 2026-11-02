@@ -44,6 +44,7 @@ type taskOptions struct {
 const (
 	agentbusMaxTimeout                      = 4 * time.Hour
 	readOnlyTaskHint                        = "notice: task will run with a read-only backend profile; pass --write for edits or builds."
+	claudeReadOnlyTaskHint                  = "notice: task will run with a read-only backend profile; for claude this also restricts the shell to simple read commands (no pipes, compound commands, or web fetch). Pass --write for edits, builds, or investigation that needs a shell."
 	taskInputModeFixed     client.InputMode = "fixed"
 	taskInputModeSteerable client.InputMode = "steerable"
 )
@@ -117,7 +118,11 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 		return 0, err
 	}
 	if !opts.Write && !opts.Verify {
-		if _, err := fmt.Fprintln(stderr, readOnlyTaskHint); err != nil {
+		hint := readOnlyTaskHint
+		if opts.Backend == "claude" {
+			hint = claudeReadOnlyTaskHint
+		}
+		if _, err := fmt.Fprintln(stderr, hint); err != nil {
 			return 0, err
 		}
 	}
@@ -129,6 +134,11 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 	defer func() { _ = c.Close() }()
 	if err := writeTaskSubmitReceipt(stdout, opts, submitted); err != nil {
 		return 0, submissionError(opts.RequestID, err)
+	}
+	if submitted.Queue != nil {
+		queue := submitted.Queue
+		_, _ = fmt.Fprintf(stderr, "notice: job is queued at position %d for backend %s (%d of %d backend slots in use, %d of %d daemon slots); it starts when a slot frees.\n",
+			queue.Position, opts.Backend, queue.BackendRunning, queue.BackendLimit, queue.Running, queue.Limit)
 	}
 	return 0, nil
 }
