@@ -36,7 +36,7 @@ Without `--write`, the Claude backend restricts shell commands to a short read-o
 
 `--verify` runs a Codex task read-only against a daemon-created disposable copy of the tracked and untracked, non-ignored files in `--cwd`, with private per-job writable caches and a shared Go module cache for reads. The submitted source is not writable. This protects the source through workflow arrangement and does not provide a stronger isolation boundary than the Codex sandbox. The job's `execution` posture fields `intent: verify`, `frozenCopy`, and `frozenSource` show that it ran in a copy.
 
-`--local-ipc` grants Codex a private short socket directory and loopback TCP for test runners that need IPC, such as Node's test runner. It is available for `--write` or `--verify` tasks on macOS; Linux refuses it.
+`--local-ipc` provides a private short socket directory for test runners that need IPC, such as Node's test runner; macOS also permits loopback TCP. It is available for Codex `--write` and `--verify` tasks on macOS and Linux, including sccache workloads; Linux requires Agentbus 0.17.0 or later. On Linux, the job can connect to any host Unix socket at a path it can read unless the path is masked. Abstract sockets, host loopback TCP, and external network access remain blocked, and the execution posture reports `localIPC: "all-unix-sockets"`. Rust worker launches and writable review launches pass `--write --local-ipc`; the writable review command is `delegate task --write --no-steer --local-ipc`.
 
 Timeouts require explicit units. Use values such as `--timeout 90m`, `--timeout 2400s`, or `--timeout 0s` for the Agentbus default. A bare value such as `2400` is rejected; Delegate suggests `2400s` and `40m`.
 
