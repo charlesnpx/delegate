@@ -172,8 +172,18 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	head, headErr := resolveCommit(ctx, repoRoot, "HEAD")
 	unborn := false
 	if headErr != nil {
-		if _, symbolicErr := gitOutput(ctx, repoRoot, false, "symbolic-ref", "--quiet", "HEAD"); symbolicErr != nil {
+		rawRef, symbolicErr := gitOutput(ctx, repoRoot, false, "symbolic-ref", "--quiet", "--no-recurse", "HEAD")
+		ref := strings.TrimSpace(string(rawRef))
+		if symbolicErr != nil || !strings.HasPrefix(ref, "refs/heads/") {
 			return Context{}, fmt.Errorf("resolve review HEAD: %w", headErr)
+		}
+		_, refErr := gitOutput(ctx, repoRoot, false, "show-ref", "--exists", ref)
+		if refErr == nil {
+			return Context{}, fmt.Errorf("resolve review HEAD: branch %q exists but its commit cannot be resolved: %w", RedactSecretLikeDiagnostic(ref), headErr)
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(refErr, &exitErr) || exitErr.ExitCode() != 2 {
+			return Context{}, fmt.Errorf("inspect review HEAD reference: %w", refErr)
 		}
 		unborn = true
 		head = ""
@@ -303,6 +313,14 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	remainingPatch := maxCaptureBytes
 	for i := range changed {
 		file := &changed[i]
+		file.screeningFailed = redactAll
+		file.Redacted = redactAll || IsSecretPath(file.Path) || IsSecretPath(file.sourcePath) || secretPaths[file.Path] || secretPaths[file.sourcePath]
+		// Copy relationships have already contributed to taint. Present the
+		// destination as an addition so its diff uses only its own blob pair.
+		if strings.HasPrefix(file.Status, "C") {
+			file.Status = "A"
+			file.sourcePath = ""
+		}
 		file.post = after[file.Path]
 		file.blob = blobs[file.post.id]
 		oldPath := file.Path
@@ -317,11 +335,11 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 				}
 			}
 		}
-		file.screeningFailed = redactAll
-		file.Redacted = redactAll || IsSecretPath(file.Path) || IsSecretPath(file.sourcePath) || secretPaths[file.Path] || secretPaths[file.sourcePath]
-		args := []string{"diff", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", "--find-copies", "--find-copies-harder", "--src-prefix=a/", "--dst-prefix=b/", comparison, postTree, "--"}
-		args = append(args, file.paths()...)
-		file.diff, err = gitLimitedOutput(fixedCtx, repoRoot, false, nil, remainingPatch, args...)
+		args := []string{"diff", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", "--src-prefix=a/", "--dst-prefix=b/", comparison, postTree, "--"}
+		for _, path := range file.paths() {
+			args = append(args, exactPathspec(path))
+		}
+		file.diff, err = gitLimitedOutput(fixedCtx, repoRoot, false, nil, remainingPatch, false, args...)
 		if err != nil {
 			return Context{}, fmt.Errorf("render captured review diff: %w", err)
 		}
@@ -1159,6 +1177,26 @@ func (file changedFile) paths() []string {
 	return []string{file.sourcePath, file.Path}
 }
 
+// Git's literal pathspecs also match descendants of a named directory. Force
+// a glob on the first byte, then escape every other glob metacharacter so the
+// pattern matches exactly one path, even across file/directory replacements.
+func exactPathspec(path string) string {
+	var pattern strings.Builder
+	pattern.WriteString(":(top,glob)[")
+	if strings.ContainsRune(`\[]-!^`, rune(path[0])) {
+		pattern.WriteByte('\\')
+	}
+	pattern.WriteByte(path[0])
+	pattern.WriteByte(']')
+	for i := 1; i < len(path); i++ {
+		if strings.ContainsRune(`\[*?]`, rune(path[i])) {
+			pattern.WriteByte('\\')
+		}
+		pattern.WriteByte(path[i])
+	}
+	return pattern.String()
+}
+
 func splitNUL(raw []byte) []string {
 	if len(raw) == 0 {
 		return nil
@@ -1543,11 +1581,9 @@ func writePrivateFile(path string, payload []byte) error {
 	return nil
 }
 
-func gitCommandArgs(ctx context.Context, cwd string, args ...string) []string {
+func gitCommandArgs(ctx context.Context, cwd string, literalPaths bool, args ...string) []string {
 	commandArgs := []string{"-C", cwd}
-	// check-ignore does not support Git's literal pathspec magic; its arguments
-	// are paths, separated from options with --.
-	if len(args) == 0 || args[0] != "check-ignore" {
+	if literalPaths {
 		commandArgs = append(commandArgs, "--literal-pathspecs")
 	}
 	commandArgs = append(commandArgs, "-c", "core.attributesFile=/dev/null", "-c", "attr.tree=refs/delegate/empty-attributes")
@@ -1558,11 +1594,8 @@ func gitCommandArgs(ctx context.Context, cwd string, args ...string) []string {
 }
 
 func gitOutput(ctx context.Context, cwd string, acceptDiff bool, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", gitCommandArgs(ctx, cwd, args...)...)
+	cmd := exec.CommandContext(ctx, "git", gitCommandArgs(ctx, cwd, true, args...)...)
 	cmd.Env = append(gitEnvironment(ctx), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1")
-	if len(args) > 0 && args[0] == "check-ignore" {
-		cmd.Env = append(cmd.Env, "GIT_LITERAL_PATHSPECS=0")
-	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -1578,7 +1611,7 @@ func gitOutput(ctx context.Context, cwd string, acceptDiff bool, args ...string)
 	if detail == "" {
 		detail = err.Error()
 	}
-	return nil, errors.New(RedactSecretLikeDiagnostic(detail))
+	return nil, &reviewDiagnosticError{cause: err, message: RedactSecretLikeDiagnostic(detail)}
 }
 
 func configuredFilterDrivers(ctx context.Context, cwd string) []string {
