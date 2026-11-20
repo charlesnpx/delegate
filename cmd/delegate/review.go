@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/charlesnpx/agentbus/engine"
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
 	"github.com/charlesnpx/witness/contract/charter"
 	reviewcontract "github.com/charlesnpx/witness/contract/review"
@@ -34,6 +35,7 @@ type reviewOptions struct {
 	Model             string
 	Effort            string
 	Timeout           time.Duration
+	TimeoutSet        bool
 	ResumeJobID       string
 	Base              string
 	Scope             string
@@ -65,8 +67,10 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	if err != nil {
 		return 0, err
 	}
+	connectionCtx := withAgentbusSelection(context.Background())
 	taskOpts := taskOptions{
 		Backend:     opts.Backend,
+		Intent:      engine.IntentInspect,
 		InputMode:   taskInputModeFixed,
 		Model:       opts.Model,
 		Effort:      opts.Effort,
@@ -135,7 +139,7 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		}
 	}
 
-	for _, sweepErr := range sweepReviewWorkspaces(context.Background(), assembled.StateDir) {
+	for _, sweepErr := range sweepReviewWorkspaces(connectionCtx, assembled.StateDir) {
 		if _, err := fmt.Fprintf(stderr, "warning: review workspace sweep: %v\n", sweepErr); err != nil {
 			_ = reviewpkg.Cleanup(assembled)
 			return 0, err
@@ -156,8 +160,9 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	}
 	taskOpts.CWD = assembled.BackendCWD
 	taskOpts.Timeout = opts.Timeout
+	taskOpts.TimeoutSet = opts.TimeoutSet
 	taskOpts.LogicalWorkspace = logicalWorkspace
-	submitted, c, agentbusStateRoot, err := submitTask(context.Background(), &taskOpts, prompt, schema)
+	submitted, c, agentbusStateRoot, err := submitTask(connectionCtx, &taskOpts, prompt, schema, stderr)
 	var unresolved *submissionUnresolvedError
 	cleanupWorkspace := err != nil && !errors.As(err, &unresolved)
 	if cleanupWorkspace {
@@ -185,16 +190,16 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 			Workspace:         assembled.Workspace,
 			AgentbusStateRoot: agentbusStateRoot,
 		}); err != nil {
-			return 0, fmt.Errorf("record review workspace for job %s: %w", submitted.JobID, err)
+			return 0, fmt.Errorf("submission admitted for requestId %s jobId %s; record review workspace: %w", taskOpts.RequestID, submitted.JobID, err)
 		}
 	}
 	if opts.AllowLiveRepoRead {
 		if _, err := fmt.Fprintf(stderr, "warning: %s\n", liveRepoReadWarning); err != nil {
-			return 0, err
+			return 0, fmt.Errorf("submission admitted for requestId %s jobId %s; write warning: %w", taskOpts.RequestID, submitted.JobID, err)
 		}
 	}
 	if err := writeTaskSubmitReceipt(stdout, taskOpts, submitted); err != nil {
-		return 0, submissionError(taskOpts.RequestID, err)
+		return 0, fmt.Errorf("submission admitted for requestId %s jobId %s; write receipt: %w", taskOpts.RequestID, submitted.JobID, err)
 	}
 	return 0, nil
 }
@@ -221,10 +226,11 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute repository working directory")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
-	fs.Func("timeout", "backend timeout with an explicit unit; 0s leaves the deadline to the daemon default", func(raw string) error {
+	fs.Func("timeout", "execution timeout (default 2h; 0 or 0s means unlimited; maximum 4h)", func(raw string) error {
 		parsed, err := parseTimeoutDuration(raw)
 		if err == nil {
 			opts.Timeout = parsed
+			opts.TimeoutSet = true
 		}
 		return err
 	})
@@ -248,6 +254,14 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	}
 	provided := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { provided[f.Name] = true })
+	if provided["cwd"] && opts.CWD == "" {
+		return reviewOptions{}, fmt.Errorf("--cwd must be absolute")
+	}
+	for _, name := range []string{"model", "effort"} {
+		if provided[name] && fs.Lookup(name).Value.String() == "" {
+			return reviewOptions{}, fmt.Errorf("--%s must be nonempty", name)
+		}
+	}
 	contractFileCount := 0
 	for _, path := range []string{opts.RequestFile, opts.ArtifactFile, opts.CharterFile} {
 		if path != "" {

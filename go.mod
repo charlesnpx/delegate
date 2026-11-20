@@ -3,7 +3,7 @@ module github.com/charlesnpx/delegate
 go 1.26
 
 require (
-	github.com/charlesnpx/agentbus v0.17.2
+	github.com/charlesnpx/agentbus v0.18.0
 	github.com/charlesnpx/witness v0.8.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 )
@@ -12,3 +12,5 @@ require (
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 )
+
+replace github.com/charlesnpx/agentbus => /Users/Charles.Anderson/WebstormProjects/agentbus-candidate
