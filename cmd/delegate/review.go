@@ -295,9 +295,6 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	if opts.RequestFile == "" && provided["base"] && opts.Base == "" {
 		return reviewOptions{}, fmt.Errorf("--base requires a non-empty ref")
 	}
-	if err := validateTimeoutOption(opts.Timeout); err != nil {
-		return reviewOptions{}, err
-	}
 	if opts.CWD == "" {
 		cwd, err := os.Getwd()
 		if err != nil {

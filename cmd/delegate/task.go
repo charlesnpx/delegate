@@ -257,9 +257,6 @@ func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
 	if opts.PromptFile == "" {
 		return taskOptions{}, fmt.Errorf("delegate task requires --prompt-file")
 	}
-	if err := validateTimeoutOption(opts.Timeout); err != nil {
-		return taskOptions{}, err
-	}
 	cwd := opts.CWD
 	if cwd == "" {
 		var err error
@@ -280,19 +277,6 @@ func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
 		opts.Tags = cloneTaskTags(tags)
 	}
 	return opts, nil
-}
-
-func validateTimeoutOption(timeout time.Duration) error {
-	if timeout < 0 {
-		return fmt.Errorf("--timeout must be non-negative")
-	}
-	if timeout > agentbusMaxTimeout {
-		return fmt.Errorf("--timeout must be at most %s", agentbusMaxTimeout)
-	}
-	if timeout%time.Millisecond != 0 {
-		return fmt.Errorf("--timeout must be a whole number of milliseconds")
-	}
-	return nil
 }
 
 var timeoutComponent = regexp.MustCompile(`([0-9]+(\.[0-9]*)?|\.[0-9]+)(ns|us|µs|μs|ms|s|m|h)`)
