@@ -18,12 +18,13 @@ import (
 func TestResolveBaseFallbackChain(t *testing.T) {
 	t.Run("explicit", func(t *testing.T) {
 		repo := newGitFixture(t)
-		got, err := ResolveBase(context.Background(), repo, "HEAD")
+		head := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+		got, err := resolveBaseAtHead(context.Background(), repo, "HEAD", head)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got.Source != "explicit" || got.Ref != "HEAD" || got.Commit == "" {
-			t.Fatalf("ResolveBase() = %#v", got)
+			t.Fatalf("resolveBaseAtHead() = %#v", got)
 		}
 	})
 
@@ -37,12 +38,13 @@ func TestResolveBaseFallbackChain(t *testing.T) {
 		writeFixtureFile(t, repo, "unpushed.txt", "local commit\n")
 		gitFixture(t, repo, "add", "unpushed.txt")
 		gitFixture(t, repo, "commit", "-m", "unpushed change")
-		got, err := ResolveBase(context.Background(), repo, "")
+		head := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+		got, err := resolveBaseAtHead(context.Background(), repo, "", head)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got.Source != "upstream-unpushed" || got.Ref != "origin/main" || got.Commit != upstreamHead {
-			t.Fatalf("ResolveBase() = %#v, want unpushed upstream origin/main at %s", got, upstreamHead)
+			t.Fatalf("resolveBaseAtHead() = %#v, want unpushed upstream origin/main at %s", got, upstreamHead)
 		}
 	})
 
@@ -51,12 +53,12 @@ func TestResolveBaseFallbackChain(t *testing.T) {
 		head := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
 		gitFixture(t, repo, "update-ref", "refs/remotes/origin/main", head)
 		gitFixture(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
-		got, err := ResolveBase(context.Background(), repo, "")
+		got, err := resolveBaseAtHead(context.Background(), repo, "", head)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got.Source != "default-remote" || got.Ref != "origin/main" || got.Commit != head {
-			t.Fatalf("ResolveBase() = %#v, want default origin/main at %s", got, head)
+			t.Fatalf("resolveBaseAtHead() = %#v, want default origin/main at %s", got, head)
 		}
 	})
 
@@ -66,24 +68,25 @@ func TestResolveBaseFallbackChain(t *testing.T) {
 		gitFixture(t, repo, "remote", "add", "upstream", repo)
 		gitFixture(t, repo, "update-ref", "refs/remotes/upstream/trunk", head)
 		gitFixture(t, repo, "symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/trunk")
-		got, err := ResolveBase(context.Background(), repo, "")
+		got, err := resolveBaseAtHead(context.Background(), repo, "", head)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got.Source != "default-remote" || got.Ref != "upstream/trunk" || got.Commit != head {
-			t.Fatalf("ResolveBase() = %#v, want default upstream/trunk at %s", got, head)
+			t.Fatalf("resolveBaseAtHead() = %#v, want default upstream/trunk at %s", got, head)
 		}
 	})
 
 	t.Run("guidance", func(t *testing.T) {
 		repo := newGitFixture(t)
-		_, err := ResolveBase(context.Background(), repo, "")
+		head := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+		_, err := resolveBaseAtHead(context.Background(), repo, "", head)
 		if err == nil {
-			t.Fatal("ResolveBase() error = nil")
+			t.Fatal("resolveBaseAtHead() error = nil")
 		}
 		for _, fragment := range []string{"--base <ref>", "upstream behind HEAD", "default remote branch"} {
 			if !strings.Contains(err.Error(), fragment) {
-				t.Fatalf("ResolveBase() error = %q, want %q", err, fragment)
+				t.Fatalf("resolveBaseAtHead() error = %q, want %q", err, fragment)
 			}
 		}
 	})
@@ -103,100 +106,12 @@ func TestResolveBasePushedFeaturePrefersDefaultRemoteBranch(t *testing.T) {
 	gitFixture(t, repo, "config", "branch.feature.remote", "origin")
 	gitFixture(t, repo, "config", "branch.feature.merge", "refs/heads/feature")
 
-	got, err := ResolveBase(context.Background(), repo, "")
+	got, err := resolveBaseAtHead(context.Background(), repo, "", featureHead)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Ref != "origin/main" || got.Source != "default-remote" || got.Commit != mainHead {
-		t.Fatalf("ResolveBase() = %#v, want default origin/main at %s", got, mainHead)
-	}
-}
-
-func TestVerifyHeadUnchanged(t *testing.T) {
-	const captured = "1111111111111111111111111111111111111111"
-	tests := []struct {
-		name     string
-		captured string
-		current  string
-		wantErr  string
-	}{
-		{name: "equal", captured: captured, current: captured},
-		{
-			name:     "different",
-			captured: captured,
-			current:  "2222222222222222222222222222222222222222",
-			wantErr:  "repository HEAD moved during review assembly (1111111111111111111111111111111111111111 -> 2222222222222222222222222222222222222222); re-run the review on a quiescent repo",
-		},
-		{name: "initial fallback", captured: "HEAD", current: "2222222222222222222222222222222222222222"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			err := verifyHeadUnchanged(test.captured, test.current)
-			if test.wantErr == "" {
-				if err != nil {
-					t.Fatalf("verifyHeadUnchanged(%q, %q) error = %v", test.captured, test.current, err)
-				}
-				return
-			}
-			if err == nil || err.Error() != test.wantErr {
-				t.Fatalf("verifyHeadUnchanged(%q, %q) error = %v, want %q", test.captured, test.current, err, test.wantErr)
-			}
-		})
-	}
-}
-
-func TestAssembleFailsClosedWhenHEADMovesBetweenSnapshotReads(t *testing.T) {
-	repo := newGitFixture(t)
-	mainHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
-	gitFixture(t, repo, "switch", "-c", "feature")
-	writeFixtureFile(t, repo, "feature.txt", "feature\n")
-	gitFixture(t, repo, "add", "feature.txt")
-	gitFixture(t, repo, "commit", "-m", "feature")
-	featureHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
-
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	binDir := filepath.Join(t.TempDir(), "bin")
-	if err := os.Mkdir(binDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	marker := filepath.Join(t.TempDir(), "checkout-triggered")
-	wrapper := filepath.Join(binDir, "git")
-	const wrapperScript = `#!/bin/sh
-set -eu
-
-case " $* " in
-  *" rev-parse HEAD "*|*" rev-parse --abbrev-ref HEAD "*) snapshot_read=1 ;;
-  *) snapshot_read=0 ;;
-esac
-
-"$DELEGATE_TEST_REAL_GIT" "$@"
-if [ "$snapshot_read" -eq 1 ] && [ ! -e "$DELEGATE_TEST_CHECKOUT_MARKER" ]; then
-  : > "$DELEGATE_TEST_CHECKOUT_MARKER"
-  "$DELEGATE_TEST_REAL_GIT" -C "$DELEGATE_TEST_CHECKOUT_REPO" checkout --quiet main
-fi
-`
-	if err := os.WriteFile(wrapper, []byte(wrapperScript), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DELEGATE_TEST_REAL_GIT", realGit)
-	t.Setenv("DELEGATE_TEST_CHECKOUT_MARKER", marker)
-	t.Setenv("DELEGATE_TEST_CHECKOUT_REPO", repo)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	_, err = Assemble(context.Background(), Options{
-		CWD:      repo,
-		Scope:    ScopeWorkingTree,
-		StateDir: filepath.Join(t.TempDir(), "state"),
-	})
-	want := "repository HEAD moved during review assembly (" + featureHead + " -> " + mainHead + "); re-run the review on a quiescent repo"
-	if err == nil || err.Error() != want {
-		t.Fatalf("Assemble() error = %v, want %q", err, want)
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("checkout trigger marker: %v", err)
+		t.Fatalf("resolveBaseAtHead() = %#v, want default origin/main at %s", got, mainHead)
 	}
 }
 
@@ -263,7 +178,7 @@ func TestAssembleAutoUsesUntrackedRecreationOverBranchDeletion(t *testing.T) {
 	if !strings.Contains(assembled.Inline, "UNTRACKED_RECREATION_WINS") {
 		t.Fatalf("automatic context dropped untracked recreation: %q", assembled.Inline)
 	}
-	if len(assembled.Files) != 1 || assembled.Files[0].Path != "recreated.txt" || assembled.Files[0].Status != "??" {
+	if len(assembled.Files) != 1 || assembled.Files[0].Path != "recreated.txt" || assembled.Files[0].Status != "M" {
 		t.Fatalf("automatic files = %#v, want untracked recreation", assembled.Files)
 	}
 }
@@ -341,7 +256,7 @@ func TestAssembleSanitizesTrackedAndUntrackedSecretPathsBeforeArtifact(t *testin
 	}
 	for _, required := range []string{
 		"REDACTED\tM\t\".env.production\"",
-		"REDACTED\t??\t\"api-token.txt\"",
+		"REDACTED\tA\t\"api-token.txt\"",
 		"PUBLIC_REVIEW_CHANGE",
 	} {
 		if !strings.Contains(artifact, required) {
@@ -404,6 +319,41 @@ func TestAssembleRedactsRenameCopyWhenEitherEndpointIsSecretAndOmitsBinaryConten
 		if strings.Contains(assembled.Inline, forbidden) {
 			t.Fatalf("sanitized context leaked binary/secret marker %q: %q", forbidden, assembled.Inline)
 		}
+	}
+}
+
+func TestCopyDiffWithAmbiguousPrivateKeySourceIsWithheld(t *testing.T) {
+	repo := newGitFixture(t)
+	lines := make([]string, 60)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("ordinary line %02d", i+1)
+	}
+	original := strings.Join(lines, "\n") + "\n"
+	writeFixtureFile(t, repo, "source.txt", original)
+	gitFixture(t, repo, "add", "source.txt")
+	gitFixture(t, repo, "commit", "-m", "ordinary source")
+
+	lines[0] = "-----BEGIN RSA PRIVATE KEY-----"
+	lines[49] = "PRIVATE_KEY_BODY_FROM_COPY_DIFF_MUST_NOT_LEAK"
+	lines[50] = "-----END RSA PRIVATE KEY-----"
+	writeFixtureFile(t, repo, "source.txt", strings.Join(lines, "\n")+"\n")
+	writeFixtureFile(t, repo, "copy.txt", original)
+
+	assembled, err := Assemble(context.Background(), Options{
+		CWD:      repo,
+		Scope:    ScopeWorkingTree,
+		StateDir: filepath.Join(t.TempDir(), "state"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	packet := packetBytes(t, assembled)
+	if !bytes.Contains(packet, []byte(`"status":"C100"`)) && !bytes.Contains(packet, []byte("C100")) {
+		t.Fatalf("fixture did not produce a copy entry:\n%s", packet)
+	}
+	if bytes.Contains(packet, []byte("PRIVATE_KEY_BODY_FROM_COPY_DIFF_MUST_NOT_LEAK")) {
+		t.Fatalf("private-key body leaked through the copy diff:\n%s", packet)
 	}
 }
 
@@ -530,7 +480,7 @@ func TestAssembleRedactsNormalizedSecretPathVariants(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer Cleanup(assembled)
-			if !strings.Contains(assembled.Inline, "REDACTED\t??\t"+strconv.Quote(path)) {
+			if !strings.Contains(assembled.Inline, "REDACTED\tA\t"+strconv.Quote(path)) {
 				t.Fatalf("normalized secret path %q was not redacted: %q", path, assembled.Inline)
 			}
 			if strings.Contains(assembled.Inline, "NORMALIZED_SECRET_MUST_NOT_LEAK") {
@@ -995,7 +945,7 @@ func TestAssembleRedactsSecretLikeBranchMetadata(t *testing.T) {
 	}
 }
 
-func TestBranchChangesUseCapturedHead(t *testing.T) {
+func TestSecretHistoryScreeningUsesCapturedHead(t *testing.T) {
 	repo := newGitFixture(t)
 	base := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
 	gitFixture(t, repo, "switch", "-c", "feature")
@@ -1016,28 +966,14 @@ func TestBranchChangesUseCapturedHead(t *testing.T) {
 	gitFixture(t, repo, "rm", "later-secret.txt")
 	gitFixture(t, repo, "commit", "-m", "remove later secret")
 
-	files, diffBase, err := branchChanges(context.Background(), repo, base, capturedHead)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(files) != 2 || files[0].Path != ".env" || files[1].Path != "captured.go" {
-		t.Fatalf("captured-head files = %#v, want only .env and captured.go", files)
-	}
-	diff, err := trackedDiff(context.Background(), repo, diffBase, capturedHead, files[1].paths()...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(diff), "CAPTURED_SECRET_BLOB_MUST_NOT_LEAK") || strings.Contains(string(diff), "LATER_HEAD_CHANGE") {
-		t.Fatalf("captured-head diff = %q", diff)
-	}
-	paths, err := collectSecretPathTaint(context.Background(), repo, diffBase, capturedHead)
+	paths, err := collectSecretPathTaint(context.Background(), repo, base, capturedHead)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !paths[".env"] || paths["later-secret.txt"] {
 		t.Fatalf("captured-head secret paths = %#v", paths)
 	}
-	hashes, err := collectSecretBlobHashes(context.Background(), repo, diffBase, capturedHead)
+	hashes, err := collectSecretBlobHashes(context.Background(), repo, base, capturedHead)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1047,6 +983,7 @@ func TestBranchChangesUseCapturedHead(t *testing.T) {
 	if _, ok := hashes[laterSecretBlob]; ok {
 		t.Fatalf("later secret blob %q was tainted outside captured range", laterSecretBlob)
 	}
+	diff := []byte("index 0000000000000000000000000000000000000000.." + capturedSecretBlob + " 100644\n")
 	if !diffReferencesSecretBlob(diff, hashes) {
 		t.Fatal("captured secret blob did not redact the captured diff")
 	}
@@ -1235,7 +1172,7 @@ func TestAllowLiveRepoReadGatesBackendCWDAndPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if live.BackendCWD != live.CanonicalCWD || !strings.Contains(livePrompt, "LIVE-REPOSITORY MODE") || !strings.Contains(livePrompt, "makes backend file reads easier") || !strings.Contains(livePrompt, "self-collect") || !strings.Contains(livePrompt, "After reading the assembled context") {
+	if live.BackendCWD != live.CanonicalCWD || !strings.Contains(livePrompt, "LIVE-REPOSITORY MODE") || !strings.Contains(livePrompt, "makes backend file reads easier") || !strings.Contains(livePrompt, "outside the captured-input guarantee") || !strings.Contains(livePrompt, "After reading the assembled context") {
 		t.Fatalf("live gating failed: cwd=%q prompt=%q", live.BackendCWD, livePrompt)
 	}
 }
@@ -1310,9 +1247,7 @@ func TestComposePromptTreatsSuppliedReviewContextAsAuthoritative(t *testing.T) {
 				"Report them as given rather than as unavailable, and do not infer missing identifiers.",
 				"In branch and auto scope, the supplied comparison baseline is the merge base used for the diff; the resolved base tip identifies the base ref.",
 				"For the report's Scope boundary, use the supplied branch, resolved base tip commit when supplied, comparison baseline when supplied, and HEAD commit identifiers; do not infer or claim a full commit list.",
-				"Reading the assembled context is the first and only required step.",
-				"Do not probe for already-supplied metadata or context, and do not put the expressly unnecessary redundant metadata probe before the context read with &&.",
-				"A sandbox denial of that expressly unnecessary probe is not a reason to stop: read the assembled context and complete the review.",
+				"The supplied packet is the evidence to review. Read it before drawing conclusions; do not infer missing identifiers.",
 				"Resolved base tip commit: 1111111111111111111111111111111111111111.",
 				"Comparison baseline (merge base used for diff): 3333333333333333333333333333333333333333.",
 				"Branch under review: \"feature\".",
@@ -1456,7 +1391,7 @@ func TestAssembleFinalSecretGateRedactsMatchingHunksInlineAndSpilled(t *testing.
 			t.Fatal(err)
 		}
 		artifact := string(raw)
-		for _, want := range []string{"FILE\t??\t\"file-a.txt\"", secretRedactionMarker, "clean change"} {
+		for _, want := range []string{"FILE\tA\t\"file-a.txt\"", secretRedactionMarker, "clean change"} {
 			if !strings.Contains(artifact, want) {
 				t.Fatalf("spilled artifact missing %q:\n%s", want, artifact)
 			}

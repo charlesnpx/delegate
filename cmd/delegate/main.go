@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -56,6 +57,9 @@ run 'delegate <command> -h' for command flags.
 }
 
 func finishCommand(code int, err error, stderr io.Writer) int {
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		if code != 0 {

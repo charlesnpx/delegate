@@ -11,16 +11,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/charlesnpx/agentbus/engine"
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
 	"github.com/charlesnpx/witness/contract/charter"
 	reviewcontract "github.com/charlesnpx/witness/contract/review"
 )
 
 const (
-	liveRepoReadWarning    = "--allow-live-repo-read makes backend filesystem reads easier by using the live repository as cwd; delegate's path/history redaction and final content scan apply only to the context it assembles"
+	liveRepoReadWarning    = "supplemental live repository reads are outside the captured-input guarantee and must not be used to recover redacted content"
 	reviewKind             = reviewpkg.KindReview
 	adversarialReviewKind  = reviewpkg.KindAdversarialReview
 	maxReviewArtifactBytes = 8 * 1024 * 1024
@@ -32,6 +35,7 @@ type reviewOptions struct {
 	Model             string
 	Effort            string
 	Timeout           time.Duration
+	TimeoutSet        bool
 	ResumeJobID       string
 	Base              string
 	Scope             string
@@ -50,6 +54,7 @@ type contractReviewInput struct {
 	RequestDigest     string
 	ReviewInputDigest string
 	ConsumerIdentity  reviewcontract.Identity
+	Subject           reviewcontract.RequestSubject
 	SchemaVersion     string
 	Recipe            reviewcontract.ReviewRecipe
 	FrozenRecipe      json.RawMessage
@@ -62,8 +67,10 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	if err != nil {
 		return 0, err
 	}
+	connectionCtx := withAgentbusSelection(context.Background())
 	taskOpts := taskOptions{
 		Backend:     opts.Backend,
+		Intent:      engine.IntentInspect,
 		InputMode:   taskInputModeFixed,
 		Model:       opts.Model,
 		Effort:      opts.Effort,
@@ -111,21 +118,28 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		}
 		contractCharterHash = contractInput.FrozenCharter.CharterHash
 		contractReviewInputDigest = contractInput.ReviewInputDigest
+		taskOpts.Review = &reviewSubmissionEvidence{Mode: "contract", InputDigest: contractInput.ReviewInputDigest, RequestDigest: contractInput.RequestDigest, CharterHash: contractInput.FrozenCharter.CharterHash, RecipeDigest: contractInput.RecipeDigest, Reviewer: contractInput.Reviewer, Subject: &reviewSubjectEvidence{Head: contractInput.Subject.Head, Tree: contractInput.Subject.Tree, Branch: contractInput.Subject.Branch}}
 	} else {
-		assembled, err = reviewpkg.Assemble(context.Background(), reviewpkg.Options{
+		captureCtx, stopCapture := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		assembled, err = reviewpkg.Assemble(captureCtx, reviewpkg.Options{
 			CWD:               opts.CWD,
 			Base:              opts.Base,
 			Scope:             opts.Scope,
 			AllowLiveRepoRead: opts.AllowLiveRepoRead,
 			CriteriaFile:      opts.CriteriaFile,
 		})
+		stopCapture()
 		if err != nil {
 			return 0, err
 		}
 		logicalWorkspace = assembled.RepositoryRoot
+		taskOpts.Review = &reviewSubmissionEvidence{Mode: "direct", Scope: assembled.Scope, InputDigest: assembled.InputDigest, ComparisonBase: assembled.ComparisonBase, Head: assembled.Head}
+		if assembled.Base.Source != "empty-tree" {
+			taskOpts.Review.BaseTip = assembled.Base.Commit
+		}
 	}
 
-	for _, sweepErr := range sweepReviewWorkspaces(context.Background(), assembled.StateDir) {
+	for _, sweepErr := range sweepReviewWorkspaces(connectionCtx, assembled.StateDir) {
 		if _, err := fmt.Fprintf(stderr, "warning: review workspace sweep: %v\n", sweepErr); err != nil {
 			_ = reviewpkg.Cleanup(assembled)
 			return 0, err
@@ -146,8 +160,9 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 	}
 	taskOpts.CWD = assembled.BackendCWD
 	taskOpts.Timeout = opts.Timeout
+	taskOpts.TimeoutSet = opts.TimeoutSet
 	taskOpts.LogicalWorkspace = logicalWorkspace
-	submitted, c, agentbusStateRoot, err := submitTask(context.Background(), &taskOpts, prompt, schema)
+	submitted, c, agentbusStateRoot, err := submitTask(connectionCtx, &taskOpts, prompt, schema, stderr)
 	var unresolved *submissionUnresolvedError
 	cleanupWorkspace := err != nil && !errors.As(err, &unresolved)
 	if cleanupWorkspace {
@@ -175,16 +190,16 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 			Workspace:         assembled.Workspace,
 			AgentbusStateRoot: agentbusStateRoot,
 		}); err != nil {
-			return 0, fmt.Errorf("record review workspace for job %s: %w", submitted.JobID, err)
+			return 0, fmt.Errorf("submission admitted for requestId %s jobId %s; record review workspace: %w", taskOpts.RequestID, submitted.JobID, err)
 		}
 	}
 	if opts.AllowLiveRepoRead {
 		if _, err := fmt.Fprintf(stderr, "warning: %s\n", liveRepoReadWarning); err != nil {
-			return 0, err
+			return 0, fmt.Errorf("submission admitted for requestId %s jobId %s; write warning: %w", taskOpts.RequestID, submitted.JobID, err)
 		}
 	}
 	if err := writeTaskSubmitReceipt(stdout, taskOpts, submitted); err != nil {
-		return 0, submissionError(taskOpts.RequestID, err)
+		return 0, fmt.Errorf("submission admitted for requestId %s jobId %s; write receipt: %w", taskOpts.RequestID, submitted.JobID, err)
 	}
 	return 0, nil
 }
@@ -205,16 +220,18 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 		_, _ = fmt.Fprintln(fs.Output(), "  This does not prevent a same-user backend from reading repository or other filesystem files itself.")
 		_, _ = fmt.Fprintln(fs.Output(), "  --allow-live-repo-read makes those reads easier by using the repository as cwd.")
 		_, _ = fmt.Fprintln(fs.Output(), "  OS-level isolation requires a container/sandbox profile.")
+		_, _ = fmt.Fprintln(fs.Output(), "  Reviews reject caller steering; finite reviews may receive an Agentbus deadline notice.")
 		fs.PrintDefaults()
 	}
 	fs.StringVar(&opts.Backend, "backend", "", "backend name discovered from agentbus")
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute repository working directory")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
-	fs.Func("timeout", "backend timeout with an explicit unit; 0s leaves the deadline to the daemon default", func(raw string) error {
+	fs.Func("timeout", "execution timeout (default 2h; 0 or 0s means unlimited; maximum 4h)", func(raw string) error {
 		parsed, err := parseTimeoutDuration(raw)
 		if err == nil {
 			opts.Timeout = parsed
+			opts.TimeoutSet = true
 		}
 		return err
 	})
@@ -238,6 +255,14 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	}
 	provided := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { provided[f.Name] = true })
+	if provided["cwd"] && opts.CWD == "" {
+		return reviewOptions{}, fmt.Errorf("--cwd must be absolute")
+	}
+	for _, name := range []string{"model", "effort"} {
+		if provided[name] && fs.Lookup(name).Value.String() == "" {
+			return reviewOptions{}, fmt.Errorf("--%s must be nonempty", name)
+		}
+	}
 	contractFileCount := 0
 	for _, path := range []string{opts.RequestFile, opts.ArtifactFile, opts.CharterFile} {
 		if path != "" {
@@ -264,11 +289,11 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	} else if provided["criteria-file"] && opts.CriteriaFile == "" {
 		return reviewOptions{}, fmt.Errorf("--criteria-file requires a non-empty path")
 	}
-	if opts.Scope == reviewpkg.ScopeWorkingTree && opts.Base != "" {
+	if opts.Scope == reviewpkg.ScopeWorkingTree && provided["base"] {
 		return reviewOptions{}, fmt.Errorf("--base cannot be used with --scope working-tree")
 	}
-	if err := validateTimeoutOption(opts.Timeout); err != nil {
-		return reviewOptions{}, err
+	if opts.RequestFile == "" && provided["base"] && opts.Base == "" {
+		return reviewOptions{}, fmt.Errorf("--base requires a non-empty ref")
 	}
 	if opts.CWD == "" {
 		cwd, err := os.Getwd()
@@ -324,6 +349,7 @@ func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
 		}
 		input.ReviewInputDigest = request.ReviewInputDigest
 		input.ConsumerIdentity = request.ConsumerIdentity
+		input.Subject = request.Subject
 		requestCharterHash = request.CharterHash
 		requestReviewInputDigest = request.ReviewInputDigest
 	case reviewcontract.ReviewRequestV2:
@@ -347,6 +373,7 @@ func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
 		}
 		input.ReviewInputDigest = request.ReviewInputDigest
 		input.ConsumerIdentity = request.ConsumerIdentity
+		input.Subject = request.Subject
 		input.Recipe = recipe
 		input.FrozenRecipe = append(json.RawMessage(nil), request.FrozenRecipe...)
 		input.RecipeDigest = request.RecipeDigest
@@ -382,6 +409,7 @@ func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
 		RequestDigest:     input.RequestDigest,
 		ReviewInputDigest: input.ReviewInputDigest,
 		ConsumerIdentity:  input.ConsumerIdentity,
+		Subject:           input.Subject,
 		SchemaVersion:     input.SchemaVersion,
 		Recipe:            input.Recipe,
 		FrozenRecipe:      input.FrozenRecipe,

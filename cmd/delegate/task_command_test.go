@@ -21,7 +21,7 @@ const (
 )
 
 func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) {
-	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
+	timeout := &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault}
 	var queueResult client.JobSubmitResult
 	if err := json.Unmarshal([]byte(`{"queue":{"position":2,"backendRunning":2,"backendLimit":2,"running":4,"limit":4}}`), &queueResult); err != nil {
 		t.Fatalf("decode queue projection: %v", err)
@@ -63,13 +63,13 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receipt.Model != "unadvertised-model" || receipt.Effort != "unadvertised-effort" {
-		t.Fatalf("receipt model/effort=%q/%q", receipt.Model, receipt.Effort)
+	if receipt.ModelRequested != "unadvertised-model" || receipt.EffortRequested != "unadvertised-effort" {
+		t.Fatalf("receipt model/effort=%q/%q", receipt.ModelRequested, receipt.EffortRequested)
 	}
 	if receipt.Timeout == nil || receipt.Timeout.EffectiveMS != timeout.Effective || receipt.Timeout.Source != timeout.Source {
 		t.Fatalf("receipt timeout=%#v, want Agentbus effective/source %#v", receipt.Timeout, timeout)
 	}
-	wantReceipt := fmt.Sprintf("{\"requestId\":\"automation/retry-1\",\"workspaceKey\":\"%s\",\"jobId\":\"job_receipt\",\"state\":\"queued\",\"deduplicated\":false,\"inputMode\":\"steerable\",\"model\":\"unadvertised-model\",\"effort\":\"unadvertised-effort\",\"timeout\":{\"effectiveMs\":1800000,\"source\":\"daemon_default\"}}\n", wantWorkspaceKey)
+	wantReceipt := fmt.Sprintf("{\"requestId\":\"automation/retry-1\",\"workspaceKey\":\"%s\",\"jobId\":\"job_receipt\",\"state\":\"queued\",\"backend\":\"codex\",\"intent\":\"inspect\",\"deduplicated\":false,\"inputMode\":\"steerable\",\"modelRequested\":\"unadvertised-model\",\"effortRequested\":\"unadvertised-effort\",\"timeout\":{\"effectiveMs\":7200000,\"source\":\"daemon_default\"},\"queue\":{\"position\":2,\"backendRunning\":2,\"backendLimit\":2,\"running\":4,\"limit\":4}}\n", wantWorkspaceKey)
 	if got := stdout.String(); got != wantReceipt {
 		t.Fatalf("receipt bytes changed:\n got %q\nwant %q", got, wantReceipt)
 	}
@@ -77,10 +77,10 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	if err := json.Unmarshal(stdout.Bytes(), &receiptFields); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := len(receiptFields), 9; got != want {
+	if got, want := len(receiptFields), 12; got != want {
 		t.Fatalf("receipt fields=%#v, want exactly %d fields", receiptFields, want)
 	}
-	for _, key := range []string{"requestId", "workspaceKey", "jobId", "state", "deduplicated", "inputMode", "model", "effort", "timeout"} {
+	for _, key := range []string{"requestId", "workspaceKey", "jobId", "state", "backend", "intent", "deduplicated", "inputMode", "modelRequested", "effortRequested", "timeout", "queue"} {
 		if _, found := receiptFields[key]; !found {
 			t.Fatalf("receipt fields=%#v, missing %q", receiptFields, key)
 		}
@@ -98,8 +98,8 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 		}
 	}
 	wantQueueNotice := "notice: job is queued at position 2 for backend codex (2 of 2 backend slots in use, 4 of 4 daemon slots); it starts when a slot frees.\n"
-	if got, want := stderr.String(), readOnlyTaskHint+"\n"+wantQueueNotice; got != want {
-		t.Fatalf("stderr=%q, want read-only notice and queued notice %q", got, want)
+	if got := stderr.String(); !strings.HasSuffix(got, wantQueueNotice) || !strings.Contains(got, "connected agentbus daemon release") {
+		t.Fatalf("stderr=%q, want daemon and queued notices", got)
 	}
 	if strings.Contains(stderr.String(), "unadvertised") {
 		t.Fatalf("stderr=%q, task must not validate model/effort catalogs", stderr.String())
@@ -125,20 +125,6 @@ func TestTaskReceiptForwardsSubmittedValuesAndKeepsStdoutJSONOnly(t *testing.T) 
 	}
 	if len(fake.gets) != 0 {
 		t.Fatalf("task inspected jobs after submit: gets=%d", len(fake.gets))
-	}
-}
-
-func TestTaskClaudeReadOnlyNoticeNamesShellRestriction(t *testing.T) {
-	fake := &fakeAgentbusClient{hello: helloWithBackends()}
-	restore := stubAgentbusGlobals(t, fake)
-	defer restore()
-
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"task", "--backend", "claude", "--cwd", t.TempDir(), "--prompt-file", "-"}, strings.NewReader("investigate this"), &stdout, &stderr); code != 0 {
-		t.Fatalf("task code=%d stderr=%q", code, stderr.String())
-	}
-	if got, want := stderr.String(), claudeReadOnlyTaskHint+"\n"; got != want {
-		t.Fatalf("stderr=%q, want Claude read-only notice %q", got, want)
 	}
 }
 
@@ -187,125 +173,7 @@ func TestTaskRetainSessionDefaultsFalse(t *testing.T) {
 	}
 }
 
-func TestTaskLocalIPCSubmissionAndDefaultWireOmission(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		flag      string
-		wantLocal bool
-	}{
-		{name: "default"},
-		{name: "requested", flag: "--local-ipc", wantLocal: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			fake := &fakeAgentbusClient{hello: helloWithBackends()}
-			restore := stubAgentbusGlobals(t, fake)
-			defer restore()
-
-			args := []string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-"}
-			if test.flag != "" {
-				args = append(args, test.flag)
-			}
-			var stdout, stderr bytes.Buffer
-			if code := run(args, strings.NewReader("run the test runner"), &stdout, &stderr); code != 0 {
-				t.Fatalf("task code=%d stderr=%q", code, stderr.String())
-			}
-			if len(fake.submits) != 1 {
-				t.Fatalf("submits=%d, want 1", len(fake.submits))
-			}
-			spec := fake.submits[0].TaskSpec
-			if spec.LocalIPC != test.wantLocal {
-				t.Fatalf("submitted localIPC=%v, want %v", spec.LocalIPC, test.wantLocal)
-			}
-			if !test.wantLocal && spec.Verify {
-				t.Fatalf("submitted verify=%v by default, want false", spec.Verify)
-			}
-			raw, err := json.Marshal(spec)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if test.wantLocal && !strings.Contains(string(raw), `"localIPC":true`) {
-				t.Fatalf("submitted TaskSpec JSON=%s, want localIPC true", raw)
-			}
-			if !test.wantLocal && (strings.Contains(string(raw), `"localIPC"`) || strings.Contains(string(raw), `"verify"`)) {
-				t.Fatalf("submitted TaskSpec JSON=%s, want localIPC and verify omitted", raw)
-			}
-		})
-	}
-}
-
-func TestTaskVerifySubmitsVerifyTrue(t *testing.T) {
-	fake := &fakeAgentbusClient{hello: helloWithBackends()}
-	restore := stubAgentbusGlobals(t, fake)
-	defer restore()
-
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{
-		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", "--verify",
-	}, strings.NewReader("run the checks"), &stdout, &stderr); code != 0 {
-		t.Fatalf("task code=%d stderr=%q", code, stderr.String())
-	}
-	if strings.Contains(stderr.String(), "pass --write") {
-		t.Fatalf("verify stderr=%q, must not suggest --write", stderr.String())
-	}
-	if len(fake.submits) != 1 || !fake.submits[0].TaskSpec.Verify {
-		t.Fatalf("submits=%#v, want one submission with verify true", fake.submits)
-	}
-}
-
-func TestTaskVerifyWriteIsRejectedBeforeConnecting(t *testing.T) {
-	fake := &fakeAgentbusClient{hello: helloWithBackends()}
-	restore := stubAgentbusGlobals(t, fake)
-	defer restore()
-	oldConnect := connectAgentbus
-	connectCalls := 0
-	connectAgentbus = func(context.Context, client.Options) (agentbusClient, error) {
-		connectCalls++
-		return fake, nil
-	}
-	defer func() { connectAgentbus = oldConnect }()
-
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{
-		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", "--verify", "--write",
-	}, strings.NewReader("run the checks"), &stdout, &stderr); code == 0 {
-		t.Fatalf("task code=0 stdout=%q, want contradictory options rejected", stdout.String())
-	}
-	for _, want := range []string{"--verify", "disposable copy", "cannot write the source"} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Fatalf("stderr=%q, missing %q", stderr.String(), want)
-		}
-	}
-	if connectCalls != 0 || len(fake.submits) != 0 {
-		t.Fatalf("connect calls=%d submissions=%d, want neither", connectCalls, len(fake.submits))
-	}
-}
-
-func TestTaskReceiptIncludesRequestedExecutionFlags(t *testing.T) {
-	fake := &fakeAgentbusClient{hello: helloWithBackends()}
-	restore := stubAgentbusGlobals(t, fake)
-	defer restore()
-
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{
-		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", "--verify", "--local-ipc",
-	}, strings.NewReader("run the checks"), &stdout, &stderr); code != 0 {
-		t.Fatalf("task code=%d stderr=%q", code, stderr.String())
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(stdout.Bytes(), &fields); err != nil {
-		t.Fatalf("receipt JSON: %v; raw=%q", err, stdout.String())
-	}
-	for key, want := range map[string]string{"localIPC": "true", "verify": "true"} {
-		if got := string(fields[key]); got != want {
-			t.Fatalf("receipt %s=%s, want %s; fields=%v", key, got, want, fields)
-		}
-	}
-	if len(fake.submits) != 1 || !fake.submits[0].TaskSpec.LocalIPC || !fake.submits[0].TaskSpec.Verify {
-		t.Fatalf("submits=%#v, want both requested flags", fake.submits)
-	}
-}
-
-func TestTaskNoSteerSubmitsFixedIndependentOfWriteAndResume(t *testing.T) {
+func TestTaskNoSteerSubmitsFixedIndependentOfIntentAndResume(t *testing.T) {
 	fake := &fakeAgentbusClient{hello: helloWithBackends()}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
@@ -313,7 +181,7 @@ func TestTaskNoSteerSubmitsFixedIndependentOfWriteAndResume(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{
 		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-",
-		"--no-steer", "--write", "--resume", "job_previous",
+		"--no-steer", "--intent", "edit", "--resume", "job_previous",
 	}, strings.NewReader("verify this change"), &stdout, &stderr); code != 0 {
 		t.Fatalf("task code=%d stderr=%q", code, stderr.String())
 	}
@@ -321,8 +189,8 @@ func TestTaskNoSteerSubmitsFixedIndependentOfWriteAndResume(t *testing.T) {
 		t.Fatalf("submits=%d, want 1", len(fake.submits))
 	}
 	spec := fake.submits[0].TaskSpec
-	if spec.InputMode != taskInputModeFixed || !spec.Write || spec.ResumeJobID != "job_previous" {
-		t.Fatalf("submitted input mode/write/resume=%q/%v/%q", spec.InputMode, spec.Write, spec.ResumeJobID)
+	if spec.InputMode != taskInputModeFixed || spec.Intent != engine.IntentEdit || spec.ResumeJobID != "job_previous" {
+		t.Fatalf("submitted input mode/intent/resume=%q/%q/%q", spec.InputMode, spec.Intent, spec.ResumeJobID)
 	}
 	var receipt taskSubmitReceipt
 	if err := json.Unmarshal(stdout.Bytes(), &receipt); err != nil {
@@ -362,30 +230,30 @@ func TestTaskReceiptOmitsUnsetModelAndEffort(t *testing.T) {
 		submitResult: client.JobSubmitResult{
 			JobID:   "job_no_model_or_effort",
 			State:   publicStateQueued,
-			Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
+			Timeout: &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault},
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)
 	defer restore()
 
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", "--write"}, strings.NewReader("inspect this"), &stdout, &stderr); code != 0 {
+	if code := run([]string{"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", "--intent", "edit"}, strings.NewReader("inspect this"), &stdout, &stderr); code != 0 {
 		t.Fatalf("task code=%d stderr=%q", code, stderr.String())
 	}
 	var receiptFields map[string]json.RawMessage
 	if err := json.Unmarshal(stdout.Bytes(), &receiptFields); err != nil {
 		t.Fatal(err)
 	}
-	for _, omitted := range []string{"model", "effort"} {
+	for _, omitted := range []string{"model", "effort", "modelRequested", "effortRequested"} {
 		if _, found := receiptFields[omitted]; found {
 			t.Fatalf("receipt fields=%#v, unexpectedly contains %q", receiptFields, omitted)
 		}
 	}
-	if len(fake.submits) != 1 || !fake.submits[0].TaskSpec.Write {
+	if len(fake.submits) != 1 || fake.submits[0].TaskSpec.Intent != engine.IntentEdit {
 		t.Fatalf("submitted=%#v, want write task", fake.submits)
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("write task stderr=%q, want no read-only notice", stderr.String())
+	if !strings.Contains(stderr.String(), "connected agentbus daemon release") || strings.Contains(stderr.String(), "read-only") {
+		t.Fatalf("edit task stderr=%q, want daemon notice", stderr.String())
 	}
 }
 
@@ -493,7 +361,7 @@ func TestTaskRemovedFlagsAndPositionalPromptAreRejected(t *testing.T) {
 	removed := []string{
 		"--background", "--wait", "--json", "--prompt", "--prompt-stdin", "--handoff-prompt-file",
 		"--output-schema", "--output-schema-stdin", "--output-schema-file", "--strict-model", "--origin",
-		"--parent-client", "--parent-session", "--recover-request", "--steerable",
+		"--parent-client", "--parent-session", "--recover-request", "--steerable", "--write", "--verify", "--local-ipc",
 	}
 	for _, flagName := range removed {
 		t.Run(flagName, func(t *testing.T) {
@@ -555,8 +423,8 @@ func TestTaskFailureReportsRequestIDAndDoesNotWriteLocalState(t *testing.T) {
 		if got, want := stdout.String(), ""; got != want {
 			t.Fatalf("stdout=%q, want %q", got, want)
 		}
-		if got, want := stderr.String(), readOnlyTaskHint+"\n"+daemonErr.Error()+"\n"; got != want {
-			t.Fatalf("stderr=%q, want read-only notice and unchanged daemon rejection %q", got, want)
+		if got, want := stderr.String(), "submission failed for requestId caller/resume-after-error jobId job_killed: "+daemonErr.Error()+"\n"; !strings.HasSuffix(got, want) {
+			t.Fatalf("stderr=%q, want request identity and daemon rejection %q", got, want)
 		}
 		if len(fake.gets) != 0 {
 			t.Fatalf("task locally inspected resume target: gets=%#v", fake.gets)
@@ -588,78 +456,6 @@ func TestTaskFailureReportsRequestIDAndDoesNotWriteLocalState(t *testing.T) {
 	})
 }
 
-func TestTaskOldDaemonRejectingInputModeExplainsUpgradeWithoutRetry(t *testing.T) {
-	var daemonErr client.RPCError
-	if err := json.Unmarshal([]byte(`{"Object":{"code":-32000,"message":"json: unknown field \"inputMode\"","data":{"code":"invalid_task_spec"}}}`), &daemonErr); err != nil {
-		t.Fatal(err)
-	}
-	fake := &fakeAgentbusClient{hello: helloWithBackends(), submitErr: &daemonErr}
-	restore := stubAgentbusGlobals(t, fake)
-	defer restore()
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{
-		"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-",
-		"--request-id", "caller/steerable-task",
-	}, strings.NewReader("inspect"), &stdout, &stderr)
-	if code == 0 || stdout.Len() != 0 {
-		t.Fatalf("code=%d stdout=%q, want failed submission without receipt", code, stdout.String())
-	}
-	for _, want := range []string{
-		"running agentbus daemon does not support steerable tasks",
-		"must be upgraded",
-		"--no-steer submits a fixed task",
-	} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Fatalf("stderr=%q, missing %q", stderr.String(), want)
-		}
-	}
-	if len(fake.submits) != 1 {
-		t.Fatalf("submit attempts=%d, want exactly one", len(fake.submits))
-	}
-}
-
-func TestTaskOldDaemonRejectingExecutionFlagsExplainsUpgradeWithoutRetry(t *testing.T) {
-	for _, test := range []struct {
-		flag  string
-		field string
-	}{
-		{flag: "--verify", field: "verify"},
-		{flag: "--local-ipc", field: "localIPC"},
-	} {
-		t.Run(test.field, func(t *testing.T) {
-			message, err := json.Marshal(fmt.Sprintf(`json: unknown field %q`, test.field))
-			if err != nil {
-				t.Fatal(err)
-			}
-			rawErr := fmt.Sprintf(`{"Object":{"code":-32000,"message":%s,"data":{"code":"invalid_task_spec"}}}`, message)
-			var daemonErr client.RPCError
-			if err := json.Unmarshal([]byte(rawErr), &daemonErr); err != nil {
-				t.Fatal(err)
-			}
-			fake := &fakeAgentbusClient{hello: helloWithBackends(), submitErr: &daemonErr}
-			restore := stubAgentbusGlobals(t, fake)
-			defer restore()
-
-			var stdout, stderr bytes.Buffer
-			code := run([]string{
-				"task", "--backend", "codex", "--cwd", t.TempDir(), "--prompt-file", "-", test.flag,
-			}, strings.NewReader("run the checks"), &stdout, &stderr)
-			if code == 0 || stdout.Len() != 0 {
-				t.Fatalf("code=%d stdout=%q, want failed submission without receipt", code, stdout.String())
-			}
-			for _, want := range []string{test.flag, "must be upgraded"} {
-				if !strings.Contains(stderr.String(), want) {
-					t.Fatalf("stderr=%q, missing %q", stderr.String(), want)
-				}
-			}
-			if len(fake.submits) != 1 {
-				t.Fatalf("submit attempts=%d, want exactly one", len(fake.submits))
-			}
-		})
-	}
-}
-
 func TestTaskUnrelatedInvalidTaskSpecKeepsDaemonError(t *testing.T) {
 	var daemonErr client.RPCError
 	if err := json.Unmarshal([]byte(`{"Object":{"code":-32000,"message":"taskSpec.prompt is empty","data":{"code":"invalid_task_spec"}}}`), &daemonErr); err != nil {
@@ -679,9 +475,6 @@ func TestTaskUnrelatedInvalidTaskSpecKeepsDaemonError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), daemonErr.Error()) {
 		t.Fatalf("stderr=%q, want original daemon error %q", stderr.String(), daemonErr.Error())
-	}
-	if strings.Contains(stderr.String(), "does not support steerable tasks") || strings.Contains(stderr.String(), "--no-steer to submit") {
-		t.Fatalf("stderr=%q, unrelated invalid_task_spec was misclassified", stderr.String())
 	}
 	if len(fake.submits) != 1 {
 		t.Fatalf("submit attempts=%d, want exactly one", len(fake.submits))
@@ -736,11 +529,12 @@ func stubAgentbusTestEnvironment(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("AGENTBUS_STATE_ROOT", "")
+	t.Setenv("AGENTBUS_NO_AUTOSTART", "")
 }
 
 func helloWithBackends() client.HelloResult {
 	return client.HelloResult{
-		ProtocolVersion: 3,
+		ProtocolVersion: 4,
 		BackendMetadata: []client.BackendInfo{
 			{Name: "codex"},
 			{Name: "claude"},

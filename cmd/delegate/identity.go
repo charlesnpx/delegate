@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
 	"unicode/utf8"
 )
@@ -55,4 +56,23 @@ func canonicalLogicalWorkspace(path string) (string, error) {
 		return filepath.Clean(evaluated), nil
 	}
 	return evalSymlinksAsFeasible(clean), nil
+}
+
+func evalSymlinksAsFeasible(path string) string {
+	missing := []string{}
+	for current := path; ; current = filepath.Dir(current) {
+		if _, err := os.Lstat(current); err == nil {
+			if evaluated, evalErr := filepath.EvalSymlinks(current); evalErr == nil {
+				parts := append([]string{evaluated}, missing...)
+				return filepath.Clean(filepath.Join(parts...))
+			}
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		missing = append([]string{filepath.Base(current)}, missing...)
+	}
+	return path
 }

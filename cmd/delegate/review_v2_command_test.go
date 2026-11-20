@@ -23,7 +23,7 @@ func TestContractReviewV2BindsSubmittedSchemaAndPrompt(t *testing.T) {
 		submitResult: client.JobSubmitResult{
 			JobID:   "job_contract_review_v2",
 			State:   publicStateQueued,
-			Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
+			Timeout: &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault},
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)
@@ -36,6 +36,13 @@ func TestContractReviewV2BindsSubmittedSchemaAndPrompt(t *testing.T) {
 		t.Fatalf("contract v2 review code=%d stderr=%q", code, stderr.String())
 	}
 	assertTaskReceiptShape(t, stdout.Bytes(), "job_contract_review_v2")
+	var receipt taskSubmitReceipt
+	if err := json.Unmarshal(stdout.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Review == nil || receipt.Review.Mode != "contract" || receipt.Review.InputDigest != fixture.reviewInputDigest || receipt.Review.RequestDigest != fixture.requestDigest || receipt.Review.CharterHash != fixture.frozen.CharterHash || receipt.Review.RecipeDigest != fixture.recipeDigest || receipt.Review.Reviewer != fixture.reviewers[0] || receipt.Review.Subject == nil || *receipt.Review.Subject != (reviewSubjectEvidence{Head: "frozen-v2-subject-head", Tree: "subject-tree", Branch: "subject-branch"}) {
+		t.Fatalf("v2 evidence=%#v", receipt.Review)
+	}
 	if len(fake.submits) != 1 {
 		t.Fatalf("submits=%d, want 1", len(fake.submits))
 	}
@@ -55,8 +62,33 @@ func TestContractReviewV2BindsSubmittedSchemaAndPrompt(t *testing.T) {
 	if err := compiler.AddResource("review-report-v2.json", document); err != nil {
 		t.Fatalf("add v2 schema: %v", err)
 	}
-	if _, err := compiler.Compile("review-report-v2.json"); err != nil {
+	compiled, err := compiler.Compile("review-report-v2.json")
+	if err != nil {
 		t.Fatalf("compile v2 schema: %v", err)
+	}
+	validReport := map[string]any{
+		"schema_version": reviewcontract.ReviewReportV2, "request_digest": fixture.requestDigest,
+		"recipe_digest": fixture.recipeDigest, "reviewer": fixture.reviewers[0], "charter_hash": fixture.frozen.CharterHash,
+		"review_input_digest": fixture.reviewInputDigest,
+		"source_identity":     map[string]any{"kind": "provider", "id": "example"},
+		"consumer_identity":   map[string]any{"kind": "delegate", "id": "delegate-contract-v2-test"},
+		"findings":            []any{}, "evaluation": map[string]any{"evaluated_paths": []any{"subject.go"}, "evaluated_goal_ids": []any{fixture.frozen.Charter.Goals[0].ID}},
+	}
+	if err := compiled.Validate(validReport); err != nil {
+		t.Fatalf("valid bound report rejected: %v", err)
+	}
+	for _, binding := range []string{"request_digest", "recipe_digest", "reviewer", "charter_hash", "review_input_digest"} {
+		original := validReport[binding]
+		validReport[binding] = "incorrect-binding"
+		if err := compiled.Validate(validReport); err == nil {
+			t.Errorf("receipt incorrectly made report with invalid %s compliant", binding)
+		}
+		validReport[binding] = original
+		delete(validReport, binding)
+		if err := compiled.Validate(validReport); err == nil {
+			t.Errorf("receipt incorrectly made report missing %s compliant", binding)
+		}
+		validReport[binding] = original
 	}
 	properties, ok := schema["properties"].(map[string]any)
 	if !ok {
@@ -121,7 +153,7 @@ func TestContractReviewV2ReviewersHaveDistinctReplayIdentities(t *testing.T) {
 		submitResult: client.JobSubmitResult{
 			JobID:   "job_contract_review_v2_a",
 			State:   publicStateQueued,
-			Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
+			Timeout: &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault},
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)
@@ -208,7 +240,7 @@ func newContractReviewV2Fixture(t *testing.T) contractReviewV2Fixture {
 			Kind: "delegate",
 			ID:   "delegate-contract-v2-test",
 		},
-		Subject:           reviewcontract.RequestSubject{Head: "frozen-v2-subject-head"},
+		Subject:           reviewcontract.RequestSubject{Head: "frozen-v2-subject-head", Tree: "subject-tree", Branch: "subject-branch"},
 		CharterHash:       frozen.CharterHash,
 		ReviewInputDigest: reviewInputDigest,
 		FrozenRecipe:      recipeData,

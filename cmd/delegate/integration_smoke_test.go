@@ -19,7 +19,7 @@ func TestManagedSkillSmokeFixture(t *testing.T) {
 		submitResult: client.JobSubmitResult{
 			JobID:   "job_smoke",
 			State:   publicStateQueued,
-			Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
+			Timeout: &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault},
 		},
 	}
 	restore := stubAgentbusGlobals(t, bus)

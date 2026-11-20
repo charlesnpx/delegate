@@ -21,7 +21,7 @@ import (
 )
 
 func TestContractReviewResumeUsesDistinctReplayStableRequestID(t *testing.T) {
-	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
+	timeout := &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault}
 	fake := &fakeAgentbusClient{
 		hello: helloWithBackends(),
 		submitResult: client.JobSubmitResult{
@@ -47,6 +47,14 @@ func TestContractReviewResumeUsesDistinctReplayStableRequestID(t *testing.T) {
 		t.Fatalf("contract review code=%d stderr=%q", code, stderr.String())
 	}
 	assertTaskReceiptShape(t, stdout.Bytes(), "job_contract_review")
+	var initialReceipt taskSubmitReceipt
+	if err := json.Unmarshal(stdout.Bytes(), &initialReceipt); err != nil {
+		t.Fatal(err)
+	}
+	wantEvidence := &reviewSubmissionEvidence{Mode: "contract", InputDigest: fixture.reviewInputDigest, RequestDigest: fixture.requestDigest, CharterHash: fixture.frozen.CharterHash, Subject: &reviewSubjectEvidence{Head: "frozen-subject-head"}}
+	if !reflect.DeepEqual(initialReceipt.Review, wantEvidence) {
+		t.Fatalf("contract evidence=%#v, want %#v", initialReceipt.Review, wantEvidence)
+	}
 
 	resumeArgs := append(append([]string(nil), args...), "--resume", "job_contract_review")
 	fake.submitResult = client.JobSubmitResult{
@@ -91,7 +99,7 @@ func TestContractReviewResumeUsesDistinctReplayStableRequestID(t *testing.T) {
 	}
 	first, resumed, replayed := fake.submits[0], fake.submits[1], fake.submits[2]
 	for _, submitted := range fake.submits {
-		if submitted.TaskSpec.InputMode != taskInputModeFixed {
+		if submitted.TaskSpec.InputMode != taskInputModeFixed || submitted.TaskSpec.Intent != engine.IntentInspect {
 			t.Fatalf("contract review inputMode=%q, want %q", submitted.TaskSpec.InputMode, taskInputModeFixed)
 		}
 	}
@@ -334,7 +342,7 @@ func TestDirectReviewSubmitsPreFetchedCriteriaAndManifest(t *testing.T) {
 		submitResult: client.JobSubmitResult{
 			JobID:   "job_direct_criteria",
 			State:   publicStateQueued,
-			Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
+			Timeout: &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault},
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)
@@ -366,7 +374,7 @@ func TestDirectReviewSubmitsPreFetchedCriteriaAndManifest(t *testing.T) {
 	if len(fake.submits) != 1 {
 		t.Fatalf("submits=%d, want 1", len(fake.submits))
 	}
-	if fake.submits[0].TaskSpec.InputMode != taskInputModeFixed {
+	if fake.submits[0].TaskSpec.InputMode != taskInputModeFixed || fake.submits[0].TaskSpec.Intent != engine.IntentInspect {
 		t.Fatalf("direct review inputMode=%q, want %q", fake.submits[0].TaskSpec.InputMode, taskInputModeFixed)
 	}
 	prompt := fake.submits[0].TaskSpec.Prompt
@@ -377,10 +385,23 @@ func TestDirectReviewSubmitsPreFetchedCriteriaAndManifest(t *testing.T) {
 	if !strings.Contains(prompt, hex.EncodeToString(sum[:])) {
 		t.Fatalf("criteria sha256 missing from prompt:\n%s", prompt)
 	}
+	packetStart := strings.Index(prompt, "DELEGATE_SANITIZED_REVIEW_CONTEXT_V1\n")
+	if packetStart < 0 {
+		t.Fatal("inline packet missing from prompt")
+	}
+	var receipt taskSubmitReceipt
+	if err := json.Unmarshal(stdout.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	packetSum := sha256.Sum256([]byte(prompt[packetStart:]))
+	head := gitReviewOutput(t, repo, "rev-parse", "HEAD")
+	if receipt.Review == nil || receipt.Review.Mode != "direct" || receipt.Review.Scope != "working-tree" || receipt.Review.InputDigest != "sha256:"+hex.EncodeToString(packetSum[:]) || receipt.Review.Head != head || receipt.Review.ComparisonBase != head || receipt.Review.BaseTip != "" {
+		t.Fatalf("inline evidence=%#v", receipt.Review)
+	}
 }
 
 func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) {
-	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
+	timeout := &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault}
 	fake := &fakeAgentbusClient{
 		hello: helloWithBackends(),
 		submitResult: client.JobSubmitResult{
@@ -401,7 +422,7 @@ func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) 
 		t.Fatalf("review code=%d stderr=%q", code, firstErr.String())
 	}
 	assertTaskReceiptShape(t, firstOut.Bytes(), "job_review")
-	if fake.submits[0].TaskSpec.InputMode != taskInputModeFixed {
+	if fake.submits[0].TaskSpec.InputMode != taskInputModeFixed || fake.submits[0].TaskSpec.Intent != engine.IntentInspect {
 		t.Fatalf("review inputMode=%q, want %q", fake.submits[0].TaskSpec.InputMode, taskInputModeFixed)
 	}
 	if got := len(fake.gets); got != 0 {
@@ -422,6 +443,19 @@ func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) 
 	if !bytes.Contains(artifact, []byte("large review context")) {
 		t.Fatalf("review artifact did not contain the assembled repository content")
 	}
+	var firstReceipt taskSubmitReceipt
+	if err := json.Unmarshal(firstOut.Bytes(), &firstReceipt); err != nil {
+		t.Fatal(err)
+	}
+	artifactSum := sha256.Sum256(artifact)
+	if firstReceipt.Review == nil || firstReceipt.Review.InputDigest != "sha256:"+hex.EncodeToString(artifactSum[:]) {
+		t.Fatalf("artifact evidence=%#v", firstReceipt.Review)
+	}
+	for _, entry := range mustReadDir(t, stateDir) {
+		if strings.HasPrefix(entry.Name(), ".review-capture-") {
+			t.Fatalf("raw capture survived submission: %s", entry.Name())
+		}
+	}
 
 	fake.get = client.JobGetResult{JobID: "job_review", State: publicStateCompleted}
 	fake.submitResult = client.JobSubmitResult{JobID: "job_adversarial", State: publicStateQueued, Timeout: timeout}
@@ -433,7 +467,7 @@ func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) 
 		t.Fatalf("adversarial-review code=%d stderr=%q", code, secondErr.String())
 	}
 	assertTaskReceiptShape(t, secondOut.Bytes(), "job_adversarial")
-	if fake.submits[1].TaskSpec.InputMode != taskInputModeFixed {
+	if fake.submits[1].TaskSpec.InputMode != taskInputModeFixed || fake.submits[1].TaskSpec.Intent != engine.IntentInspect {
 		t.Fatalf("adversarial review inputMode=%q, want %q", fake.submits[1].TaskSpec.InputMode, taskInputModeFixed)
 	}
 	if got := len(fake.gets); got != 1 {
@@ -516,7 +550,7 @@ func TestReviewCommandsPassModelEffortAndResumeThrough(t *testing.T) {
 				submitResult: client.JobSubmitResult{
 					JobID:   "job_passthrough",
 					State:   publicStateQueued,
-					Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
+					Timeout: &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault},
 				},
 			}
 			restore := stubAgentbusGlobals(t, fake)
@@ -617,8 +651,8 @@ func TestReviewRejectedResumeCleansWorkspaceAndReturnsDaemonError(t *testing.T) 
 		"--backend", "codex", "--cwd", repo, "--scope", "working-tree",
 		"--resume", "job_does_not_exist",
 	}, &stdout, &stderr)
-	if err != &daemonErr {
-		t.Fatalf("runReview() error=%#v, want unchanged daemon error %#v", err, &daemonErr)
+	if !errors.Is(err, &daemonErr) || !strings.Contains(err.Error(), "jobId job_does_not_exist") || !strings.Contains(err.Error(), fake.submits[0].RequestID) {
+		t.Fatalf("runReview() error=%#v, want request and job identity with daemon error %#v", err, &daemonErr)
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout=%q, want no receipt", stdout.String())
@@ -768,13 +802,13 @@ func assertTaskReceiptShape(t *testing.T, raw []byte, jobID string) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := len(fields), 9; got != want {
+	if got, want := len(fields), 12; got != want {
 		t.Fatalf("receipt fields=%#v, want exactly %d", fields, want)
 	}
-	if receipt.InputMode != taskInputModeFixed {
+	if receipt.InputMode != taskInputModeFixed || receipt.Intent != engine.IntentInspect {
 		t.Fatalf("receipt inputMode=%q, want %q", receipt.InputMode, taskInputModeFixed)
 	}
-	for _, key := range []string{"requestId", "workspaceKey", "jobId", "state", "deduplicated", "inputMode", "model", "effort", "timeout"} {
+	for _, key := range []string{"requestId", "workspaceKey", "jobId", "state", "backend", "intent", "deduplicated", "inputMode", "modelRequested", "effortRequested", "timeout", "review"} {
 		if _, found := fields[key]; !found {
 			t.Fatalf("receipt fields=%#v, missing %q", fields, key)
 		}
@@ -895,4 +929,23 @@ func contractReviewArgs(fixture contractReviewFixture, cwd string) []string {
 		"--artifact-file", fixture.artifactPath,
 		"--charter-file", fixture.charterPath,
 	}
+}
+
+func gitReviewOutput(t *testing.T, repo string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+	raw, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+func mustReadDir(t *testing.T, path string) []os.DirEntry {
+	t.Helper()
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
 }
