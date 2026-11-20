@@ -39,6 +39,7 @@ type taskOptions struct {
 
 	LogicalWorkspace string
 	WorkspaceKey     string
+	Review           *reviewSubmissionEvidence
 }
 
 const (
@@ -53,17 +54,39 @@ const (
 // workspace key sent to Agentbus. In particular, Timeout retains Agentbus's
 // milliseconds and source string without local reinterpretation.
 type taskSubmitReceipt struct {
-	RequestID    string             `json:"requestId"`
-	WorkspaceKey string             `json:"workspaceKey"`
-	JobID        string             `json:"jobId"`
-	State        client.PublicState `json:"state"`
-	Deduplicated bool               `json:"deduplicated"`
-	InputMode    client.InputMode   `json:"inputMode"`
-	LocalIPC     bool               `json:"localIPC,omitempty"`
-	Verify       bool               `json:"verify,omitempty"`
-	Model        string             `json:"model,omitempty"`
-	Effort       string             `json:"effort,omitempty"`
-	Timeout      *taskSubmitTimeout `json:"timeout"`
+	RequestID    string                    `json:"requestId"`
+	WorkspaceKey string                    `json:"workspaceKey"`
+	JobID        string                    `json:"jobId"`
+	State        client.PublicState        `json:"state"`
+	Deduplicated bool                      `json:"deduplicated"`
+	InputMode    client.InputMode          `json:"inputMode"`
+	LocalIPC     bool                      `json:"localIPC,omitempty"`
+	Verify       bool                      `json:"verify,omitempty"`
+	Model        string                    `json:"model,omitempty"`
+	Effort       string                    `json:"effort,omitempty"`
+	Timeout      *taskSubmitTimeout        `json:"timeout"`
+	Review       *reviewSubmissionEvidence `json:"review,omitempty"`
+}
+
+// reviewSubmissionEvidence records prepared inputs, not provider compliance.
+type reviewSubmissionEvidence struct {
+	Mode           string                 `json:"mode"`
+	Scope          string                 `json:"scope,omitempty"`
+	InputDigest    string                 `json:"inputDigest"`
+	BaseTip        string                 `json:"baseTip,omitempty"`
+	ComparisonBase string                 `json:"comparisonBase,omitempty"`
+	Head           string                 `json:"head,omitempty"`
+	RequestDigest  string                 `json:"requestDigest,omitempty"`
+	CharterHash    string                 `json:"charterHash,omitempty"`
+	RecipeDigest   string                 `json:"recipeDigest,omitempty"`
+	Reviewer       string                 `json:"reviewer,omitempty"`
+	Subject        *reviewSubjectEvidence `json:"subject,omitempty"`
+}
+
+type reviewSubjectEvidence struct {
+	Head   string `json:"head"`
+	Tree   string `json:"tree,omitempty"`
+	Branch string `json:"branch,omitempty"`
 }
 
 // taskSubmitTimeout keeps Agentbus's resolved millisecond value and source
@@ -156,6 +179,7 @@ func writeTaskSubmitReceipt(stdout io.Writer, opts taskOptions, submitted client
 		Model:        opts.Model,
 		Effort:       opts.Effort,
 		Timeout:      taskSubmitTimeoutFromAgentbus(submitted.Timeout),
+		Review:       opts.Review,
 	})
 }
 

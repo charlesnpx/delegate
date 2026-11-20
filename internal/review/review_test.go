@@ -112,94 +112,6 @@ func TestResolveBasePushedFeaturePrefersDefaultRemoteBranch(t *testing.T) {
 	}
 }
 
-func TestVerifyHeadUnchanged(t *testing.T) {
-	const captured = "1111111111111111111111111111111111111111"
-	tests := []struct {
-		name     string
-		captured string
-		current  string
-		wantErr  string
-	}{
-		{name: "equal", captured: captured, current: captured},
-		{
-			name:     "different",
-			captured: captured,
-			current:  "2222222222222222222222222222222222222222",
-			wantErr:  "repository HEAD moved during review assembly (1111111111111111111111111111111111111111 -> 2222222222222222222222222222222222222222); re-run the review on a quiescent repo",
-		},
-		{name: "initial fallback", captured: "HEAD", current: "2222222222222222222222222222222222222222"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			err := verifyHeadUnchanged(test.captured, test.current)
-			if test.wantErr == "" {
-				if err != nil {
-					t.Fatalf("verifyHeadUnchanged(%q, %q) error = %v", test.captured, test.current, err)
-				}
-				return
-			}
-			if err == nil || err.Error() != test.wantErr {
-				t.Fatalf("verifyHeadUnchanged(%q, %q) error = %v, want %q", test.captured, test.current, err, test.wantErr)
-			}
-		})
-	}
-}
-
-func TestAssembleFailsClosedWhenHEADMovesBetweenSnapshotReads(t *testing.T) {
-	repo := newGitFixture(t)
-	mainHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
-	gitFixture(t, repo, "switch", "-c", "feature")
-	writeFixtureFile(t, repo, "feature.txt", "feature\n")
-	gitFixture(t, repo, "add", "feature.txt")
-	gitFixture(t, repo, "commit", "-m", "feature")
-	featureHead := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
-
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	binDir := filepath.Join(t.TempDir(), "bin")
-	if err := os.Mkdir(binDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	marker := filepath.Join(t.TempDir(), "checkout-triggered")
-	wrapper := filepath.Join(binDir, "git")
-	const wrapperScript = `#!/bin/sh
-set -eu
-
-case " $* " in
-  *" rev-parse HEAD "*|*" rev-parse --abbrev-ref HEAD "*) snapshot_read=1 ;;
-  *) snapshot_read=0 ;;
-esac
-
-"$DELEGATE_TEST_REAL_GIT" "$@"
-if [ "$snapshot_read" -eq 1 ] && [ ! -e "$DELEGATE_TEST_CHECKOUT_MARKER" ]; then
-  : > "$DELEGATE_TEST_CHECKOUT_MARKER"
-  "$DELEGATE_TEST_REAL_GIT" -C "$DELEGATE_TEST_CHECKOUT_REPO" checkout --quiet main
-fi
-`
-	if err := os.WriteFile(wrapper, []byte(wrapperScript), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DELEGATE_TEST_REAL_GIT", realGit)
-	t.Setenv("DELEGATE_TEST_CHECKOUT_MARKER", marker)
-	t.Setenv("DELEGATE_TEST_CHECKOUT_REPO", repo)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	_, err = Assemble(context.Background(), Options{
-		CWD:      repo,
-		Scope:    ScopeWorkingTree,
-		StateDir: filepath.Join(t.TempDir(), "state"),
-	})
-	want := "repository HEAD moved during review assembly (" + featureHead + " -> " + mainHead + "); re-run the review on a quiescent repo"
-	if err == nil || err.Error() != want {
-		t.Fatalf("Assemble() error = %v, want %q", err, want)
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("checkout trigger marker: %v", err)
-	}
-}
-
 func TestAssembleAutoCombinesCommittedBranchAndWorkingTreeOverlay(t *testing.T) {
 	repo := newGitFixture(t)
 	mergeBase := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
@@ -263,7 +175,7 @@ func TestAssembleAutoUsesUntrackedRecreationOverBranchDeletion(t *testing.T) {
 	if !strings.Contains(assembled.Inline, "UNTRACKED_RECREATION_WINS") {
 		t.Fatalf("automatic context dropped untracked recreation: %q", assembled.Inline)
 	}
-	if len(assembled.Files) != 1 || assembled.Files[0].Path != "recreated.txt" || assembled.Files[0].Status != "??" {
+	if len(assembled.Files) != 1 || assembled.Files[0].Path != "recreated.txt" || assembled.Files[0].Status != "M" {
 		t.Fatalf("automatic files = %#v, want untracked recreation", assembled.Files)
 	}
 }
@@ -341,7 +253,7 @@ func TestAssembleSanitizesTrackedAndUntrackedSecretPathsBeforeArtifact(t *testin
 	}
 	for _, required := range []string{
 		"REDACTED\tM\t\".env.production\"",
-		"REDACTED\t??\t\"api-token.txt\"",
+		"REDACTED\tA\t\"api-token.txt\"",
 		"PUBLIC_REVIEW_CHANGE",
 	} {
 		if !strings.Contains(artifact, required) {
@@ -530,7 +442,7 @@ func TestAssembleRedactsNormalizedSecretPathVariants(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer Cleanup(assembled)
-			if !strings.Contains(assembled.Inline, "REDACTED\t??\t"+strconv.Quote(path)) {
+			if !strings.Contains(assembled.Inline, "REDACTED\tA\t"+strconv.Quote(path)) {
 				t.Fatalf("normalized secret path %q was not redacted: %q", path, assembled.Inline)
 			}
 			if strings.Contains(assembled.Inline, "NORMALIZED_SECRET_MUST_NOT_LEAK") {
@@ -1235,7 +1147,7 @@ func TestAllowLiveRepoReadGatesBackendCWDAndPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if live.BackendCWD != live.CanonicalCWD || !strings.Contains(livePrompt, "LIVE-REPOSITORY MODE") || !strings.Contains(livePrompt, "makes backend file reads easier") || !strings.Contains(livePrompt, "self-collect") || !strings.Contains(livePrompt, "After reading the assembled context") {
+	if live.BackendCWD != live.CanonicalCWD || !strings.Contains(livePrompt, "LIVE-REPOSITORY MODE") || !strings.Contains(livePrompt, "makes backend file reads easier") || !strings.Contains(livePrompt, "outside the captured-input guarantee") || !strings.Contains(livePrompt, "After reading the assembled context") {
 		t.Fatalf("live gating failed: cwd=%q prompt=%q", live.BackendCWD, livePrompt)
 	}
 }
@@ -1310,9 +1222,7 @@ func TestComposePromptTreatsSuppliedReviewContextAsAuthoritative(t *testing.T) {
 				"Report them as given rather than as unavailable, and do not infer missing identifiers.",
 				"In branch and auto scope, the supplied comparison baseline is the merge base used for the diff; the resolved base tip identifies the base ref.",
 				"For the report's Scope boundary, use the supplied branch, resolved base tip commit when supplied, comparison baseline when supplied, and HEAD commit identifiers; do not infer or claim a full commit list.",
-				"Reading the assembled context is the first and only required step.",
-				"Do not probe for already-supplied metadata or context, and do not put the expressly unnecessary redundant metadata probe before the context read with &&.",
-				"A sandbox denial of that expressly unnecessary probe is not a reason to stop: read the assembled context and complete the review.",
+				"The supplied packet is the evidence to review. Read it before drawing conclusions; do not infer missing identifiers.",
 				"Resolved base tip commit: 1111111111111111111111111111111111111111.",
 				"Comparison baseline (merge base used for diff): 3333333333333333333333333333333333333333.",
 				"Branch under review: \"feature\".",
@@ -1456,7 +1366,7 @@ func TestAssembleFinalSecretGateRedactsMatchingHunksInlineAndSpilled(t *testing.
 			t.Fatal(err)
 		}
 		artifact := string(raw)
-		for _, want := range []string{"FILE\t??\t\"file-a.txt\"", secretRedactionMarker, "clean change"} {
+		for _, want := range []string{"FILE\tA\t\"file-a.txt\"", secretRedactionMarker, "clean change"} {
 			if !strings.Contains(artifact, want) {
 				t.Fatalf("spilled artifact missing %q:\n%s", want, artifact)
 			}

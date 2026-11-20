@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	reviewpkg "github.com/charlesnpx/delegate/internal/review"
@@ -20,7 +22,7 @@ import (
 )
 
 const (
-	liveRepoReadWarning    = "--allow-live-repo-read makes backend filesystem reads easier by using the live repository as cwd; delegate's path/history redaction and final content scan apply only to the context it assembles"
+	liveRepoReadWarning    = "supplemental live repository reads are outside the captured-input guarantee and must not be used to recover redacted content"
 	reviewKind             = reviewpkg.KindReview
 	adversarialReviewKind  = reviewpkg.KindAdversarialReview
 	maxReviewArtifactBytes = 8 * 1024 * 1024
@@ -50,6 +52,7 @@ type contractReviewInput struct {
 	RequestDigest     string
 	ReviewInputDigest string
 	ConsumerIdentity  reviewcontract.Identity
+	Subject           reviewcontract.RequestSubject
 	SchemaVersion     string
 	Recipe            reviewcontract.ReviewRecipe
 	FrozenRecipe      json.RawMessage
@@ -111,18 +114,25 @@ func runReview(kind string, args []string, stdout, stderr io.Writer) (int, error
 		}
 		contractCharterHash = contractInput.FrozenCharter.CharterHash
 		contractReviewInputDigest = contractInput.ReviewInputDigest
+		taskOpts.Review = &reviewSubmissionEvidence{Mode: "contract", InputDigest: contractInput.ReviewInputDigest, RequestDigest: contractInput.RequestDigest, CharterHash: contractInput.FrozenCharter.CharterHash, RecipeDigest: contractInput.RecipeDigest, Reviewer: contractInput.Reviewer, Subject: &reviewSubjectEvidence{Head: contractInput.Subject.Head, Tree: contractInput.Subject.Tree, Branch: contractInput.Subject.Branch}}
 	} else {
-		assembled, err = reviewpkg.Assemble(context.Background(), reviewpkg.Options{
+		captureCtx, stopCapture := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		assembled, err = reviewpkg.Assemble(captureCtx, reviewpkg.Options{
 			CWD:               opts.CWD,
 			Base:              opts.Base,
 			Scope:             opts.Scope,
 			AllowLiveRepoRead: opts.AllowLiveRepoRead,
 			CriteriaFile:      opts.CriteriaFile,
 		})
+		stopCapture()
 		if err != nil {
 			return 0, err
 		}
 		logicalWorkspace = assembled.RepositoryRoot
+		taskOpts.Review = &reviewSubmissionEvidence{Mode: "direct", Scope: assembled.Scope, InputDigest: assembled.InputDigest, ComparisonBase: assembled.ComparisonBase, Head: assembled.Head}
+		if assembled.Base.Source != "empty-tree" {
+			taskOpts.Review.BaseTip = assembled.Base.Commit
+		}
 	}
 
 	for _, sweepErr := range sweepReviewWorkspaces(context.Background(), assembled.StateDir) {
@@ -264,8 +274,11 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 	} else if provided["criteria-file"] && opts.CriteriaFile == "" {
 		return reviewOptions{}, fmt.Errorf("--criteria-file requires a non-empty path")
 	}
-	if opts.Scope == reviewpkg.ScopeWorkingTree && opts.Base != "" {
+	if opts.Scope == reviewpkg.ScopeWorkingTree && provided["base"] {
 		return reviewOptions{}, fmt.Errorf("--base cannot be used with --scope working-tree")
+	}
+	if opts.RequestFile == "" && provided["base"] && opts.Base == "" {
+		return reviewOptions{}, fmt.Errorf("--base requires a non-empty ref")
 	}
 	if err := validateTimeoutOption(opts.Timeout); err != nil {
 		return reviewOptions{}, err
@@ -324,6 +337,7 @@ func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
 		}
 		input.ReviewInputDigest = request.ReviewInputDigest
 		input.ConsumerIdentity = request.ConsumerIdentity
+		input.Subject = request.Subject
 		requestCharterHash = request.CharterHash
 		requestReviewInputDigest = request.ReviewInputDigest
 	case reviewcontract.ReviewRequestV2:
@@ -347,6 +361,7 @@ func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
 		}
 		input.ReviewInputDigest = request.ReviewInputDigest
 		input.ConsumerIdentity = request.ConsumerIdentity
+		input.Subject = request.Subject
 		input.Recipe = recipe
 		input.FrozenRecipe = append(json.RawMessage(nil), request.FrozenRecipe...)
 		input.RecipeDigest = request.RecipeDigest
@@ -382,6 +397,7 @@ func loadContractReviewInput(opts reviewOptions) (contractReviewInput, error) {
 		RequestDigest:     input.RequestDigest,
 		ReviewInputDigest: input.ReviewInputDigest,
 		ConsumerIdentity:  input.ConsumerIdentity,
+		Subject:           input.Subject,
 		SchemaVersion:     input.SchemaVersion,
 		Recipe:            input.Recipe,
 		FrozenRecipe:      input.FrozenRecipe,
