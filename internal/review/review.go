@@ -532,15 +532,6 @@ func readExistingContractWorkspaceFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-// verifyHeadUnchanged rejects a context assembled across two committed tips.
-// A captured "HEAD" denotes an initial best-effort fallback, for which this
-// check intentionally preserves the existing behavior.
-// ResolveBase follows the explicit, default-remote, unpushed-upstream chain.
-func ResolveBase(ctx context.Context, cwd, explicit string) (Base, error) {
-	head, _ := resolveCommit(ctx, cwd, "HEAD")
-	return resolveBaseAtHead(ctx, cwd, explicit, head)
-}
-
 func resolveBaseAtHead(ctx context.Context, cwd, explicit, head string) (Base, error) {
 	if explicit != "" {
 		commit, err := resolveCommit(ctx, cwd, explicit)

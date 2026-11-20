@@ -18,12 +18,13 @@ import (
 func TestResolveBaseFallbackChain(t *testing.T) {
 	t.Run("explicit", func(t *testing.T) {
 		repo := newGitFixture(t)
-		got, err := ResolveBase(context.Background(), repo, "HEAD")
+		head := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+		got, err := resolveBaseAtHead(context.Background(), repo, "HEAD", head)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got.Source != "explicit" || got.Ref != "HEAD" || got.Commit == "" {
-			t.Fatalf("ResolveBase() = %#v", got)
+			t.Fatalf("resolveBaseAtHead() = %#v", got)
 		}
 	})
 
@@ -37,12 +38,13 @@ func TestResolveBaseFallbackChain(t *testing.T) {
 		writeFixtureFile(t, repo, "unpushed.txt", "local commit\n")
 		gitFixture(t, repo, "add", "unpushed.txt")
 		gitFixture(t, repo, "commit", "-m", "unpushed change")
-		got, err := ResolveBase(context.Background(), repo, "")
+		head := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+		got, err := resolveBaseAtHead(context.Background(), repo, "", head)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got.Source != "upstream-unpushed" || got.Ref != "origin/main" || got.Commit != upstreamHead {
-			t.Fatalf("ResolveBase() = %#v, want unpushed upstream origin/main at %s", got, upstreamHead)
+			t.Fatalf("resolveBaseAtHead() = %#v, want unpushed upstream origin/main at %s", got, upstreamHead)
 		}
 	})
 
@@ -51,12 +53,12 @@ func TestResolveBaseFallbackChain(t *testing.T) {
 		head := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
 		gitFixture(t, repo, "update-ref", "refs/remotes/origin/main", head)
 		gitFixture(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
-		got, err := ResolveBase(context.Background(), repo, "")
+		got, err := resolveBaseAtHead(context.Background(), repo, "", head)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got.Source != "default-remote" || got.Ref != "origin/main" || got.Commit != head {
-			t.Fatalf("ResolveBase() = %#v, want default origin/main at %s", got, head)
+			t.Fatalf("resolveBaseAtHead() = %#v, want default origin/main at %s", got, head)
 		}
 	})
 
@@ -66,24 +68,25 @@ func TestResolveBaseFallbackChain(t *testing.T) {
 		gitFixture(t, repo, "remote", "add", "upstream", repo)
 		gitFixture(t, repo, "update-ref", "refs/remotes/upstream/trunk", head)
 		gitFixture(t, repo, "symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/trunk")
-		got, err := ResolveBase(context.Background(), repo, "")
+		got, err := resolveBaseAtHead(context.Background(), repo, "", head)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got.Source != "default-remote" || got.Ref != "upstream/trunk" || got.Commit != head {
-			t.Fatalf("ResolveBase() = %#v, want default upstream/trunk at %s", got, head)
+			t.Fatalf("resolveBaseAtHead() = %#v, want default upstream/trunk at %s", got, head)
 		}
 	})
 
 	t.Run("guidance", func(t *testing.T) {
 		repo := newGitFixture(t)
-		_, err := ResolveBase(context.Background(), repo, "")
+		head := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+		_, err := resolveBaseAtHead(context.Background(), repo, "", head)
 		if err == nil {
-			t.Fatal("ResolveBase() error = nil")
+			t.Fatal("resolveBaseAtHead() error = nil")
 		}
 		for _, fragment := range []string{"--base <ref>", "upstream behind HEAD", "default remote branch"} {
 			if !strings.Contains(err.Error(), fragment) {
-				t.Fatalf("ResolveBase() error = %q, want %q", err, fragment)
+				t.Fatalf("resolveBaseAtHead() error = %q, want %q", err, fragment)
 			}
 		}
 	})
@@ -103,12 +106,12 @@ func TestResolveBasePushedFeaturePrefersDefaultRemoteBranch(t *testing.T) {
 	gitFixture(t, repo, "config", "branch.feature.remote", "origin")
 	gitFixture(t, repo, "config", "branch.feature.merge", "refs/heads/feature")
 
-	got, err := ResolveBase(context.Background(), repo, "")
+	got, err := resolveBaseAtHead(context.Background(), repo, "", featureHead)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Ref != "origin/main" || got.Source != "default-remote" || got.Commit != mainHead {
-		t.Fatalf("ResolveBase() = %#v, want default origin/main at %s", got, mainHead)
+		t.Fatalf("resolveBaseAtHead() = %#v, want default origin/main at %s", got, mainHead)
 	}
 }
 

@@ -201,6 +201,36 @@ func TestCaptureRejectsUnmergedAndSpecialFiles(t *testing.T) {
 	})
 }
 
+func TestCaptureSkipsUnreadableIgnoredDirectory(t *testing.T) {
+	repo := newGitFixture(t)
+	writeFixtureFile(t, repo, ".gitignore", "cache/\n")
+	writeFixtureFile(t, repo, "tracked.txt", "before\n")
+	gitFixture(t, repo, "add", ".gitignore", "tracked.txt")
+	gitFixture(t, repo, "commit", "-m", "capture baseline")
+	writeFixtureFile(t, repo, "tracked.txt", "TRACKED_REVIEW_CHANGE\n")
+	cache := filepath.Join(repo, "cache")
+	if err := os.Mkdir(cache, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cache, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(cache, 0o700)
+
+	assembled, err := Assemble(context.Background(), Options{
+		CWD:      repo,
+		Scope:    ScopeWorkingTree,
+		StateDir: filepath.Join(t.TempDir(), "state"),
+	})
+	if err != nil {
+		t.Fatalf("Assemble() with unreadable ignored directory: %v", err)
+	}
+	defer Cleanup(assembled)
+	if !strings.Contains(assembled.Inline, "TRACKED_REVIEW_CHANGE") {
+		t.Fatalf("review capture omitted tracked change: %s", assembled.Inline)
+	}
+}
+
 func TestCaptureCancellationRemovesRawDirectory(t *testing.T) {
 	repo := newGitFixture(t)
 	writeFixtureFile(t, repo, "change.txt", "content\n")
