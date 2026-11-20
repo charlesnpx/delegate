@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 const maxCaptureBytes = 64 * 1024 * 1024
@@ -103,6 +104,11 @@ func newReviewCapture(ctx context.Context, repoRoot, stateDir string) (*reviewCa
 	privateEnv := replaceEnv(env, "GIT_INDEX_FILE", filepath.Join(dir, "index"))
 	privateEnv = replaceEnv(privateEnv, "GIT_OBJECT_DIRECTORY", capture.objects)
 	privateEnv = replaceEnv(privateEnv, "GIT_ALTERNATE_OBJECT_DIRECTORIES", appendAlternate(envValue(env, "GIT_ALTERNATE_OBJECT_DIRECTORIES"), sourceObjects))
+	parameters := envValue(env, "GIT_CONFIG_PARAMETERS")
+	if parameters != "" {
+		parameters += " "
+	}
+	privateEnv = replaceEnv(privateEnv, "GIT_CONFIG_PARAMETERS", parameters+"'core.splitIndex=false'")
 	capture.ctx = context.WithValue(ctx, gitEnvKey{}, privateEnv)
 	return capture, nil
 }
@@ -137,20 +143,29 @@ func (capture *reviewCapture) captureWorkingTree(repoRoot, head string, unborn b
 		env = replaceEnv(env, "GIT_ALTERNATE_OBJECT_DIRECTORIES", appendAlternate(envValue(env, "GIT_ALTERNATE_OBJECT_DIRECTORIES"), capture.objects))
 		sourceCtx = context.WithValue(sourceCtx, gitEnvKey{}, env)
 	}
-	if err := rejectSpecialFiles(sourceCtx, repoRoot, capture.dir); err != nil {
-		return "", err
-	}
-	// Inspect tracked paths without opening symlinks or other unsupported types.
-	tracked, err := gitOutput(sourceCtx, repoRoot, false, "ls-files", "-z", "--")
+	rawStatus, err := gitOutput(sourceCtx, repoRoot, false, "diff", "--raw", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", head, "--")
 	if err != nil {
-		return "", fmt.Errorf("enumerate tracked review paths: %w", err)
+		return "", fmt.Errorf("inspect tracked changes: %w", err)
 	}
-	for _, path := range splitNUL(tracked) {
+	// Check Git-selected tracked paths before generating a patch that opens them.
+	records := splitNUL(rawStatus)
+	if len(records)%2 != 0 {
+		return "", errors.New("git returned malformed tracked change data")
+	}
+	for i := 0; i < len(records); i += 2 {
+		fields := strings.Fields(records[i])
+		if len(fields) != 5 || !strings.HasPrefix(fields[0], ":") {
+			return "", errors.New("git returned malformed tracked change data")
+		}
+		if strings.TrimPrefix(fields[0], ":") == "160000" || fields[1] == "160000" {
+			return "", errors.New("unsupported gitlink/submodule change in review capture")
+		}
+		path := records[i+1]
 		if !filepath.IsLocal(path) {
 			return "", fmt.Errorf("invalid tracked review path %q", RedactSecretLikeDiagnostic(path))
 		}
 		info, statErr := os.Lstat(filepath.Join(repoRoot, filepath.FromSlash(path)))
-		if errors.Is(statErr, os.ErrNotExist) {
+		if errors.Is(statErr, os.ErrNotExist) || errors.Is(statErr, syscall.ENOTDIR) {
 			continue
 		}
 		if statErr != nil {
@@ -160,20 +175,8 @@ func (capture *reviewCapture) captureWorkingTree(repoRoot, head string, unborn b
 			return "", fmt.Errorf("unsupported special file at review path %q", RedactSecretLikeDiagnostic(path))
 		}
 	}
-	rawStatus, err := gitOutput(sourceCtx, repoRoot, false, "diff", "--raw", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", head, "--")
-	if err != nil {
-		return "", fmt.Errorf("inspect tracked changes: %w", err)
-	}
-	for _, record := range splitNUL(rawStatus) {
-		if strings.HasPrefix(record, ":") {
-			fields := strings.Fields(record)
-			if len(fields) >= 2 && (strings.TrimPrefix(fields[0], ":") == "160000" || fields[1] == "160000") {
-				return "", errors.New("unsupported gitlink/submodule change in review capture")
-			}
-		}
-	}
 	remaining := maxCaptureBytes
-	trackedPatch, err := gitLimitedOutput(sourceCtx, repoRoot, false, nil, remaining, "diff", "--binary", "--full-index", "--no-renames", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", head, "--")
+	trackedPatch, err := gitLimitedOutput(sourceCtx, repoRoot, false, nil, remaining, true, "diff", "--binary", "--full-index", "--no-renames", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", head, "--")
 	if err != nil {
 		return "", fmt.Errorf("capture tracked changes: %w", err)
 	}
@@ -200,7 +203,7 @@ func (capture *reviewCapture) captureWorkingTree(repoRoot, head string, unborn b
 		if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
 			return "", fmt.Errorf("unsupported special file or submodule at review path %q", RedactSecretLikeDiagnostic(path))
 		}
-		patch, err := gitLimitedOutput(sourceCtx, repoRoot, true, nil, remaining, "diff", "--no-index", "--binary", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", "--", "/dev/null", path)
+		patch, err := gitLimitedOutput(sourceCtx, repoRoot, true, nil, remaining, true, "diff", "--no-index", "--binary", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", "--", "/dev/null", path)
 		if err != nil {
 			return "", fmt.Errorf("capture untracked path %q: %w", RedactSecretLikeDiagnostic(path), err)
 		}
@@ -219,75 +222,11 @@ func (capture *reviewCapture) captureWorkingTree(repoRoot, head string, unborn b
 	return strings.TrimSpace(string(raw)), nil
 }
 
-// Git omits FIFOs and other special files from --others. Detect such paths
-// without following links, and honor the source repository's ignore rules.
-func rejectSpecialFiles(ctx context.Context, repoRoot, captureDir string) error {
-	return filepath.WalkDir(repoRoot, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return fmt.Errorf("inspect review path: %w", walkErr)
-		}
-		if path == repoRoot {
-			return nil
-		}
-		if path == captureDir && entry.IsDir() {
-			return filepath.SkipDir
-		}
-		if entry.Name() == ".git" && entry.IsDir() {
-			return filepath.SkipDir
-		}
-		if entry.IsDir() {
-			rel, err := filepath.Rel(repoRoot, path)
-			if err != nil {
-				return err
-			}
-			ignored, err := reviewPathIgnored(ctx, repoRoot, filepath.ToSlash(rel))
-			if err != nil {
-				return err
-			}
-			if ignored {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if entry.Type().IsRegular() || entry.Type()&os.ModeSymlink != 0 {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return fmt.Errorf("inspect review path: %w", err)
-		}
-		if info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return nil
-		}
-		rel, err := filepath.Rel(repoRoot, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		ignored, err := reviewPathIgnored(ctx, repoRoot, rel)
-		if err != nil {
-			return err
-		}
-		if !ignored {
-			return fmt.Errorf("unsupported special file at review path %q", RedactSecretLikeDiagnostic(rel))
-		}
-		return nil
-	})
-}
-
-func reviewPathIgnored(ctx context.Context, repoRoot, path string) (bool, error) {
-	ignored, err := gitOutput(ctx, repoRoot, true, "check-ignore", "--no-index", "--", path)
-	if err != nil {
-		return false, fmt.Errorf("check review path ignore rules: %w", err)
-	}
-	return len(ignored) > 0, nil
-}
-
 func (capture *reviewCapture) apply(repoRoot string, patch []byte) error {
 	if len(patch) == 0 {
 		return nil
 	}
-	if _, err := gitLimitedOutput(capture.ctx, repoRoot, false, patch, maxCaptureBytes, "apply", "--cached", "--whitespace=nowarn", "-"); err != nil {
+	if _, err := gitLimitedOutput(capture.ctx, repoRoot, false, patch, maxCaptureBytes, true, "apply", "--cached", "--whitespace=nowarn", "-"); err != nil {
 		return fmt.Errorf("reconstruct captured review input: %w", err)
 	}
 	return nil
@@ -295,10 +234,13 @@ func (capture *reviewCapture) apply(repoRoot string, patch []byte) error {
 
 // gitLimitedOutput enforces an aggregate allowance as Git writes, before the
 // whole patch can be materialized. The caller accounts across invocations.
-func gitLimitedOutput(ctx context.Context, cwd string, acceptDiff bool, input []byte, limit int, args ...string) ([]byte, error) {
-	commandArgs := gitCommandArgs(ctx, cwd, args...)
+func gitLimitedOutput(ctx context.Context, cwd string, acceptDiff bool, input []byte, limit int, literalPaths bool, args ...string) ([]byte, error) {
+	commandArgs := gitCommandArgs(ctx, cwd, literalPaths, args...)
 	cmd := exec.CommandContext(ctx, "git", commandArgs...)
 	cmd.Env = append(gitEnvironment(ctx), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1")
+	if !literalPaths {
+		cmd.Env = append(cmd.Env, "GIT_LITERAL_PATHSPECS=0", "GIT_GLOB_PATHSPECS=0", "GIT_NOGLOB_PATHSPECS=0", "GIT_ICASE_PATHSPECS=0")
+	}
 	if input != nil {
 		cmd.Stdin = bytes.NewReader(input)
 	}

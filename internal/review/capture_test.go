@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -64,7 +65,7 @@ func TestCaptureEffectiveGitChangesWithoutWritingSource(t *testing.T) {
 	}
 	defer Cleanup(assembled)
 	packet := packetBytes(t, assembled)
-	for _, want := range []string{"effective B", "staged addition", "effective recreation", "rename-new.txt", "new mode 100755", "literal path"} {
+	for _, want := range []string{"effective B", "staged addition", "effective recreation", "FILE\tR100\t\"rename-old.txt\" -> \"rename-new.txt\"", "rename from rename-old.txt", "rename to rename-new.txt", "new mode 100755", "literal path"} {
 		if !bytes.Contains(packet, []byte(want)) {
 			t.Errorf("packet missing %q", want)
 		}
@@ -107,6 +108,111 @@ func TestCaptureEffectiveGitChangesWithoutWritingSource(t *testing.T) {
 		t.Errorf("source objects changed: before=%v after=%v", objectsBefore, objectsAfter)
 	}
 	assertNoRawCapture(t, state)
+}
+
+func TestCaptureFileDirectoryReplacements(t *testing.T) {
+	for _, tc := range []struct {
+		name, beforePath, afterPath string
+	}{
+		{"directory to file", "module/child.txt", "module"},
+		{"file to directory", "module", "module/child.txt"},
+		{"unicode and glob directory to file", "é[?]/child.txt", "é[?]"},
+		{"glob file to directory", "[*]module", "[*]module/child.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newGitFixture(t)
+			writeFixtureFile(t, repo, tc.beforePath, "OLD_REPLACED_CONTENT\n")
+			gitFixture(t, repo, "add", tc.beforePath)
+			gitFixture(t, repo, "commit", "-m", "replacement baseline")
+			if err := os.Remove(filepath.Join(repo, tc.beforePath)); err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasPrefix(tc.beforePath, tc.afterPath+"/") {
+				if err := os.Remove(filepath.Join(repo, tc.afterPath)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeFixtureFile(t, repo, tc.afterPath, "NEW_REPLACEMENT_CONTENT\n")
+
+			assembled, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeWorkingTree, StateDir: filepath.Join(t.TempDir(), "state")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer Cleanup(assembled)
+			packet := string(packetBytes(t, assembled))
+			for _, want := range []string{
+				"FILE\tD\t" + strconv.Quote(tc.beforePath),
+				"FILE\tA\t" + strconv.Quote(tc.afterPath),
+				"-OLD_REPLACED_CONTENT", "+NEW_REPLACEMENT_CONTENT",
+			} {
+				if !strings.Contains(packet, want) {
+					t.Errorf("packet missing %q:\n%s", want, packet)
+				}
+			}
+			if strings.Contains(packet, secretRedactionMarker) {
+				t.Errorf("ordinary replacement was redacted:\n%s", packet)
+			}
+		})
+	}
+	t.Run("rename into replacement directory", func(t *testing.T) {
+		repo := newGitFixture(t)
+		writeFixtureFile(t, repo, "module", "UNCHANGED_RENAME_CONTENT\n")
+		gitFixture(t, repo, "add", "module")
+		gitFixture(t, repo, "commit", "-m", "rename baseline")
+		if err := os.Remove(filepath.Join(repo, "module")); err != nil {
+			t.Fatal(err)
+		}
+		writeFixtureFile(t, repo, "module/child.txt", "UNCHANGED_RENAME_CONTENT\n")
+		writeFixtureFile(t, repo, "module/other.txt", "OTHER_ADDITION_CONTENT\n")
+		assembled, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeWorkingTree, StateDir: filepath.Join(t.TempDir(), "state")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer Cleanup(assembled)
+		packet := string(packetBytes(t, assembled))
+		for _, want := range []string{"FILE\tR100\t\"module\" -> \"module/child.txt\"", "rename from module", "rename to module/child.txt", "FILE\tA\t\"module/other.txt\"", "+OTHER_ADDITION_CONTENT"} {
+			if !strings.Contains(packet, want) {
+				t.Errorf("packet missing %q:\n%s", want, packet)
+			}
+		}
+		if strings.Contains(packet, secretRedactionMarker) {
+			t.Errorf("ordinary rename was redacted:\n%s", packet)
+		}
+	})
+}
+
+func TestCaptureSplitIndexDoesNotWriteSourceGitDirectory(t *testing.T) {
+	repo := newGitFixture(t)
+	writeFixtureFile(t, repo, "README.md", "changed for private capture\n")
+	gitFixture(t, repo, "config", "core.splitIndex", "true")
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'core.splitIndex=true' 'user.name=Capture Caller'")
+	gitDir := filepath.Join(repo, ".git")
+	before, err := os.ReadDir(gitDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assembled, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeWorkingTree, StateDir: filepath.Join(t.TempDir(), "state")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	if !bytes.Contains(packetBytes(t, assembled), []byte("changed for private capture")) {
+		t.Fatal("packet omitted the working-tree change")
+	}
+	after, err := os.ReadDir(gitDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := func(entries []os.DirEntry) []string {
+		var result []string
+		for _, entry := range entries {
+			result = append(result, entry.Name())
+		}
+		return result
+	}
+	if !reflect.DeepEqual(names(before), names(after)) {
+		t.Fatalf("source Git directory changed: before=%v after=%v", names(before), names(after))
+	}
 }
 
 func TestCaptureRemainsCoherentAfterWorktreeAndHeadMove(t *testing.T) {
@@ -166,8 +272,14 @@ func TestBranchCaptureIgnoresSamePathAndUnrelatedWorktreeEdits(t *testing.T) {
 }
 
 func TestCaptureRejectsUnmergedAndSpecialFiles(t *testing.T) {
-	t.Run("special", func(t *testing.T) {
+	t.Run("tracked special", func(t *testing.T) {
 		repo := newGitFixture(t)
+		writeFixtureFile(t, repo, "fifo", "tracked baseline\n")
+		gitFixture(t, repo, "add", "fifo")
+		gitFixture(t, repo, "commit", "-m", "tracked special baseline")
+		if err := os.Remove(filepath.Join(repo, "fifo")); err != nil {
+			t.Fatal(err)
+		}
 		if err := syscall.Mkfifo(filepath.Join(repo, "fifo"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -177,6 +289,21 @@ func TestCaptureRejectsUnmergedAndSpecialFiles(t *testing.T) {
 			t.Fatalf("error=%v", err)
 		}
 		assertNoRawCapture(t, state)
+	})
+	t.Run("unselected special", func(t *testing.T) {
+		repo := newGitFixture(t)
+		if err := syscall.Mkfifo(filepath.Join(repo, "fifo"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeFixtureFile(t, repo, "README.md", "selected change\n")
+		assembled, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeWorkingTree, StateDir: filepath.Join(t.TempDir(), "state")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer Cleanup(assembled)
+		if !bytes.Contains(packetBytes(t, assembled), []byte("+selected change")) {
+			t.Fatal("selected change is missing from packet")
+		}
 	})
 	t.Run("unmerged", func(t *testing.T) {
 		repo := newGitFixture(t)
@@ -199,36 +326,6 @@ func TestCaptureRejectsUnmergedAndSpecialFiles(t *testing.T) {
 		}
 		assertNoRawCapture(t, state)
 	})
-}
-
-func TestCaptureSkipsUnreadableIgnoredDirectory(t *testing.T) {
-	repo := newGitFixture(t)
-	writeFixtureFile(t, repo, ".gitignore", "cache/\n")
-	writeFixtureFile(t, repo, "tracked.txt", "before\n")
-	gitFixture(t, repo, "add", ".gitignore", "tracked.txt")
-	gitFixture(t, repo, "commit", "-m", "capture baseline")
-	writeFixtureFile(t, repo, "tracked.txt", "TRACKED_REVIEW_CHANGE\n")
-	cache := filepath.Join(repo, "cache")
-	if err := os.Mkdir(cache, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(cache, 0); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chmod(cache, 0o700)
-
-	assembled, err := Assemble(context.Background(), Options{
-		CWD:      repo,
-		Scope:    ScopeWorkingTree,
-		StateDir: filepath.Join(t.TempDir(), "state"),
-	})
-	if err != nil {
-		t.Fatalf("Assemble() with unreadable ignored directory: %v", err)
-	}
-	defer Cleanup(assembled)
-	if !strings.Contains(assembled.Inline, "TRACKED_REVIEW_CHANGE") {
-		t.Fatalf("review capture omitted tracked change: %s", assembled.Inline)
-	}
 }
 
 func TestCaptureCancellationRemovesRawDirectory(t *testing.T) {

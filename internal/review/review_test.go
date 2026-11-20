@@ -282,21 +282,23 @@ func TestAssembleSanitizesTrackedAndUntrackedSecretPathsBeforeArtifact(t *testin
 func TestAssembleRedactsRenameCopyWhenEitherEndpointIsSecretAndOmitsBinaryContent(t *testing.T) {
 	repo := newGitFixture(t)
 	writeFixtureFile(t, repo, ".env", "RENAMED_SECRET_MUST_NOT_LEAK\n")
-	writeFixtureFile(t, repo, "credentials.json", "COPIED_SECRET_MUST_NOT_LEAK\n")
+	writeFixtureFile(t, repo, "credentials.json", strings.Repeat("COPIED_SECRET_MUST_NOT_LEAK\n", 40))
+	writeFixtureFile(t, repo, "ordinary.txt", "old public content\n")
 	if err := os.WriteFile(filepath.Join(repo, "client.p12"), []byte{'o', 'l', 'd', 0, 'b', 'i', 'n'}, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gitFixture(t, repo, "add", ".env", "credentials.json", "client.p12")
+	gitFixture(t, repo, "add", ".env", "credentials.json", "client.p12", "ordinary.txt")
 	gitFixture(t, repo, "commit", "-m", "secret fixtures")
 	gitFixture(t, repo, "mv", ".env", "config.txt")
 	raw, err := os.ReadFile(filepath.Join(repo, "credentials.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(repo, "public-copy.txt"), raw, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, "public-copy.txt"), append(raw, []byte("COPY_ONLY_SECRET_MUST_NOT_LEAK\n")...), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	gitFixture(t, repo, "add", "public-copy.txt")
+	writeFixtureFile(t, repo, "ordinary.txt", "new public content\n")
 	if err := os.WriteFile(filepath.Join(repo, "client.p12"), []byte{'n', 'e', 'w', 0, 's', 'e', 'c', 'r', 'e', 't'}, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -308,17 +310,67 @@ func TestAssembleRedactsRenameCopyWhenEitherEndpointIsSecretAndOmitsBinaryConten
 	defer Cleanup(assembled)
 	for _, want := range []string{
 		"REDACTED\tR100\t\".env\" -> \"config.txt\"",
-		"REDACTED\tC100\t\"credentials.json\" -> \"public-copy.txt\"",
+		"REDACTED\tA\t\"public-copy.txt\"",
 		"REDACTED\tM\t\"client.p12\"",
+		"FILE\tM\t\"ordinary.txt\"",
+		"+new public content",
 	} {
 		if !strings.Contains(assembled.Inline, want) {
 			t.Fatalf("sanitized context missing %q: %q", want, assembled.Inline)
 		}
 	}
-	for _, forbidden := range []string{"RENAMED_SECRET_MUST_NOT_LEAK", "COPIED_SECRET_MUST_NOT_LEAK", "GIT binary patch", "literal "} {
+	for _, forbidden := range []string{"RENAMED_SECRET_MUST_NOT_LEAK", "COPIED_SECRET_MUST_NOT_LEAK", "COPY_ONLY_SECRET_MUST_NOT_LEAK", "GIT binary patch", "literal "} {
 		if strings.Contains(assembled.Inline, forbidden) {
 			t.Fatalf("sanitized context leaked binary/secret marker %q: %q", forbidden, assembled.Inline)
 		}
+	}
+}
+
+func TestAssembleCopyDiffsAndPrivateKeyRedaction(t *testing.T) {
+	for _, secret := range []bool{false, true} {
+		name := "ordinary"
+		if secret {
+			name = "private key"
+		}
+		t.Run(name, func(t *testing.T) {
+			repo := newGitFixture(t)
+			gitFixture(t, repo, "config", "diff.renames", "copies")
+			lines := make([]string, 60)
+			for i := range lines {
+				lines[i] = fmt.Sprintf("ordinary line %02d", i+1)
+			}
+			if secret {
+				lines[0] = "-----BEGIN RSA PRIVATE KEY-----"
+				lines[40] = "PRIVATE_KEY_BODY_FROM_COPIED_FILE"
+				lines[50] = "-----END RSA PRIVATE KEY-----"
+			}
+			original := strings.Join(lines, "\n") + "\n"
+			writeFixtureFile(t, repo, "source.txt", original)
+			gitFixture(t, repo, "add", "source.txt")
+			gitFixture(t, repo, "commit", "-m", "copy baseline")
+			lines[59] = "edited original line"
+			writeFixtureFile(t, repo, "source.txt", strings.Join(lines, "\n")+"\n")
+			writeFixtureFile(t, repo, "copy.txt", original)
+
+			assembled, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeWorkingTree, StateDir: filepath.Join(t.TempDir(), "state")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer Cleanup(assembled)
+			packet := string(packetBytes(t, assembled))
+			for _, want := range []string{"FILE\tA\t\"copy.txt\"", "diff --git a/copy.txt b/copy.txt", "new file mode", "FILE\tM\t\"source.txt\"", "+edited original line"} {
+				if !strings.Contains(packet, want) {
+					t.Errorf("packet missing %q:\n%s", want, packet)
+				}
+			}
+			if secret {
+				if strings.Contains(packet, "PRIVATE_KEY_BODY_FROM_COPIED_FILE") || !strings.Contains(packet, secretRedactionMarker) {
+					t.Errorf("copy private key was not redacted:\n%s", packet)
+				}
+			} else if strings.Contains(packet, secretRedactionMarker) || !strings.Contains(packet, "+ordinary line 60") {
+				t.Errorf("ordinary copy was redacted or its diff is missing:\n%s", packet)
+			}
+		})
 	}
 }
 
@@ -349,8 +401,8 @@ func TestCopyDiffWithAmbiguousPrivateKeySourceIsWithheld(t *testing.T) {
 	}
 	defer Cleanup(assembled)
 	packet := packetBytes(t, assembled)
-	if !bytes.Contains(packet, []byte(`"status":"C100"`)) && !bytes.Contains(packet, []byte("C100")) {
-		t.Fatalf("fixture did not produce a copy entry:\n%s", packet)
+	if !bytes.Contains(packet, []byte("FILE\tA\t\"copy.txt\"")) {
+		t.Fatalf("copy destination was not presented as an addition:\n%s", packet)
 	}
 	if bytes.Contains(packet, []byte("PRIVATE_KEY_BODY_FROM_COPY_DIFF_MUST_NOT_LEAK")) {
 		t.Fatalf("private-key body leaked through the copy diff:\n%s", packet)
@@ -780,6 +832,38 @@ func TestUnbornWorkingTreeReviewUsesEmptyTreeBase(t *testing.T) {
 	if err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Run(); err == nil {
 		t.Fatal("unborn review created a commit")
 	}
+}
+
+func TestAssembleRejectsExistingHEADWithMissingCommit(t *testing.T) {
+	for _, packed := range []bool{false, true} {
+		name := "loose ref"
+		if packed {
+			name = "packed ref"
+		}
+		t.Run(name, func(t *testing.T) {
+			repo := newGitFixture(t)
+			head := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
+			if packed {
+				gitFixture(t, repo, "pack-refs", "--all")
+			}
+			object := filepath.Join(repo, ".git", "objects", head[:2], head[2:])
+			if err := os.Remove(object); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeWorkingTree, StateDir: filepath.Join(t.TempDir(), "state")})
+			if err == nil || !strings.Contains(err.Error(), "resolve review HEAD") {
+				t.Fatalf("missing HEAD commit error = %v", err)
+			}
+		})
+	}
+	t.Run("dangling symbolic branch", func(t *testing.T) {
+		repo := newGitFixture(t)
+		gitFixture(t, repo, "symbolic-ref", "refs/heads/main", "refs/heads/missing")
+		_, err := Assemble(context.Background(), Options{CWD: repo, Scope: ScopeWorkingTree, StateDir: filepath.Join(t.TempDir(), "state")})
+		if err == nil || !strings.Contains(err.Error(), "resolve review HEAD") {
+			t.Fatalf("dangling branch error = %v", err)
+		}
+	})
 }
 
 func TestAssembleFileCountThresholdSpillsElevenFiles(t *testing.T) {
