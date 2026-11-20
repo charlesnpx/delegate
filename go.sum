@@ -1,5 +1,5 @@
-github.com/charlesnpx/agentbus v0.18.0 h1:eaSQnLAk5Ab6K9m6DcCURGVOdgWlNUN2wY+Nysmny+0=
-github.com/charlesnpx/agentbus v0.18.0/go.mod h1:JgC5+qGo6vbkFx4qomFIzpo9DBHx0WeFrMBs0JE7hyM=
+github.com/charlesnpx/agentbus v0.18.1 h1:vdq3dcJAmUOv6u+Gcj7Jd4SecLo6fhNburXB4TVCUkI=
+github.com/charlesnpx/agentbus v0.18.1/go.mod h1:JgC5+qGo6vbkFx4qomFIzpo9DBHx0WeFrMBs0JE7hyM=
 github.com/charlesnpx/witness v0.8.0 h1:N+zmMq9UMXTSTQU8x22KPuApDBilT5W3BQzCS6Ygny8=
 github.com/charlesnpx/witness v0.8.0/go.mod h1:iXwk4TY9ye6YaCUhuZ/8aUE7pRJSXQVkz/l5i4xRseQ=
 github.com/dlclark/regexp2 v1.11.0 h1:G/nrcoOa7ZXlpoa/91N3X7mM3r8eIlMBBJZvsz/mxKI=
