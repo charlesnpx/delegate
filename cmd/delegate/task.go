@@ -7,8 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,13 +25,12 @@ import (
 type taskOptions struct {
 	Backend       string
 	CWD           string
-	Write         bool
-	LocalIPC      bool
-	Verify        bool
+	Intent        engine.Intent
 	InputMode     client.InputMode
 	Model         string
 	Effort        string
 	Timeout       time.Duration
+	TimeoutSet    bool
 	PromptFile    string
 	SchemaFile    string
 	RequestID     string
@@ -44,8 +45,6 @@ type taskOptions struct {
 
 const (
 	agentbusMaxTimeout                      = 4 * time.Hour
-	readOnlyTaskHint                        = "notice: task will run with a read-only backend profile; pass --write for edits or builds."
-	claudeReadOnlyTaskHint                  = "notice: task will run with a read-only backend profile; for claude this also restricts the shell to simple read commands (no pipes, compound commands, or web fetch). Pass --write for edits, builds, or investigation that needs a shell."
 	taskInputModeFixed     client.InputMode = "fixed"
 	taskInputModeSteerable client.InputMode = "steerable"
 )
@@ -54,18 +53,27 @@ const (
 // workspace key sent to Agentbus. In particular, Timeout retains Agentbus's
 // milliseconds and source string without local reinterpretation.
 type taskSubmitReceipt struct {
-	RequestID    string                    `json:"requestId"`
-	WorkspaceKey string                    `json:"workspaceKey"`
-	JobID        string                    `json:"jobId"`
-	State        client.PublicState        `json:"state"`
-	Deduplicated bool                      `json:"deduplicated"`
-	InputMode    client.InputMode          `json:"inputMode"`
-	LocalIPC     bool                      `json:"localIPC,omitempty"`
-	Verify       bool                      `json:"verify,omitempty"`
-	Model        string                    `json:"model,omitempty"`
-	Effort       string                    `json:"effort,omitempty"`
-	Timeout      *taskSubmitTimeout        `json:"timeout"`
-	Review       *reviewSubmissionEvidence `json:"review,omitempty"`
+	RequestID       string                    `json:"requestId"`
+	WorkspaceKey    string                    `json:"workspaceKey"`
+	JobID           string                    `json:"jobId"`
+	State           client.PublicState        `json:"state"`
+	Backend         string                    `json:"backend"`
+	Intent          engine.Intent             `json:"intent"`
+	Deduplicated    bool                      `json:"deduplicated"`
+	InputMode       client.InputMode          `json:"inputMode"`
+	ModelRequested  string                    `json:"modelRequested,omitempty"`
+	EffortRequested string                    `json:"effortRequested,omitempty"`
+	Timeout         *taskSubmitTimeout        `json:"timeout"`
+	Queue           *taskSubmitQueue          `json:"queue,omitempty"`
+	Review          *reviewSubmissionEvidence `json:"review,omitempty"`
+}
+
+type taskSubmitQueue struct {
+	Position       int `json:"position"`
+	BackendRunning int `json:"backendRunning"`
+	BackendLimit   int `json:"backendLimit"`
+	Running        int `json:"running"`
+	Limit          int `json:"limit"`
 }
 
 // reviewSubmissionEvidence records prepared inputs, not provider compliance.
@@ -140,23 +148,13 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 	if err != nil {
 		return 0, err
 	}
-	if !opts.Write && !opts.Verify {
-		hint := readOnlyTaskHint
-		if opts.Backend == "claude" {
-			hint = claudeReadOnlyTaskHint
-		}
-		if _, err := fmt.Fprintln(stderr, hint); err != nil {
-			return 0, err
-		}
-	}
-
-	submitted, c, _, err := submitTask(context.Background(), &opts, prompt, schema)
+	submitted, c, _, err := submitTask(withAgentbusSelection(context.Background()), &opts, prompt, schema, stderr)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = c.Close() }()
 	if err := writeTaskSubmitReceipt(stdout, opts, submitted); err != nil {
-		return 0, submissionError(opts.RequestID, err)
+		return 0, fmt.Errorf("submission admitted for requestId %s jobId %s; write receipt: %w", opts.RequestID, submitted.JobID, err)
 	}
 	if submitted.Queue != nil {
 		queue := submitted.Queue
@@ -167,19 +165,25 @@ func runTask(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 }
 
 func writeTaskSubmitReceipt(stdout io.Writer, opts taskOptions, submitted client.JobSubmitResult) error {
+	var queue *taskSubmitQueue
+	if submitted.Queue != nil {
+		q := submitted.Queue
+		queue = &taskSubmitQueue{Position: q.Position, BackendRunning: q.BackendRunning, BackendLimit: q.BackendLimit, Running: q.Running, Limit: q.Limit}
+	}
 	return writeJSONLine(stdout, taskSubmitReceipt{
-		RequestID:    opts.RequestID,
-		WorkspaceKey: opts.WorkspaceKey,
-		JobID:        submitted.JobID,
-		State:        submitted.State,
-		Deduplicated: submitted.Deduplicated,
-		InputMode:    opts.InputMode,
-		LocalIPC:     opts.LocalIPC,
-		Verify:       opts.Verify,
-		Model:        opts.Model,
-		Effort:       opts.Effort,
-		Timeout:      taskSubmitTimeoutFromAgentbus(submitted.Timeout),
-		Review:       opts.Review,
+		RequestID:       opts.RequestID,
+		WorkspaceKey:    opts.WorkspaceKey,
+		JobID:           submitted.JobID,
+		State:           submitted.State,
+		Backend:         opts.Backend,
+		Intent:          opts.Intent,
+		Deduplicated:    submitted.Deduplicated,
+		InputMode:       opts.InputMode,
+		ModelRequested:  opts.Model,
+		EffortRequested: opts.Effort,
+		Timeout:         taskSubmitTimeoutFromAgentbus(submitted.Timeout),
+		Queue:           queue,
+		Review:          opts.Review,
 	})
 }
 
@@ -191,23 +195,30 @@ func taskSubmitTimeoutFromAgentbus(timeout *engine.TimeoutResolution) *taskSubmi
 }
 
 func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
-	opts := taskOptions{InputMode: taskInputModeSteerable}
+	opts := taskOptions{InputMode: taskInputModeSteerable, Intent: engine.IntentInspect}
 	var tags taskTagsFlag
 	var noSteer bool
+	var intent string
 	fs := flag.NewFlagSet("delegate task", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		_, _ = fmt.Fprintln(fs.Output(), "Usage of delegate task:")
+		_, _ = fmt.Fprintln(fs.Output(), "  Tasks run with host access. Inspect is an instruction, not an enforced permission boundary;")
+		_, _ = fmt.Fprintln(fs.Output(), "  ordinary build/test artifacts, caches, temporary files and local services are allowed.")
+		_, _ = fmt.Fprintln(fs.Output(), "  Finite tasks may receive an Agentbus deadline notice, even with fixed input.")
+		fs.PrintDefaults()
+	}
 	fs.StringVar(&opts.Backend, "backend", "", "backend name")
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute working directory")
-	fs.BoolVar(&opts.Write, "write", false, "allow backend writes")
-	fs.BoolVar(&opts.LocalIPC, "local-ipc", false, "allow local IPC for supported Codex tasks")
-	fs.BoolVar(&opts.Verify, "verify", false, "run in a disposable copy without writing the submitted source")
-	fs.BoolVar(&noSteer, "no-steer", false, "submit a fixed-input task that cannot be steered")
+	fs.StringVar(&intent, "intent", string(engine.IntentInspect), "task intent: inspect or edit")
+	fs.BoolVar(&noSteer, "no-steer", false, "submit a fixed-input task that rejects caller steering")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
-	fs.Func("timeout", "backend timeout with an explicit unit; 0s leaves the deadline to the daemon default", func(raw string) error {
+	fs.Func("timeout", "execution timeout (default 2h; 0 or 0s means unlimited; maximum 4h)", func(raw string) error {
 		parsed, err := parseTimeoutDuration(raw)
 		if err == nil {
 			opts.Timeout = parsed
+			opts.TimeoutSet = true
 		}
 		return err
 	})
@@ -215,7 +226,7 @@ func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
 	fs.StringVar(&opts.SchemaFile, "schema-file", "", "read optional JSON Schema output contract from file")
 	fs.StringVar(&opts.RequestID, "request-id", "", "caller-owned request identity")
 	fs.StringVar(&opts.ResumeJobID, "resume", "", "resume a prior job; creates a new job with a fresh deadline")
-	fs.BoolVar(&opts.RetainSession, "retain-session", false, "keep the backend session after completion so this job can be resumed; the session directory is left in place until removed")
+	fs.BoolVar(&opts.RetainSession, "retain-session", false, "request session retention; dispose with agentbus session discard <job-id>")
 	fs.Var(&tags, "tag", "task tag in key=value form (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return taskOptions{}, err
@@ -223,20 +234,28 @@ func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
 	if fs.NArg() != 0 {
 		return taskOptions{}, fmt.Errorf("delegate task does not accept positional arguments")
 	}
+	provided := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { provided[f.Name] = true })
+	if provided["cwd"] && opts.CWD == "" {
+		return taskOptions{}, fmt.Errorf("--cwd must be absolute")
+	}
+	for _, name := range []string{"model", "effort"} {
+		if provided[name] && fs.Lookup(name).Value.String() == "" {
+			return taskOptions{}, fmt.Errorf("--%s must be nonempty", name)
+		}
+	}
 	if noSteer {
 		opts.InputMode = taskInputModeFixed
 	}
-	if opts.Verify && opts.Write {
-		return taskOptions{}, fmt.Errorf("--verify runs in a disposable copy and cannot write the source; remove --write")
+	opts.Intent = engine.Intent(intent)
+	if !opts.Intent.Valid() {
+		return taskOptions{}, fmt.Errorf("--intent must be inspect or edit")
 	}
 	if opts.Backend == "" {
 		return taskOptions{}, fmt.Errorf("delegate task requires --backend")
 	}
 	if opts.PromptFile == "" {
 		return taskOptions{}, fmt.Errorf("delegate task requires --prompt-file")
-	}
-	if err := validateTimeoutOption(opts.Timeout); err != nil {
-		return taskOptions{}, err
 	}
 	cwd := opts.CWD
 	if cwd == "" {
@@ -260,18 +279,16 @@ func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
 	return opts, nil
 }
 
-func validateTimeoutOption(timeout time.Duration) error {
-	if timeout < 0 {
-		return fmt.Errorf("--timeout must be non-negative")
-	}
-	if timeout > agentbusMaxTimeout {
-		return fmt.Errorf("--timeout must be at most %s", agentbusMaxTimeout)
-	}
-	return nil
-}
+var timeoutComponent = regexp.MustCompile(`([0-9]+(\.[0-9]*)?|\.[0-9]+)(ns|us|µs|μs|ms|s|m|h)`)
 
 func parseTimeoutDuration(raw string) (time.Duration, error) {
 	value := strings.TrimSpace(raw)
+	if value == "0" {
+		return 0, nil
+	}
+	if strings.HasPrefix(value, "-") {
+		return 0, fmt.Errorf("--timeout must be non-negative")
+	}
 	numeric := value != ""
 	for index, character := range value {
 		if index == 0 && (character == '+' || character == '-') {
@@ -294,11 +311,34 @@ func parseTimeoutDuration(raw string) (time.Duration, error) {
 		}
 		return 0, fmt.Errorf("--timeout %s is missing a duration unit; use an explicit duration such as 40m or 2400s", value)
 	}
-	duration, err := time.ParseDuration(value)
+	_, err := time.ParseDuration(value)
 	if err != nil {
 		return 0, fmt.Errorf("invalid --timeout %q: %w", raw, err)
 	}
-	return duration, nil
+	// ParseDuration truncates fractions below a nanosecond. Check the exact
+	// submitted value so such fractions cannot silently become zero/unlimited
+	// or round down to an otherwise valid whole millisecond.
+	units := map[string]*big.Rat{
+		"ns": big.NewRat(1, 1000000), "us": big.NewRat(1, 1000),
+		"µs": big.NewRat(1, 1000), "μs": big.NewRat(1, 1000),
+		"ms": big.NewRat(1, 1), "s": big.NewRat(1000, 1),
+		"m": big.NewRat(60000, 1), "h": big.NewRat(3600000, 1),
+	}
+	milliseconds := new(big.Rat)
+	for _, part := range timeoutComponent.FindAllStringSubmatch(value, -1) {
+		amount, ok := new(big.Rat).SetString(part[1])
+		if !ok {
+			return 0, fmt.Errorf("invalid --timeout %q", raw)
+		}
+		milliseconds.Add(milliseconds, amount.Mul(amount, units[part[3]]))
+	}
+	if !milliseconds.IsInt() {
+		return 0, fmt.Errorf("--timeout must be a whole number of milliseconds")
+	}
+	if milliseconds.Cmp(big.NewRat(agentbusMaxTimeout.Milliseconds(), 1)) > 0 {
+		return 0, fmt.Errorf("--timeout must be at most %s", agentbusMaxTimeout)
+	}
+	return time.Duration(milliseconds.Num().Int64()) * time.Millisecond, nil
 }
 
 func readTaskPrompt(path string, stdin io.Reader) (string, error) {
@@ -370,7 +410,7 @@ func submissionError(requestID string, err error) error {
 
 // submitTask is the one-shot Agentbus admission primitive shared by task and
 // review. It deliberately does no retry, polling, persistence, or cleanup.
-func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema json.RawMessage) (client.JobSubmitResult, agentbusClient, string, error) {
+func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema json.RawMessage, stderr io.Writer) (client.JobSubmitResult, agentbusClient, string, error) {
 	if err := ensureTaskRequestID(opts); err != nil {
 		return client.JobSubmitResult{}, nil, "", err
 	}
@@ -387,6 +427,10 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema js
 	if err != nil {
 		return client.JobSubmitResult{}, nil, "", submissionError(opts.RequestID, err)
 	}
+	if err := writeAgentbusNotice(stderr, hello); err != nil {
+		_ = c.Close()
+		return client.JobSubmitResult{}, nil, stateRoot, submissionError(opts.RequestID, err)
+	}
 	if err := validateBackend(hello, opts.Backend); err != nil {
 		_ = c.Close()
 		return client.JobSubmitResult{}, nil, "", submissionError(opts.RequestID, err)
@@ -398,9 +442,7 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema js
 		TaskSpec: client.TaskSpec{
 			Backend:       opts.Backend,
 			CWD:           opts.CWD,
-			Write:         opts.Write,
-			LocalIPC:      opts.LocalIPC,
-			Verify:        opts.Verify,
+			Intent:        opts.Intent,
 			InputMode:     opts.InputMode,
 			ResumeJobID:   opts.ResumeJobID,
 			RetainSession: opts.RetainSession,
@@ -409,57 +451,18 @@ func submitTask(ctx context.Context, opts *taskOptions, prompt string, schema js
 			Prompt:        prompt,
 			OutputSchema:  append(json.RawMessage(nil), schema...),
 			Tags:          optionalTaskSpecTags(opts.Tags),
-			TimeoutMS:     timeoutMillis(opts.Timeout),
+			TimeoutMS:     timeoutMillis(opts.Timeout, opts.TimeoutSet),
 		},
 	}
 	submitted, err := c.JobSubmit(ctx, params)
 	if err != nil {
 		_ = c.Close()
-		if opts.InputMode == taskInputModeSteerable && rejectsInputMode(err) {
-			return client.JobSubmitResult{}, nil, stateRoot, fmt.Errorf(
-				"submission failed for requestId %s: the running agentbus daemon does not support steerable tasks because it rejects inputMode and must be upgraded; on a compatible daemon, --no-steer submits a fixed task",
-				opts.RequestID,
-			)
-		}
-		if opts.LocalIPC && rejectsLocalIPC(err) {
-			return client.JobSubmitResult{}, nil, stateRoot, fmt.Errorf(
-				"submission failed for requestId %s: the running agentbus daemon does not support --local-ipc because it rejects the localIPC field and must be upgraded",
-				opts.RequestID,
-			)
-		}
-		if opts.Verify && rejectsVerify(err) {
-			return client.JobSubmitResult{}, nil, stateRoot, fmt.Errorf(
-				"submission failed for requestId %s: the running agentbus daemon does not support --verify because it rejects the verify field and must be upgraded",
-				opts.RequestID,
-			)
-		}
 		if opts.ResumeJobID != "" && submissionJobID(err) == opts.ResumeJobID {
-			return client.JobSubmitResult{}, nil, stateRoot, err
+			return client.JobSubmitResult{}, nil, stateRoot, submissionError(opts.RequestID, err)
 		}
 		return client.JobSubmitResult{}, nil, stateRoot, &submissionUnresolvedError{err: submissionError(opts.RequestID, err)}
 	}
 	return submitted, c, stateRoot, nil
-}
-
-func rejectsInputMode(err error) bool {
-	return rejectsUnknownTaskSpecField(err, "inputMode")
-}
-
-func rejectsLocalIPC(err error) bool {
-	return rejectsUnknownTaskSpecField(err, "localIPC")
-}
-
-func rejectsVerify(err error) bool {
-	return rejectsUnknownTaskSpecField(err, "verify")
-}
-
-func rejectsUnknownTaskSpecField(err error, field string) bool {
-	var rpcErr *client.RPCError
-	if !errors.As(err, &rpcErr) || rpcErr == nil || rpcErr.Object.Data.Code != "invalid_task_spec" {
-		return false
-	}
-	message := rpcErr.Object.Message
-	return strings.Contains(message, "unknown field") && strings.Contains(message, `"`+field+`"`)
 }
 
 func cloneTaskTags(tags map[string]string) map[string]string {
@@ -490,13 +493,10 @@ func optionalTaskSpecTags(tags map[string]string) *map[string]string {
 	return &tags
 }
 
-func timeoutMillis(timeout time.Duration) *int64 {
-	if timeout == 0 {
+func timeoutMillis(timeout time.Duration, set bool) *int64 {
+	if !set {
 		return nil
 	}
 	ms := timeout.Milliseconds()
-	if ms == 0 {
-		ms = 1
-	}
 	return &ms
 }

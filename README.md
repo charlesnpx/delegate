@@ -1,119 +1,46 @@
 # delegate
 
-`delegate` is a thin, identified submitter for Agentbus. `delegate task` translates one convenient task invocation into one identified Agentbus `job.submit` call and prints the submit receipt; everything after task submission belongs to Agentbus.
+Delegate submits identified asynchronous tasks and reviews to Agentbus 0.18.0. It returns a JSON admission receipt; Agentbus owns execution, status, results, steering, cancellation, and conversation disposal. Delegate 0.15.0 and Agentbus 0.18.0 use protocol 4 and are a coordinated breaking release.
 
-## Depends on / Depended on by
+## Installation
 
-**Depends on:**
-
-- `github.com/charlesnpx/agentbus` — imports `client/`, pinned `v0.15.0`; the installer invokes `agentbus configure-codex-sandbox`.
-- `github.com/charlesnpx/witness` — imports `contract/review`, the shared review contract; the pinned version is in `go.mod`.
-
-**Depended on by:** `feature-implement`, which invokes the `delegate` CLI
-(`task`, `review`, `adversarial-review`) and reads its submit receipts and the
-Agentbus job records they point to. The command surface, flag names, receipt
-fields, and exit codes are therefore a contract; removing or renaming any of
-them is a breaking change for Feature Implement. The `configure-codex-sandbox`
-removal in v0.11.0 is the recent example of exactly that kind of change.
-
-## Install
-
-Install Agentbus before Delegate: Delegate submits work through Agentbus and cannot submit a task until Agentbus is available.
+Install Agentbus and then Delegate:
 
 ```sh
 mise-en-place install agentbus
 mise-en-place install delegate
 ```
 
-The repository installer can install the CLI plus its managed skill targets:
+The repository installer can install the CLI and managed skills for Codex and Claude Code:
 
 ```sh
 ./install-skill.sh --plan --target all --json
 ./install-skill.sh --install --target all --json
 ```
 
-`--target all` covers the command-line tool plus the Claude Code and Codex skill destinations. Go must be on `PATH` when installing the tool. The installer reports its work as JSON and warns if it cannot find Agentbus; install Agentbus first before using the skill or submitting a task.
+Go must be on `PATH` to install the CLI. The installer reports required executables and does not configure provider permissions.
 
-## Commands
-
-Public help lists four commands:
-
-```text
-delegate version [--json]
-
-delegate task --backend <name> [--cwd <abs>] [--write] [--model <model>] [--effort <effort>]
-              [--timeout <duration>] --prompt-file <path|-> [--schema-file <path>]
-              [--request-id <id>] [--resume <jobId>] [--retain-session] [--no-steer]
-              [--verify] [--local-ipc]
-              [--tag <key=value>]...
-
-delegate review --backend <name> [--cwd <abs>] [--base <ref>]
-                [--scope auto|working-tree|branch] [--allow-live-repo-read]
-                [--criteria-file <path>]
-                [--model <model>] [--effort <effort>] [--timeout <duration>] [--resume <jobId>]
-
-delegate adversarial-review --backend <name> [--cwd <abs>] [--base <ref>]
-                            [--scope auto|working-tree|branch] [--allow-live-repo-read]
-                            [--criteria-file <path>]
-                            [--model <model>] [--effort <effort>] [--timeout <duration>]
-```
-
-`version` prints the installed Delegate version; `--version`, `-version`, and `-V` are equivalent aliases. `--json` makes `version` emit an object with its `version` field.
-
-`task` needs `--backend` and `--prompt-file`. Its fifteen flags are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, `--no-steer`, `--verify`, `--local-ipc`, and `--tag`. `delegate task` submits steerable work by default; `--no-steer` submits a fixed-input task. This choice is independent of `--write` and `--resume`. `--cwd` must be absolute when supplied; otherwise the current directory is used. `--prompt-file -` reads the prompt from standard input, `--schema-file` supplies an optional JSON Schema output contract, and `--tag key=value` can be repeated. Timeout values require explicit units: use `--timeout 90m`, `--timeout 2400s`, or `--timeout 0s` to leave the deadline to Agentbus's default. A bare number such as `2400` is rejected with unit suggestions.
-
-Without `--write`, the Claude backend restricts shell commands to a short read-only allow list. Use `--write` for investigation tasks that need a general shell.
-
-`--verify` runs a Codex task read-only against a daemon-created disposable copy of the tracked and untracked, non-ignored files in `--cwd`, with private per-job writable caches and a shared Go module cache for reads. The submitted source is not writable. This protects the source through workflow arrangement and does not provide a stronger isolation boundary than the Codex sandbox. The job's `execution` posture fields `intent: verify`, `frozenCopy`, and `frozenSource` show that it ran in a copy.
-
-`--local-ipc` provides a private short socket directory for test runners that need IPC, such as Node's test runner; macOS also permits loopback TCP. It is available for Codex `--write` and `--verify` tasks on macOS and Linux, including sccache workloads; Linux requires Agentbus 0.17.0 or later. On Linux, the job can connect to any host Unix socket at a path it can read unless the path is masked. Abstract sockets, host loopback TCP, and external network access remain blocked, and the execution posture reports `localIPC: "all-unix-sockets"`. Rust worker launches and writable review launches pass `--write --local-ipc`; the writable review command is `delegate task --write --no-steer --local-ipc`.
-
-`task` and `review` accept `--resume <jobId>` to continue a prior backend thread. A resume creates a new job with a fresh deadline; it does not extend the named job. Agentbus validates the resume target, and changing `--resume` while reusing an explicit `--request-id` returns Agentbus's conflict response.
-
-`--retain-session` is accepted only by `task`. It keeps the backend session after completion so the job can be resumed; the session directory is left in place until an operator removes it. Without `--retain-session`, a completed job cannot be resumed: its session is cleaned up when the job completes. `--resume` creates a new job with a fresh deadline and its own result; the original job's result is unchanged and remains final.
-
-Continue the same backend conversation in two steps:
-
-```sh
-# submit, keeping the session for a follow-up
-printf '%s' "$PROMPT" | delegate task --backend codex --retain-session --cwd <abs> --prompt-file -
-
-# read the result, then continue the same conversation
-printf '%s' "$FOLLOWUP" | delegate task --backend codex --resume <jobId> --cwd <abs> --prompt-file -
-```
-
-The retained session directory stays on disk until an operator removes it.
-
-### Follow-up instructions while a job is running
-
-`delegate task` jobs are steerable by default, but Agentbus accepts steering only while a job is running. Check `agentbus status --job "$JOB_ID" --json` and wait for `state=running` before sending a message. If Agentbus rejects a message with `not_running`, it stores that rejection under the message ID; send any retry with a new `--request-id`:
-
-```sh
-printf '%s' "$FOLLOWUP" | agentbus steer --job "$JOB_ID" \
-  --request-id "$MESSAGE_ID" --message-file -
-```
-
-The receipt status is `admitted`, `delivered`, `rejected`, or `unknown`. `admitted` means Agentbus accepted the message; `delivered` confirms provider delivery. Exit code 17 means `rejected`, and 18 means `unknown`. A successful write to Agentbus is not itself proof that the provider received the message.
-
-`--no-steer` submits a fixed job. Reviews are always fixed; new review instructions or evidence require a new review. If a review is submitted through generic `delegate task`, pass `--no-steer`. A fixed job cannot receive steering; `agentbus cancel` stops it but does not deliver instructions or schedule a follow-up.
-
-Delegate sends the `inputMode` field to Agentbus and does not silently remove it or downgrade a steerable task. The running Agentbus daemon must support this field; upgrade it if Delegate reports that it does not support steerable tasks. The daemon must also support requested `--verify` and `--local-ipc` fields; Delegate reports an unknown field and requires an upgrade without retrying without it. `--no-steer` selects fixed input mode on a daemon that supports the field; it is not an old-daemon compatibility option.
-
-For a terminal job, a follow-up in the same conversation uses `delegate task --backend <same-backend> --resume <jobId>` with the follow-up prompt. Agentbus requires a retained session and a recorded backend session ID. Add `--retain-session` to each resumed task if further follow-ups will be needed. Completed jobs without retention cannot be resumed; submit a fresh task with the relevant context instead. Failed, canceled, and unknown terminal jobs retain their session directories, but still need a recorded backend session ID to resume. Cancellation alone does not guarantee resumability, and resumption always creates a new job.
-
-For example, submit a prompt without placing it in the process arguments:
+## Submit tasks
 
 ```sh
 printf '%s' 'Investigate the failing check and report the evidence.' |
   delegate task --backend codex --cwd "$PWD" --prompt-file - \
-    --tag 'ticket=ABC-123'
+    --intent inspect --tag 'ticket=ABC-123'
 ```
 
-The command returns as soon as Agentbus accepts the work. It does not wait for, poll, or collect the result.
+`--backend` and `--prompt-file <path|->` are required; `-` reads stdin. Omitted `--cwd` uses the current directory; an explicitly supplied path must be absolute. `--intent` accepts `inspect` or `edit` and defaults to `inspect`. Inspect instructs the worker not to edit project source or configuration; normal build and test artifacts, caches, temporary files, and local services are allowed. Both intents run with host access. Inspect is an instruction, not an enforced filesystem, network, credential, or tool-permission boundary. The caller is responsible for separate mutable workspaces when concurrent edits could conflict.
 
-## Submit receipt and request identity
+Tasks are steerable by default; `--no-steer` makes a task fixed. Optional `--model` and `--effort` are requests, not proof of actual provider routing. `--schema-file` supplies an output JSON Schema, `--tag key=value` may be repeated, and `--request-id` specifies the caller's replay identity. Otherwise Delegate generates one once per invocation. For safe replay after an ambiguous error, reuse the same request ID, logical workspace, and immutable task specification. Delegate does not automatically retry submissions.
 
-Each successful `task`, `review`, or `adversarial-review` submission writes one JSON receipt to standard output. This is the receipt shape emitted by a task with an explicit request ID, model, effort, and Agentbus default timeout:
+Omitting `--timeout` uses the Agentbus two-hour execution default for either intent. `--timeout 0` or `--timeout 0s` explicitly disables the execution deadline. Positive values require units, must be whole milliseconds, and cannot exceed four hours. The execution deadline starts when a slot is granted; queue time does not consume it. Initialization and any schema correction share the same deadline.
+
+For a finite deadline, Agentbus attempts one best-effort notice at 90% of the execution budget during an eligible initial turn, including for fixed-input tasks and reviews. If initialization passes that point, it attempts the notice as soon as the turn can accept it and time remains. The notice reports the remaining time and asks the worker to finish; it adds no task or review evidence and does not change the deadline. Unlimited jobs and correction or retired turns receive no notice.
+
+`--retain-session` requests retention for continuation. `--resume <job-id>` creates a new job in an eligible conversation with a fresh deadline and result. A completed target must have requested retention; a failed, canceled, or unknown target can be eligible without it once the whole conversation is inactive and cleanup is proven. Every continuation needs a recorded provider identity and an available conversation. If further continuation after success is needed, request retention on the new task too. Use `agentbus session discard <job-id>` to remove an inactive owned Codex conversation and permanently revoke resume eligibility across the whole conversation, including retained descendants; this preserves its jobs and results.
+
+## Admission receipts
+
+Each successful submission writes one JSON receipt to stdout, with diagnostics on stderr. The connection notice identifies the Agentbus client library release and the connected daemon's release, protocol, and executable. A local development replacement reports an unknown client release; a compatible release difference is informational. For example:
 
 ```json
 {
@@ -121,57 +48,46 @@ Each successful `task`, `review`, or `adversarial-review` submission writes one 
   "workspaceKey": "delegate-v1-<sha256>",
   "jobId": "job_receipt",
   "state": "queued",
+  "backend": "codex",
+  "intent": "inspect",
   "deduplicated": false,
   "inputMode": "steerable",
-  "model": "unadvertised-model",
-  "effort": "unadvertised-effort",
-  "timeout": {
-    "effectiveMs": 1800000,
-    "source": "daemon_default"
-  }
+  "modelRequested": "provider-model-id",
+  "effortRequested": "high",
+  "timeout": {"effectiveMs": 7200000, "source": "daemon_default"}
 }
 ```
 
-`model` and `effort` are omitted when their flags were not supplied. The timeout values are Agentbus's returned values, not a local interpretation. `workspaceKey` lets an operator scope Agentbus status queries to the workspace that submitted the job with `agentbus status --workspace-key <key>`.
+`modelRequested` and `effortRequested` appear when supplied; status distinguishes requested, selected, and reported values. A `queue` object appears when Agentbus returns queue information. Review receipts also contain a `review` evidence stamp. The receipt identifies submitted inputs and does not certify that the provider read them or produced a compliant report. Save the receipt alongside the result.
 
-When Agentbus reports that a task cannot start at once, Delegate prints a queue notice to stderr. Use `agentbus status --job <id>` to see its current queue position.
+## Observe and control jobs
 
-For replay safety, Agentbus's replay key is the pair of request ID and working directory: after an ambiguous submission, reuse that exact `--request-id` and run against the same working directory. If it has already been accepted, the replay receipt has `deduplicated: true` and carries the original job ID. Agentbus also hashes the immutable task specification, so enabling `--retain-session` changes the replay identity and is a conflict rather than a replay; leaving it absent preserves the existing hash. Without the flag, Delegate generates an ID and includes it in the receipt. That is convenient for a normal one-off invocation, but it has a deliberate trade-off: if a manually run command is hard-killed before its generated receipt is visible, Delegate has not retained that generated ID for a later replay. Use an explicit request ID whenever replay matters.
-
-## Observe jobs with Agentbus
-
-After the receipt, use Agentbus directly:
+Use the receipt's `jobId` with positional Agentbus commands:
 
 ```sh
-agentbus status --job "$JOB_ID" --json
+agentbus status "$JOB_ID" --json
 agentbus status --tag 'run=example' --json
-agentbus transcript --job "$JOB_ID" --json
-agentbus result --job "$JOB_ID" --json
-agentbus cancel --job "$JOB_ID" --json
+agentbus transcript "$JOB_ID" --json
+agentbus result "$JOB_ID" --wait --wait-timeout 2h > result.txt
+agentbus result "$JOB_ID" --json
+agentbus cancel "$JOB_ID" --json
+printf '%s' "$FOLLOWUP" | agentbus steer "$JOB_ID" --request-id "$MESSAGE_ID" --message-file -
 ```
 
-Tag related `delegate task` submissions with `--tag run=<label>`, then use `agentbus status --tag run=<label>` to watch the group. Use `agentbus transcript --job "$JOB_ID"` to see job activity: without `--kind` it returns a digest with counts by kind and a short tail, and `--json` adds the first and last item timestamps; `--kind message` returns only the agent's messages.
+A successful status or transcript read exits zero regardless of job state. A result command reports the job outcome: completed 0, queued/running 2, schema noncompliant 3, failed 4, timeout 5, interrupted 6, canceled 7, unknown job 10, unknown outcome 14, unavailable/corrupt required result 15, and observation timeout 16. `result --wait` observes for 30 minutes by default; `--wait-timeout` changes only that observation limit and never cancels or extends the execution. Plain result output is the authoritative result bytes. Transcript previews can be truncated or incomplete and are not a full-report API.
 
-For `status --job` and `result`, exit code `2` means the job is still running. A tag or workspace listing exits `0` once it has printed the list, whatever state its members are in, so do not read a successful listing as a finished fleet. The receipt's `jobId` is the value to pass to each command.
+Steering receipts distinguish `admitted`, `delivered`, `rejected`, and `unknown`; admission does not prove delivery. A fixed task, including every review, rejects caller steering with `not_steerable` in every job state. Steerable jobs accept caller input only during an eligible initial turn. The message ID `agentbus-deadline-warning` is reserved for the daemon. New review instructions or evidence require a new review; do not retry with a fresh message ID to bypass a refusal.
 
-## Worker sandbox rules
+Set `AGENTBUS_NO_AUTOSTART=1` for either CLI when testing a stopped daemon or inspecting a scratch root without starting a daemon. Empty or `0` enables ordinary autostart; other values are invalid. `AGENTBUS_STATE_ROOT` selects the exact root, while the default is `$XDG_STATE_HOME/agentbus/v2` or `~/.local/state/agentbus/v2`. A scratch root alone does not disable autostart. Delegate selects the `agentbus` executable from `PATH` once per invocation; an already-running daemon retains its own environment and provider configuration. A `daemon_draining` response is not a reason to autostart or replay a submission.
 
-With `--write`, workspace-write access only inside its `--cwd` and no network are Codex-specific guarantees; enforcement depends on the selected Agentbus backend: Claude runs without a filesystem or network sandbox, and Cursor uses agent-mode permissions. Writable Codex task jobs, including Verify, get a managed per-job `GOCACHE` outside the repository and use the populated daemon `GOMODCACHE` for reads. Agentbus does not replace the module cache with an empty per-job directory; missing modules fail offline.
+Use `agentbus backends --json` to inspect the running daemon and its configured provider executables, versions, and defaults.
 
 ## Review commands
 
-`review` delegates a sanitized code review and `adversarial-review` uses refute-first framing. Direct reviews accept `--base`, `--scope`, `--allow-live-repo-read`, `--criteria-file`, model/effort/timeout, and `--resume`. They do not accept task flags such as `--write`, `--verify`, `--local-ipc`, `--prompt-file`, `--schema-file`, `--request-id`, `--retain-session`, or `--tag`. A review `--timeout` also requires an explicit unit.
+`delegate review` submits a sanitized review; `delegate adversarial-review` uses refute-first framing. Both submit explicit inspect intent and fixed input. Direct mode accepts `--backend`, `--cwd`, `--base`, `--scope auto|working-tree|branch`, `--allow-live-repo-read`, `--criteria-file`, `--model`, `--effort`, `--timeout`, and `--resume`.
 
-Direct mode includes the diff, full post-change text for files up to 128 KiB each within a 512 KiB combined source-and-criteria budget, and a manifest with each supplied path's original byte size, SHA-256, and `full`, `partial`, or `omitted` status. Oversized files receive a partial excerpt around changed hunks (up to 32 KiB per file); binary files, secret paths, and deleted paths are listed without source content and with an omission reason. Existing secret scanning also redacts secret-like content. These limits cover added source context; the diff remains included.
+Direct review captures a coherent Git view and submits a sanitized packet with diffs, selected source or excerpts, a manifest, and optional pre-fetched criteria. The receipt's `review.inputDigest` hashes the exact packet submitted, whether inline or as an artifact; it records scope and captured comparison metadata. Working-tree reviews support unborn repositories; branch reviews read committed blobs from the captured HEAD and ignore working-tree edits. Secret-matched content is redacted from the packet, but host access means a backend can still read files directly; `--allow-live-repo-read` makes supplemental live repository reads easier and those reads are outside the captured-input guarantee.
 
-Use `--criteria-file <path>` to supply acceptance criteria that were fetched beforehand. Delegate reads up to 256 KiB of UTF-8 text locally and includes its bytes and hash in the packet; it does not fetch criteria from a network service. This flag is for direct mode only. `--allow-live-repo-read` affects direct mode's backend working directory and does not add live repository bytes to exact-input contract reviews.
+Contract mode accepts `--request-file`, `--artifact-file`, and `--charter-file` together. The charter must be a plain `review-charter-v2` document, not a frozen envelope. A v1 request produces a schema-bound `review-report-v1`; a v2 request also requires `--reviewer` from the frozen recipe and produces a bound `review-report-v2`. Contract inputs are submitted as supplied and the caller must screen them. Contract receipts record the validated artifact, request, charter, recipe, reviewer, and subject bindings as applicable. A receipt does not replace report validation.
 
-Working-tree review works before the first commit and uses Git's empty-tree object as its base; it does not create a commit. `--cwd` may name a repository subdirectory; Delegate discovers and reviews its parent repository. Branch scope supplies the committed branch snapshot and refuses changed paths that also differ in the working tree, so the source text and diff describe the same revision.
-
-Contract mode uses `--request-file`, `--artifact-file`, and `--charter-file` together. The charter file must be a plain `charter.json` input document (`review-charter-v2`); a frozen `charter.freeze.json` envelope is rejected with a shape-specific error. Delegate freezes the plain input for the review contract. A v1 request produces a schema-bound `review-report-v1`; a v2 request additionally takes `--reviewer <identifier>`, selects that identifier from the frozen recipe's `required_outputs`, and produces a recipe-bound `review-report-v2` with request, recipe, and reviewer constants in its output schema. Contract mode does not accept `--criteria-file`.
-
-Contract mode submits the caller's request, artifact, and plain charter inputs through its existing contract path without direct-mode secret-path, history, or content redaction; screening remains the caller's responsibility. The contract prompts and digests bind those supplied inputs. Resubmitting the same request file from the same canonical `--cwd` replays the same job (`deduplicated: true`) instead of paying for a second review.
-
-## Managed skill
-
-The repository has one managed skill: [`skills/delegate/SKILL.md`](skills/delegate/SKILL.md). It sends a task prompt through standard input and tells the worker how to use the receipt and Agentbus observation commands. Install it with `./install-skill.sh --install --target all --json`, or use `--target claude` or `--target codex` when only one host needs the skill.
+The repository skill is [skills/delegate/SKILL.md](skills/delegate/SKILL.md).

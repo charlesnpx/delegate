@@ -287,66 +287,6 @@ build_delegate() {
   exit 1
 }
 
-live_install_root() {
-  [[ -n "${HOME:-}" && "$HOME" == /* && -d "$HOME" ]] || return 1
-  canonical_existing_dir "$HOME"
-}
-
-record_codex_sandbox_action() {
-  codex_requested || return 0
-
-  local config_path delegate_state codex_home state_home
-  case "$OPERATION" in
-    plan)
-      if [[ -n "${HOME:-}" && "$HOME" == /* ]]; then
-        codex_home=${CODEX_HOME:-"$HOME/.codex"}
-        state_home=${XDG_STATE_HOME:-"$HOME/.local/state"}
-        if [[ "$codex_home" == /* && "$state_home" == /* ]]; then
-          config_path="$codex_home/config.toml"
-          delegate_state="$state_home/delegate"
-          add_warning "codex sandbox writable_roots would-configure: Agentbus state root, Agentbus cache root, $delegate_state (config $config_path)"
-        else
-          add_warning "codex sandbox writable_roots skipped: HOME, CODEX_HOME, and XDG_STATE_HOME must resolve to absolute paths"
-        fi
-      else
-        add_warning "codex sandbox writable_roots skipped: HOME, CODEX_HOME, and XDG_STATE_HOME must resolve to absolute paths"
-      fi
-      ;;
-    uninstall)
-      add_warning "codex sandbox writable_roots entries left in place; uninstall does not remove security configuration automatically"
-      ;;
-    install)
-      local live_root
-      live_root=$(live_install_root) || {
-        add_warning "codex sandbox writable_roots skipped: live HOME directory is unavailable"
-        return 0
-      }
-      # mise-en-place invokes delegated installers with a temporary
-      # --install-root, then copies staged files into the live destination.
-      # Configuring from that staged invocation would mutate the user's Codex
-      # sandbox even though the staged skills have not been installed live.
-      # This expected skip is intentionally silent rather than a warning.
-      if [[ "$ROOT" != "$live_root" ]]; then
-        return 0
-      fi
-
-      state_home=${XDG_STATE_HOME:-"$HOME/.local/state"}
-      delegate_state="$state_home/delegate"
-      if ! command -v agentbus >/dev/null 2>&1; then
-        add_warning "codex sandbox was not configured: agentbus is not on PATH; run 'agentbus configure-codex-sandbox --writable-root $delegate_state'"
-        return 0
-      fi
-
-      local result
-      if result=$(agentbus configure-codex-sandbox --writable-root "$delegate_state" 2>&1); then
-        add_warning "$result"
-      else
-        add_warning "codex sandbox writable_roots skipped: $result"
-      fi
-      ;;
-  esac
-}
-
 install_skills_for_target() {
   local target=$1
   local escaped src dest
@@ -422,8 +362,6 @@ case "$OPERATION" in
     die "unsupported operation: $OPERATION"
     ;;
 esac
-
-record_codex_sandbox_action
 
 print_warnings() {
   printf '[%s]' "$WARNINGS_JSON"

@@ -1,139 +1,60 @@
 ---
 name: delegate
-description: Submit asynchronous tasks through delegate and observe or continue them with Agentbus.
+description: Submit asynchronous tasks and reviews through Delegate and observe or control them with Agentbus.
 ---
 
 # delegate
 
-Submit one task by piping its prompt to stdin:
+Delegate 0.15.0 submits to Agentbus 0.18.0. Use Delegate for tasks and reviews, and Agentbus for status, result, transcript, cancel, steer, and session disposal. Save the JSON admission receipt with the result.
+
+## Submit work
 
 ```sh
-printf '%s' "$PROMPT" | delegate task --backend <name> --cwd <abs> --prompt-file -
+printf '%s' "$PROMPT" | delegate task --backend <name> --cwd <absolute-workspace> \
+  --intent inspect --prompt-file - --request-id <stable-request-id>
 ```
 
-`--prompt-file -` reads the prompt from stdin. The submit receipt is JSON on stdout; notices and errors go to stderr. When Agentbus reports that a task cannot start at once, Delegate prints a queue notice; `agentbus status --job <id>` shows its current queue position.
+Choose `--intent inspect` for investigation or `--intent edit` for requested changes; inspect is the default. Both use host execution. Inspect is a prompt contract, not a filesystem, network, credential, or tool boundary: ordinary builds, tests, caches, temporary files, and local services may write. After either intent, inspect repository status/diff and relevant observable side effects; lack of transcript file-change events does not prove no changes. Preserve unrelated user work. Allocate separate mutable workspaces for concurrent edits that could conflict.
 
-## Steering active tasks and job control
+Choose actual supported provider model and effort IDs deliberately for the task's complexity and duration. Do not guess a model catalogue or add an automatic router. Receipt `modelRequested` and `effortRequested` describe submitted values; status separately reports requested, starting-time selected, and provider-reported values.
+Use `agentbus backends --json` to inspect the running daemon's executable and configured provider versions and defaults.
+Delegate's stderr connection notice identifies the Agentbus client library and daemon releases, protocol, and daemon executable. An unknown development release is not a claimed match; a protocol-compatible release difference is informational.
 
-`delegate task` jobs are steerable by default, but Agentbus accepts steering only while a job is running. Check `agentbus status --job "$JOB_ID" --json` and wait for `state=running` before sending a message. If Agentbus rejects a message with `not_running`, it stores that rejection under the message ID; send any retry with a new `--request-id`:
+Omitting `--timeout` uses the two-hour execution default. Explicit `--timeout 0` or `--timeout 0s` means unlimited; positive durations require units, whole milliseconds, and at most four hours. Queue time is separate; initialization and correction consume the same execution budget. At 90% of a finite budget Agentbus attempts one best-effort deadline notice during an eligible initial turn, including fixed reviews; after late initialization it attempts the notice as soon as control is accepted if time remains. The notice reports the remaining time and asks the worker to finish, without adding review evidence or changing the deadline. Unlimited jobs and correction or retired turns receive no notice. For large evidence, give the worker an explicit permitted artifact path and retrieve its final report via `agentbus result`. Do not use `transcript --last 1` as a full-report API.
+
+Generic tasks are steerable unless `--no-steer` is set; caller steering is accepted only during an eligible initial turn. Fixed tasks, including all reviews, reject caller steering with `not_steerable` in every job state, including after completion. The daemon reserves the message ID `agentbus-deadline-warning`. New review instructions or evidence require a new review; never retry with fresh message IDs to bypass fixed-input rejection. Steering receipts say `admitted`, `delivered`, `rejected`, or `unknown`; admission does not confirm provider delivery.
+
+`--retain-session` requests continuation; `--resume <job-id>` creates a new job and fresh deadline in an eligible conversation. A completed target must have requested retention; a failed, canceled, or unknown target can be eligible without it once the whole conversation is inactive and cleanup is proven. Each resume needs a recorded provider identity and an available conversation. Retain each continuation that needs a follow-up after success. Use `agentbus session discard <job-id>` for inactive owned Codex conversations when continuation is no longer needed. Disposal permanently revokes resume eligibility across the whole conversation, including retained descendants, while preserving jobs and results.
+
+For replay, reuse the same explicit request ID, logical workspace, and immutable task specification after an ambiguous submission. A matching replay returns the existing job and `deduplicated: true`. Delegate never silently retries. A generated request ID may be lost if a process is killed before the receipt or error is visible; use a caller-owned ID when replay matters.
+
+## Observe and control
 
 ```sh
-printf '%s' "$FOLLOWUP" | agentbus steer --job "$JOB_ID" \
-  --request-id "$MESSAGE_ID" --message-file -
+agentbus status "$JOB_ID" --json
+agentbus status --workspace-key "$WORKSPACE_KEY" --json
+agentbus status --tag 'run=example' --json
+agentbus transcript "$JOB_ID" --kind message --last 10 --json
+agentbus result "$JOB_ID" --wait --wait-timeout 2h > report.txt
+agentbus result "$JOB_ID" --json
+agentbus cancel "$JOB_ID" --json
+printf '%s' "$FOLLOWUP" | agentbus steer "$JOB_ID" --request-id "$MESSAGE_ID" --message-file -
+agentbus session discard "$JOB_ID" --json
 ```
 
-Receipts report `admitted`, `delivered`, `rejected`, or `unknown`. `admitted` means Agentbus accepted the message; `delivered` confirms provider delivery. Exit code 17 means `rejected`, and 18 means `unknown`. A successful write to Agentbus does not prove provider delivery.
+Job IDs are positional and options may follow them. `status` without an ID lists jobs, optionally filtered by workspace key, tags, or states. Successful status and transcript reads exit zero for any stored state; gaps, truncation, or pruning remain visible. Result is outcome-bearing: 0 completed, 2 queued/running, 3 schema noncompliant, 4 failed, 5 timeout, 6 interrupted, 7 canceled, 10 unknown job, 14 unknown outcome, 15 unavailable/corrupt result, and 16 observation timeout. `--wait-timeout` requires `--wait`; it is an observation limit (default 30 minutes), not the execution deadline, and expiry neither cancels nor extends the job. Steering exits 17 for rejected and 18 for unknown.
 
-`--no-steer` submits a fixed task. Reviews are always fixed; new review instructions or evidence need a new review. A generic `delegate task` used as a review must pass `--no-steer`. Cancel stops work and does not deliver a message.
+Set `AGENTBUS_NO_AUTOSTART=1` for both CLIs during stopped-state tests and scratch-root inspection. Empty or `0` enables autostart; other nonempty values fail configuration validation. `AGENTBUS_STATE_ROOT` selects the exact root, and a scratch root alone does not disable autostart. Agentbus defaults to `$XDG_STATE_HOME/agentbus/v2` or `~/.local/state/agentbus/v2`. Delegate selects the Agentbus executable from `PATH` once per invocation. Changing a client's environment does not reconfigure a daemon already running. A `daemon_draining` response does not authorize autostart or replaying a submission.
 
-Delegate sends the `inputMode` field and does not silently remove it or downgrade a task. The running Agentbus daemon must support this field; upgrade it if Delegate reports that it does not support steerable tasks. The daemon must also support requested `--verify` and `--local-ipc` fields; Delegate reports an unknown field and requires an upgrade without retrying without it. `--no-steer` selects fixed mode on a daemon that supports the field and is not an old-daemon compatibility option.
+## Reviews
 
-## Submit and continue tasks
+`delegate review` and `delegate adversarial-review` submit inspect intent with fixed input. Direct reviews accept backend, cwd, model, effort, timeout, resume, `--base`, `--scope auto|working-tree|branch`, `--allow-live-repo-read`, and `--criteria-file`. They capture a coherent Git view and submit sanitized diffs, source/excerpts, criteria, and a manifest. The direct receipt's `review.inputDigest` binds the exact submitted packet, including when delivered as a file. Working-tree mode supports unborn repositories; branch mode reads committed blobs from the captured HEAD and ignores working-tree edits. Secret redaction covers the assembled packet, not all files the host-access backend might read. Supplemental live reads enabled by `--allow-live-repo-read` are outside the captured-input guarantee.
 
-Task flags (15 total) are `--backend`, `--cwd`, `--write`, `--model`, `--effort`, `--timeout`, `--prompt-file`, `--schema-file`, `--request-id`, `--resume`, `--retain-session`, `--no-steer`, `--verify`, `--local-ipc`, and `--tag`. Tasks are steerable by default, and `--no-steer` makes one fixed. This setting is independent of `--write` and `--resume`. `--resume <jobId>` resumes a terminal job and creates a new job with a fresh deadline. `--retain-session` keeps the backend session after completion so this job can be resumed; the session directory is left in place until removed.
+Contract review uses `--request-file`, `--artifact-file`, and `--charter-file` together. The charter must be a plain `review-charter-v2` document. For a v2 request, also select `--reviewer` from the frozen recipe; its schema binds request, recipe, reviewer, charter, input, and consumer values. V1 produces `review-report-v1`; V2 produces `review-report-v2`. The caller screens contract inputs. The receipt records validated evidence and subject bindings, but does not establish report compliance or provider comprehension. Preserve report bytes and validate the required bindings.
 
-Without `--write`, the Claude backend restricts shell commands to a short read-only allow list. Use `--write` for investigation tasks that need a general shell.
+## Evidence and coordinated work
 
-`--verify` runs a Codex task read-only against a daemon-created disposable copy of the tracked and untracked, non-ignored files in `--cwd`, with private per-job writable caches and a shared Go module cache for reads. The submitted source is not writable. This protects the source through workflow arrangement and does not provide a stronger isolation boundary than the Codex sandbox. The job's `execution` posture fields `intent: verify`, `frozenCopy`, and `frozenSource` show that it ran in a copy.
-
-`--local-ipc` provides a private short socket directory for test runners that need IPC, such as Node's test runner; macOS also permits loopback TCP. It is available for Codex `--write` and `--verify` tasks on macOS and Linux, including sccache workloads; Linux requires Agentbus 0.17.0 or later. On Linux, the job can connect to any host Unix socket at a path it can read unless the path is masked. Abstract sockets, host loopback TCP, and external network access remain blocked, and the execution posture reports `localIPC: "all-unix-sockets"`. Rust worker launches and writable review launches pass `--write --local-ipc`; the writable review command is `delegate task --write --no-steer --local-ipc`.
-
-Timeouts require explicit units. Use values such as `--timeout 90m`, `--timeout 2400s`, or `--timeout 0s` for the Agentbus default. A bare value such as `2400` is rejected; Delegate suggests `2400s` and `40m`.
-
-Continue the same backend conversation in two steps:
-
-```sh
-# submit, keeping the session for a follow-up
-printf '%s' "$PROMPT" | delegate task --backend codex --retain-session --cwd <abs> --prompt-file -
-
-# read the result, then continue the same conversation
-printf '%s' "$FOLLOWUP" | delegate task --backend codex --resume <jobId> --cwd <abs> --prompt-file -
-```
-
-Without `--retain-session`, a completed job cannot be resumed. This is not a bug; the session is cleaned up when the job completes. `--resume` creates a new job with a fresh deadline and its own result; the original job's result is unchanged and remains final. A retained session directory stays on disk until an operator removes it. `--retain-session` is accepted only by `delegate task`; the review commands are schema/report workflows, not conversations to continue.
-
-For a follow-up after a job becomes terminal, read its result and submit another task with `--resume <jobId>`. Resumption requires a retained session, a recorded backend session ID, and the same backend. If the session is unavailable, submit a fresh task with the relevant context. A fresh task starts a separate conversation.
-
-Add `--retain-session` to each resumed task too if another follow-up will be needed after it completes. Retention cannot be added retroactively to a completed job whose session was cleaned up. Failed, canceled, and unknown terminal jobs retain session directories, but resumption still requires a recorded backend session ID; cancellation alone does not guarantee resumability.
-
-## Review commands
-
-Direct `delegate review` and `delegate adversarial-review` accept `--base`,
-`--scope`, `--allow-live-repo-read`, and `--criteria-file`, along with backend,
-cwd, model, effort, and timeout. Both accept `--resume`. They do not
-take task flags such as `--write`, `--verify`, `--local-ipc`, `--prompt-file`, `--schema-file`,
-`--request-id`, `--retain-session`, or `--tag`.
-
-Direct review packets include the diff, full changed text files up to 128 KiB
-each within a 512 KiB combined source-and-criteria budget, and a manifest with
-path, original byte size, SHA-256, and `full`, `partial`, or `omitted` status.
-Oversized files get changed-hunk context with up to 40 surrounding lines and a
-32 KiB per-file excerpt limit. Binary files, secret paths, and deleted paths
-are listed with an omission reason. Secret-like content is redacted.
-
-Use `--criteria-file <path>` to include pre-fetched UTF-8 acceptance criteria
-in the direct packet. The file is limited to 256 KiB; its content and hash
-appear in the packet manifest. Delegate does not fetch criteria over the
-network. The flag is not valid with contract mode. `--allow-live-repo-read` applies to direct reviews only; it
-does not supplement exact-input contract reviews.
-
-A working-tree review supports a repository with no commits by using Git's
-empty tree as the comparison base without creating a dummy commit. A `--cwd`
-inside a repository subdirectory still resolves to that parent repository.
-Branch scope refuses changed paths that also differ in the working tree so its
-diff and supplied source content describe the same committed snapshot.
-
-Contract mode has two request forms. The v1 request/artifact form uses
-`--request-file <review-request-v1.json> --artifact-file <review.patch>
---charter-file <charter.json>`; the separate charter file is still required.
-It returns an asynchronous submit receipt whose schema-enforced
-`review-report-v1` result is later available through
-`agentbus result --job <id> --json`; v1 has no `--reviewer` selection.
-
-The v2 form uses the same three files plus
-`--reviewer <identifier>`:
-
-```sh
-delegate review --backend <name> --cwd <abs> \
-  --request-file <review-request-v2.json> \
-  --artifact-file <review.patch> --charter-file <charter.json> \
-  --reviewer <declared-reviewer>
-```
-
-Delegate detects the form from the request document's `schema_version`. The
-selected reviewer must occur in the request's frozen recipe
-`required_outputs`; an undeclared identifier is refused. The submitted v2
-schema binds `request_digest`, `recipe_digest`, `reviewer`, `charter_hash`,
-`review_input_digest`, and the requesting consumer identity. The prompt carries
-the frozen recipe instructions verbatim, so reviewer names are open data rather
-than a Delegate registry. The v2 result is a `review-report-v2` object and is
-later read by the host through Agentbus.
-
-Both forms require `--charter-file` to contain a plain `charter.json`
-(`review-charter-v2`) input. Delegate rejects a frozen `charter.freeze.json`
-envelope with an error naming the expected and received shapes. Delegate
-freezes the plain charter for the contract workflow. Direct-mode packet
-construction does not change contract prompts, digests, or artifact handling.
-Delegate does not run secret-path, history, or content redaction on contract
-inputs, so callers are responsible for screening them. Delegate only submits
-and returns the receipt; it does not wait, poll, fetch a result, or construct a
-completion document. A v2 submission's replay identity includes its reviewer,
-so separate reviewers from one recipe are separate tasks.
-
-Submission is asynchronous. After an ambiguous submission, reuse the same `--request-id` and run from the same canonical `--cwd` (the replay key is their pair); a replay returns `deduplicated: true` and the original job ID. The immutable task specification is hashed too, so enabling `--retain-session` is a different replay identity, while omitting it preserves existing replay behavior. Observe a job with Agentbus:
-
-```sh
-agentbus status --job <id> --json
-agentbus status --workspace-key <workspaceKey> --json
-agentbus status --tag <key=value> --json
-agentbus status --state <state> --json
-agentbus transcript --job <id> --kind message --last <n> --json
-agentbus result --job <id> --json
-agentbus cancel --job <id> --json
-```
-
-Without `--job`, `status` lists summaries from every workspace unless filtered. Its optional filters are `--workspace-key`, repeatable `--tag`, and repeatable `--state`, and different filters combine with AND, while `--job` selects one record. Repeating a flag differs by flag: repeated `--tag` takes distinct keys and requires every tag to match, and repeating a key is rejected, whereas repeated `--state` matches any listed state. Use the submit receipt's `workspaceKey` value verbatim for `--workspace-key`. Valid states are `queued`, `running`, `completed`, `failed`, `canceled`, and `unknown`. A summary has no result; list to select, then inspect with `--job`. Without any transcript filter, `transcript` returns a digest of messages and errors. To follow messages as they arrive, page forward with `--kind message --since-ordinal <n> --limit <page-size>`, starting at `0` and feeding back the highest returned `ordinal`; a short or empty page means nothing more is readable yet, so keep polling while `state` is `queued` or `running`. Once `state` is terminal, `gap: false` means you have every captured message, while `gap: true` means capture or reading was incomplete and the unseen items cannot be paged in; a running job is always gapped, so `gap` only carries that meaning once terminal. `--last <n>` is a one-time tail view that discards earlier items; there is no backwards paging, so it is not a polling cursor.
-
-For a selected job, `status`/`result` exit with the job-state code, not a command success/failure code: 0=completed, 2=queued/running, 3=completed-noncompliant, 4=failed, 5=timeout, 6=interrupted, 7=canceled, 14=unknown, and 15=result-artifact-unavailable (completed, but its artifact is unavailable). Codes 10=unknown-job, 11=daemon-startup-failure, and 13=shutdown-deadline are CLI/daemon failures. A listing exits 0 once printed, regardless of member states.
-
-With `--write`, workspace-write access only inside its `--cwd` and no network are Codex-specific guarantees; enforcement depends on the selected Agentbus backend: Claude runs without a filesystem or network sandbox, and Cursor uses agent-mode permissions. Writable Codex task jobs, including Verify, get a managed per-job `GOCACHE` outside the repository and use the populated daemon `GOMODCACHE` for reads. Agentbus does not replace the module cache with an empty per-job directory; missing modules fail offline.
+- For parallel implementation units, name the unit responsible for every requirement and a single owner for shared enums, exit codes, API fields, and cross-unit cleanup. Resolve duplicate implementations explicitly before integration.
+- Record every validation command, exit status, and tests that actually ran. A focused filter matching no tests is no evidence; an unsupported worker claim that tests passed remains unverified. Inspect a check's actual conclusion and available execution/test reports. Missing step or runner metadata alone proves neither success nor a specific failure, cancellation, or capacity problem.
+- Rerun relevant integrated gates after clean merges and after conflict resolution. Run memory-intensive race suites sequentially on constrained hosts. Use the repository's declared package manager and toolchain; deleting dependency directories or changing package managers requires task authorization.
+- For Bash pipelines where failure propagation matters use `bash -o pipefail -c` and inspect individual pipeline statuses where needed. Do not rely on another shell's splitting rules or assume Bash `PIPESTATUS` exists there.

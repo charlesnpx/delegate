@@ -21,7 +21,7 @@ import (
 )
 
 func TestContractReviewResumeUsesDistinctReplayStableRequestID(t *testing.T) {
-	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
+	timeout := &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault}
 	fake := &fakeAgentbusClient{
 		hello: helloWithBackends(),
 		submitResult: client.JobSubmitResult{
@@ -99,7 +99,7 @@ func TestContractReviewResumeUsesDistinctReplayStableRequestID(t *testing.T) {
 	}
 	first, resumed, replayed := fake.submits[0], fake.submits[1], fake.submits[2]
 	for _, submitted := range fake.submits {
-		if submitted.TaskSpec.InputMode != taskInputModeFixed {
+		if submitted.TaskSpec.InputMode != taskInputModeFixed || submitted.TaskSpec.Intent != engine.IntentInspect {
 			t.Fatalf("contract review inputMode=%q, want %q", submitted.TaskSpec.InputMode, taskInputModeFixed)
 		}
 	}
@@ -342,7 +342,7 @@ func TestDirectReviewSubmitsPreFetchedCriteriaAndManifest(t *testing.T) {
 		submitResult: client.JobSubmitResult{
 			JobID:   "job_direct_criteria",
 			State:   publicStateQueued,
-			Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
+			Timeout: &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault},
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)
@@ -374,7 +374,7 @@ func TestDirectReviewSubmitsPreFetchedCriteriaAndManifest(t *testing.T) {
 	if len(fake.submits) != 1 {
 		t.Fatalf("submits=%d, want 1", len(fake.submits))
 	}
-	if fake.submits[0].TaskSpec.InputMode != taskInputModeFixed {
+	if fake.submits[0].TaskSpec.InputMode != taskInputModeFixed || fake.submits[0].TaskSpec.Intent != engine.IntentInspect {
 		t.Fatalf("direct review inputMode=%q, want %q", fake.submits[0].TaskSpec.InputMode, taskInputModeFixed)
 	}
 	prompt := fake.submits[0].TaskSpec.Prompt
@@ -401,7 +401,7 @@ func TestDirectReviewSubmitsPreFetchedCriteriaAndManifest(t *testing.T) {
 }
 
 func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) {
-	timeout := &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault}
+	timeout := &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault}
 	fake := &fakeAgentbusClient{
 		hello: helloWithBackends(),
 		submitResult: client.JobSubmitResult{
@@ -422,7 +422,7 @@ func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) 
 		t.Fatalf("review code=%d stderr=%q", code, firstErr.String())
 	}
 	assertTaskReceiptShape(t, firstOut.Bytes(), "job_review")
-	if fake.submits[0].TaskSpec.InputMode != taskInputModeFixed {
+	if fake.submits[0].TaskSpec.InputMode != taskInputModeFixed || fake.submits[0].TaskSpec.Intent != engine.IntentInspect {
 		t.Fatalf("review inputMode=%q, want %q", fake.submits[0].TaskSpec.InputMode, taskInputModeFixed)
 	}
 	if got := len(fake.gets); got != 0 {
@@ -467,7 +467,7 @@ func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) 
 		t.Fatalf("adversarial-review code=%d stderr=%q", code, secondErr.String())
 	}
 	assertTaskReceiptShape(t, secondOut.Bytes(), "job_adversarial")
-	if fake.submits[1].TaskSpec.InputMode != taskInputModeFixed {
+	if fake.submits[1].TaskSpec.InputMode != taskInputModeFixed || fake.submits[1].TaskSpec.Intent != engine.IntentInspect {
 		t.Fatalf("adversarial review inputMode=%q, want %q", fake.submits[1].TaskSpec.InputMode, taskInputModeFixed)
 	}
 	if got := len(fake.gets); got != 1 {
@@ -550,7 +550,7 @@ func TestReviewCommandsPassModelEffortAndResumeThrough(t *testing.T) {
 				submitResult: client.JobSubmitResult{
 					JobID:   "job_passthrough",
 					State:   publicStateQueued,
-					Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
+					Timeout: &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault},
 				},
 			}
 			restore := stubAgentbusGlobals(t, fake)
@@ -651,8 +651,8 @@ func TestReviewRejectedResumeCleansWorkspaceAndReturnsDaemonError(t *testing.T) 
 		"--backend", "codex", "--cwd", repo, "--scope", "working-tree",
 		"--resume", "job_does_not_exist",
 	}, &stdout, &stderr)
-	if err != &daemonErr {
-		t.Fatalf("runReview() error=%#v, want unchanged daemon error %#v", err, &daemonErr)
+	if !errors.Is(err, &daemonErr) || !strings.Contains(err.Error(), "jobId job_does_not_exist") || !strings.Contains(err.Error(), fake.submits[0].RequestID) {
+		t.Fatalf("runReview() error=%#v, want request and job identity with daemon error %#v", err, &daemonErr)
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout=%q, want no receipt", stdout.String())
@@ -802,13 +802,13 @@ func assertTaskReceiptShape(t *testing.T, raw []byte, jobID string) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := len(fields), 10; got != want {
+	if got, want := len(fields), 12; got != want {
 		t.Fatalf("receipt fields=%#v, want exactly %d", fields, want)
 	}
-	if receipt.InputMode != taskInputModeFixed {
+	if receipt.InputMode != taskInputModeFixed || receipt.Intent != engine.IntentInspect {
 		t.Fatalf("receipt inputMode=%q, want %q", receipt.InputMode, taskInputModeFixed)
 	}
-	for _, key := range []string{"requestId", "workspaceKey", "jobId", "state", "deduplicated", "inputMode", "model", "effort", "timeout", "review"} {
+	for _, key := range []string{"requestId", "workspaceKey", "jobId", "state", "backend", "intent", "deduplicated", "inputMode", "modelRequested", "effortRequested", "timeout", "review"} {
 		if _, found := fields[key]; !found {
 			t.Fatalf("receipt fields=%#v, missing %q", fields, key)
 		}

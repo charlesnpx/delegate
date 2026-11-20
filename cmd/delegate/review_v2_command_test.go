@@ -23,7 +23,7 @@ func TestContractReviewV2BindsSubmittedSchemaAndPrompt(t *testing.T) {
 		submitResult: client.JobSubmitResult{
 			JobID:   "job_contract_review_v2",
 			State:   publicStateQueued,
-			Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
+			Timeout: &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault},
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)
@@ -153,7 +153,7 @@ func TestContractReviewV2ReviewersHaveDistinctReplayIdentities(t *testing.T) {
 		submitResult: client.JobSubmitResult{
 			JobID:   "job_contract_review_v2_a",
 			State:   publicStateQueued,
-			Timeout: &engine.TimeoutResolution{Effective: 1800000, Source: engine.TimeoutSourceDaemonDefault},
+			Timeout: &engine.TimeoutResolution{Effective: 7200000, Source: engine.TimeoutSourceDaemonDefault},
 		},
 	}
 	restore := stubAgentbusGlobals(t, fake)
