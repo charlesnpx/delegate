@@ -6,6 +6,7 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -139,8 +140,110 @@ func redactSecretLikeContent(files []changedFile) {
 		if files[i].Redacted || len(files[i].diff) == 0 {
 			continue
 		}
+		files[i].diff = redactPrivateKeyDiffHunks(files[i].diff, files[i].beforeBlob, files[i].blob)
 		files[i].diff = redactSecretLikeHunks(files[i].diff)
 	}
+}
+
+type privateKeyLines struct{ first, last int }
+
+// A private-key header need not appear in a diff hunk: the hunk can change a
+// line deep inside a block. Use both captured blobs to identify those lines.
+func privateKeyLineRanges(raw []byte) []privateKeyLines {
+	if !privateKeyHeaderPattern.Match(raw) {
+		return nil
+	}
+	var ranges []privateKeyLines
+	active := ""
+	start, lineNo := 0, 0
+	for len(raw) > 0 {
+		line, rest, hasNewline := bytes.Cut(raw, []byte{'\n'})
+		lineNo++
+		if active != "" {
+			if isMatchingPrivateKeyEndLine(line, active) {
+				ranges = append(ranges, privateKeyLines{start, lineNo})
+				active = ""
+			}
+		} else if label, ok := privateKeyLabelFromBeginLine(line); ok {
+			active, start = label, lineNo
+		}
+		if !hasNewline {
+			break
+		}
+		raw = rest
+	}
+	if active != "" {
+		ranges = append(ranges, privateKeyLines{start, lineNo})
+	}
+	return ranges
+}
+
+var privateKeyHunkHeader = regexp.MustCompile(`^@@ -([0-9]+)(?:,([0-9]+))? \+([0-9]+)(?:,([0-9]+))? @@`)
+
+func redactPrivateKeyDiffHunks(diff, before, after []byte) []byte {
+	oldRanges, newRanges := privateKeyLineRanges(before), privateKeyLineRanges(after)
+	// A path-limited diff can contain more than one file after copy/rename
+	// detection. Withhold it if its hunk-to-blob association is ambiguous.
+	if bytes.Contains(diff, []byte("\ndiff --git ")) {
+		return []byte(secretRedactionMarker + "\n")
+	}
+	if len(oldRanges) == 0 && len(newRanges) == 0 {
+		return diff
+	}
+	starts := diffHunkStarts(diff)
+	if len(starts) == 0 {
+		return diff
+	}
+	var out bytes.Buffer
+	out.Write(diff[:starts[0]])
+	for i, start := range starts {
+		end := len(diff)
+		if i+1 < len(starts) {
+			end = starts[i+1]
+		}
+		hunk := diff[start:end]
+		header, body, hasNewline := bytes.Cut(hunk, []byte{'\n'})
+		match := privateKeyHunkHeader.FindSubmatch(header)
+		if len(match) != 5 || hunkOverlapsPrivateKey(match[1], match[2], oldRanges) || hunkOverlapsPrivateKey(match[3], match[4], newRanges) {
+			out.WriteString(secretRedactionMarker + "\n")
+		} else {
+			// Git can append a distant source line as function context in the
+			// hunk header. It can be part of the key even when the hunk is not.
+			out.Write(match[0])
+			if hasNewline {
+				out.WriteByte('\n')
+				out.Write(body)
+			}
+		}
+	}
+	return out.Bytes()
+}
+
+func hunkOverlapsPrivateKey(startText, countText []byte, ranges []privateKeyLines) bool {
+	start, err := strconv.Atoi(string(startText))
+	if err != nil {
+		return true
+	}
+	count := 1
+	if len(countText) != 0 {
+		count, err = strconv.Atoi(string(countText))
+		if err != nil {
+			return true
+		}
+	}
+	if count == 0 {
+		return false
+	}
+	end := start + count - 1
+	if end < start {
+		return true
+	}
+	for _, block := range ranges {
+		if start <= block.last && end >= block.first {
+			return true
+		}
+	}
+	return false
 }
 
 func redactSecretLikeHunks(diff []byte) []byte {

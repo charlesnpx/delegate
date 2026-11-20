@@ -47,6 +47,14 @@ func TestContractReviewResumeUsesDistinctReplayStableRequestID(t *testing.T) {
 		t.Fatalf("contract review code=%d stderr=%q", code, stderr.String())
 	}
 	assertTaskReceiptShape(t, stdout.Bytes(), "job_contract_review")
+	var initialReceipt taskSubmitReceipt
+	if err := json.Unmarshal(stdout.Bytes(), &initialReceipt); err != nil {
+		t.Fatal(err)
+	}
+	wantEvidence := &reviewSubmissionEvidence{Mode: "contract", InputDigest: fixture.reviewInputDigest, RequestDigest: fixture.requestDigest, CharterHash: fixture.frozen.CharterHash, Subject: &reviewSubjectEvidence{Head: "frozen-subject-head"}}
+	if !reflect.DeepEqual(initialReceipt.Review, wantEvidence) {
+		t.Fatalf("contract evidence=%#v, want %#v", initialReceipt.Review, wantEvidence)
+	}
 
 	resumeArgs := append(append([]string(nil), args...), "--resume", "job_contract_review")
 	fake.submitResult = client.JobSubmitResult{
@@ -377,6 +385,19 @@ func TestDirectReviewSubmitsPreFetchedCriteriaAndManifest(t *testing.T) {
 	if !strings.Contains(prompt, hex.EncodeToString(sum[:])) {
 		t.Fatalf("criteria sha256 missing from prompt:\n%s", prompt)
 	}
+	packetStart := strings.Index(prompt, "DELEGATE_SANITIZED_REVIEW_CONTEXT_V1\n")
+	if packetStart < 0 {
+		t.Fatal("inline packet missing from prompt")
+	}
+	var receipt taskSubmitReceipt
+	if err := json.Unmarshal(stdout.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	packetSum := sha256.Sum256([]byte(prompt[packetStart:]))
+	head := gitReviewOutput(t, repo, "rev-parse", "HEAD")
+	if receipt.Review == nil || receipt.Review.Mode != "direct" || receipt.Review.Scope != "working-tree" || receipt.Review.InputDigest != "sha256:"+hex.EncodeToString(packetSum[:]) || receipt.Review.Head != head || receipt.Review.ComparisonBase != head || receipt.Review.BaseTip != "" {
+		t.Fatalf("inline evidence=%#v", receipt.Review)
+	}
 }
 
 func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) {
@@ -421,6 +442,19 @@ func TestReviewCommandsSubmitTaskReceiptAndSweepTerminalWorkspace(t *testing.T) 
 	}
 	if !bytes.Contains(artifact, []byte("large review context")) {
 		t.Fatalf("review artifact did not contain the assembled repository content")
+	}
+	var firstReceipt taskSubmitReceipt
+	if err := json.Unmarshal(firstOut.Bytes(), &firstReceipt); err != nil {
+		t.Fatal(err)
+	}
+	artifactSum := sha256.Sum256(artifact)
+	if firstReceipt.Review == nil || firstReceipt.Review.InputDigest != "sha256:"+hex.EncodeToString(artifactSum[:]) {
+		t.Fatalf("artifact evidence=%#v", firstReceipt.Review)
+	}
+	for _, entry := range mustReadDir(t, stateDir) {
+		if strings.HasPrefix(entry.Name(), ".review-capture-") {
+			t.Fatalf("raw capture survived submission: %s", entry.Name())
+		}
 	}
 
 	fake.get = client.JobGetResult{JobID: "job_review", State: publicStateCompleted}
@@ -768,13 +802,13 @@ func assertTaskReceiptShape(t *testing.T, raw []byte, jobID string) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := len(fields), 9; got != want {
+	if got, want := len(fields), 10; got != want {
 		t.Fatalf("receipt fields=%#v, want exactly %d", fields, want)
 	}
 	if receipt.InputMode != taskInputModeFixed {
 		t.Fatalf("receipt inputMode=%q, want %q", receipt.InputMode, taskInputModeFixed)
 	}
-	for _, key := range []string{"requestId", "workspaceKey", "jobId", "state", "deduplicated", "inputMode", "model", "effort", "timeout"} {
+	for _, key := range []string{"requestId", "workspaceKey", "jobId", "state", "deduplicated", "inputMode", "model", "effort", "timeout", "review"} {
 		if _, found := fields[key]; !found {
 			t.Fatalf("receipt fields=%#v, missing %q", fields, key)
 		}
@@ -895,4 +929,23 @@ func contractReviewArgs(fixture contractReviewFixture, cwd string) []string {
 		"--artifact-file", fixture.artifactPath,
 		"--charter-file", fixture.charterPath,
 	}
+}
+
+func gitReviewOutput(t *testing.T, repo string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+	raw, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+func mustReadDir(t *testing.T, path string) []os.DirEntry {
+	t.Helper()
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
 }

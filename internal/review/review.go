@@ -91,7 +91,7 @@ type File struct {
 type ManifestEntry struct {
 	Path     string `json:"path"`
 	ByteSize int64  `json:"byte_size"`
-	SHA256   string `json:"sha256"`
+	SHA256   string `json:"sha256,omitempty"`
 	Status   string `json:"status"`
 	Reason   string `json:"reason,omitempty"`
 }
@@ -114,17 +114,22 @@ type Context struct {
 	Files             []File
 	Manifest          []ManifestEntry
 	SanitizedBytes    int
+	InputDigest       string
 	AllowLiveRepoRead bool
 }
 
 type changedFile struct {
 	File
-	sourcePath    string
-	untracked     bool
-	diff          []byte
-	content       []byte
-	contentStatus string
-	contentReason string
+	sourcePath      string
+	post            capturedBlob
+	beforeBlob      []byte
+	blob            []byte
+	binaryChange    bool
+	screeningFailed bool
+	diff            []byte
+	content         []byte
+	contentStatus   string
+	contentReason   string
 }
 
 // ShouldInline reports whether sanitized context is within both inline limits.
@@ -132,9 +137,15 @@ func ShouldInline(fileCount, byteCount int) bool {
 	return fileCount <= MaxInlineFiles && byteCount <= MaxInlineBytes
 }
 
-// Assemble canonicalizes cwd, collects path-scoped git changes, redacts secret
-// paths before diff collection, and creates the private backend workspace.
+// Assemble captures the effective review input before preparing any packet.
 func Assemble(ctx context.Context, opts Options) (result Context, err error) {
+	defer func() {
+		if err != nil {
+			if safe := RedactSecretLikeDiagnostic(err.Error()); safe != err.Error() {
+				err = &reviewDiagnosticError{cause: err, message: safe}
+			}
+		}
+	}()
 	canonicalCWD, err := CanonicalizeCWD(opts.CWD)
 	if err != nil {
 		return Context{}, err
@@ -143,157 +154,13 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 	if err != nil {
 		return Context{}, err
 	}
-	head := ""
-	emptyTree := ""
-	unborn := false
-	if raw, headErr := gitOutput(ctx, repoRoot, false, "rev-parse", "HEAD"); headErr == nil {
-		head = strings.TrimSpace(string(raw))
-	} else if _, symbolicErr := gitOutput(ctx, repoRoot, false, "symbolic-ref", "--quiet", "HEAD"); symbolicErr == nil {
-		// A symbolic HEAD without a commit is a normal unborn branch. Materialize
-		// Git's canonical empty-tree object for diff operations; no commit is made.
-		raw, treeErr := gitOutput(ctx, repoRoot, false, "hash-object", "-w", "-t", "tree", "/dev/null")
-		if treeErr != nil {
-			return Context{}, fmt.Errorf("resolve empty-tree review base: %w", treeErr)
-		}
-		emptyTree = strings.TrimSpace(string(raw))
-		if emptyTree == "" {
-			return Context{}, errors.New("resolve empty-tree review base: git returned an empty object identity")
-		}
-		unborn = true
-	}
-	headRef := head
-	if headRef == "" {
-		if !unborn {
-			headRef = "HEAD"
-		}
-	}
-	branch := ""
-	if raw, branchErr := gitOutput(ctx, repoRoot, false, "rev-parse", "--abbrev-ref", "HEAD"); branchErr == nil {
-		branch = strings.TrimSpace(string(raw))
-		if branch == "HEAD" {
-			branch = "(detached)"
-		}
-		branch = RedactSecretLikeDiagnostic(branch)
-	}
 	scope, err := normalizeScope(opts.Scope)
 	if err != nil {
 		return Context{}, err
 	}
-
-	var base Base
-	var diffBase string
-	var changed []changedFile
-	switch scope {
-	case ScopeAuto:
-		if unborn {
-			if opts.Base != "" {
-				return Context{}, errors.New("--base cannot be resolved in an unborn repository; use --scope working-tree")
-			}
-			base = Base{Commit: emptyTree, Source: "empty-tree"}
-			diffBase = emptyTree
-			changed, err = workingTreeChanges(ctx, repoRoot, diffBase)
-		} else {
-			// Auto reviews the live working tree over the captured HEAD; its head
-			// stamp identifies the committed baseline, not a frozen tip.
-			base, err = ResolveBase(ctx, repoRoot, opts.Base)
-			if err == nil {
-				changed, diffBase, err = autoChanges(ctx, repoRoot, base.Commit, headRef)
-			}
-		}
-	case ScopeWorkingTree:
-		if unborn {
-			base = Base{Commit: emptyTree, Source: "empty-tree"}
-			diffBase = emptyTree
-			changed, err = workingTreeChanges(ctx, repoRoot, diffBase)
-		} else {
-			changed, err = workingTreeChanges(ctx, repoRoot, "HEAD")
-		}
-	case ScopeBranch:
-		if unborn {
-			return Context{}, errors.New("--scope branch requires a committed HEAD; use --scope working-tree for an unborn repository")
-		}
-		base, err = ResolveBase(ctx, repoRoot, opts.Base)
-		if err == nil {
-			changed, diffBase, err = branchChanges(ctx, repoRoot, base.Commit, headRef)
-		}
+	if scope == ScopeWorkingTree && opts.Base != "" {
+		return Context{}, errors.New("--base cannot be used with --scope working-tree")
 	}
-	if err != nil {
-		return Context{}, err
-	}
-	if scope == ScopeBranch {
-		for _, file := range changed {
-			if _, err := gitOutput(ctx, repoRoot, false, append([]string{"diff", "--quiet", "HEAD", "--"}, file.paths()...)...); err != nil {
-				return Context{}, fmt.Errorf("branch review path %q differs from HEAD in the working tree; reconcile that path before reviewing the branch snapshot", file.Path)
-			}
-		}
-	}
-	historyBase := diffBase
-	if scope == ScopeWorkingTree && !unborn {
-		historyBase = ""
-	}
-	secretUpper := headRef
-	if unborn {
-		historyBase = emptyTree
-		secretUpper = ""
-	}
-	secretBlobs, blobErr := collectSecretBlobHashes(ctx, repoRoot, historyBase, secretUpper)
-	secretPaths, pathErr := collectSecretPathTaint(ctx, repoRoot, historyBase, secretUpper)
-	redactAll := blobErr != nil || pathErr != nil
-
-	for i := range changed {
-		changed[i].Redacted = redactAll || IsSecretPath(changed[i].Path) || IsSecretPath(changed[i].sourcePath) ||
-			secretPaths[changed[i].Path] || secretPaths[changed[i].sourcePath]
-		if changed[i].Redacted {
-			continue
-		}
-		if changed[i].untracked {
-			changed[i].diff, err = untrackedDiff(ctx, repoRoot, changed[i].Path)
-		} else if scope == ScopeBranch {
-			changed[i].diff, err = trackedDiff(ctx, repoRoot, diffBase, headRef, changed[i].paths()...)
-		} else if scope == ScopeAuto {
-			changed[i].diff, err = trackedDiff(ctx, repoRoot, diffBase, "", changed[i].paths()...)
-		} else {
-			from := "HEAD"
-			if unborn {
-				from = emptyTree
-			}
-			changed[i].diff, err = trackedDiff(ctx, repoRoot, from, "", changed[i].paths()...)
-		}
-		if err != nil {
-			return Context{}, err
-		}
-		if diffReferencesSecretBlob(changed[i].diff, secretBlobs) {
-			changed[i].Redacted = true
-			changed[i].diff = nil
-		}
-	}
-
-	// This is the final content gate: every diff has been assembled, and the
-	// same redacted payload is subsequently used for both inline and spilled
-	// delivery. Nothing adds diff or artifact content after this scan.
-	redactSecretLikeContent(changed)
-	if currentHeadRaw, currentHeadErr := gitOutput(ctx, repoRoot, false, "rev-parse", "HEAD"); currentHeadErr == nil {
-		currentHead := strings.TrimSpace(string(currentHeadRaw))
-		if unborn {
-			return Context{}, fmt.Errorf("repository HEAD moved during review assembly (unborn -> %s); re-run the review on a quiescent repo", currentHead)
-		}
-		if err := verifyHeadUnchanged(headRef, currentHead); err != nil {
-			return Context{}, err
-		}
-	}
-	criteria, err := readCriteriaFile(opts.CriteriaFile)
-	if err != nil {
-		return Context{}, err
-	}
-	manifest, _, err := prepareFileContent(repoRoot, changed, MaxReviewContentBytes-len(criteria))
-	if err != nil {
-		return Context{}, err
-	}
-	if opts.CriteriaFile != "" {
-		manifest = append(manifest, ManifestEntry{Path: opts.CriteriaFile, ByteSize: int64(len(criteria)), SHA256: digestBytes(criteria), Status: "full"})
-	}
-	sort.Slice(manifest, func(i, j int) bool { return manifest[i].Path < manifest[j].Path })
-	payload := renderSanitizedContext(scope, base, diffBase, branch, head, changed, opts.CriteriaFile, criteria, manifest)
 	stateDir, err := handoff.ResolveStateDir(handoff.StateConfig{StateDir: opts.StateDir})
 	if err != nil {
 		return Context{}, err
@@ -302,28 +169,196 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 		return Context{}, err
 	}
 
-	result = Context{
-		CanonicalCWD:      canonicalCWD,
-		RepositoryRoot:    repoRoot,
-		StateDir:          stateDir,
-		Scope:             scope,
-		Base:              base,
-		ComparisonBase:    diffBase,
-		Branch:            branch,
-		Head:              head,
-		SanitizedBytes:    len(payload),
-		AllowLiveRepoRead: opts.AllowLiveRepoRead,
-		Files:             publicFiles(changed),
-		Manifest:          manifest,
+	head, headErr := resolveCommit(ctx, repoRoot, "HEAD")
+	unborn := false
+	if headErr != nil {
+		if _, symbolicErr := gitOutput(ctx, repoRoot, false, "symbolic-ref", "--quiet", "HEAD"); symbolicErr != nil {
+			return Context{}, fmt.Errorf("resolve review HEAD: %w", headErr)
+		}
+		unborn = true
+		head = ""
 	}
+	if unborn && scope == ScopeBranch {
+		return Context{}, errors.New("--scope branch requires a committed HEAD; use --scope working-tree for an unborn repository")
+	}
+	if unborn && scope == ScopeAuto && opts.Base != "" {
+		return Context{}, errors.New("--base cannot apply to an unborn auto review; use --scope working-tree")
+	}
+	branch := ""
+	if raw, branchErr := gitOutput(ctx, repoRoot, false, "symbolic-ref", "--quiet", "--short", "HEAD"); branchErr == nil {
+		branch = RedactSecretLikeDiagnostic(strings.TrimSpace(string(raw)))
+	} else if !unborn {
+		branch = "(detached)"
+	}
+
+	var base Base
+	comparison := head
+	if !unborn && scope != ScopeWorkingTree {
+		base, err = resolveBaseAtHead(ctx, repoRoot, opts.Base, head)
+		if err != nil {
+			return Context{}, err
+		}
+		raw, mergeErr := gitOutput(ctx, repoRoot, false, "merge-base", base.Commit, head)
+		if mergeErr != nil {
+			return Context{}, fmt.Errorf("resolve merge base for %q: %w", RedactSecretLikeDiagnostic(base.Ref), mergeErr)
+		}
+		comparison = strings.TrimSpace(string(raw))
+	}
+	capture, err := newReviewCapture(ctx, repoRoot, stateDir)
+	if err != nil {
+		return Context{}, err
+	}
+	defer func() {
+		if cleanupErr := capture.cleanup(); cleanupErr != nil {
+			if err == nil {
+				err = fmt.Errorf("remove private review capture: %w", cleanupErr)
+			} else {
+				err = fmt.Errorf("%w; remove private review capture: %v", err, cleanupErr)
+			}
+		}
+	}()
+	if unborn {
+		comparison, err = capture.emptyTree(repoRoot)
+		if err != nil {
+			return Context{}, err
+		}
+		base = Base{Commit: comparison, Source: "empty-tree"}
+	}
+	postTree := head
+	if scope != ScopeBranch {
+		postTree, err = capture.captureWorkingTree(repoRoot, comparisonForCapture(head, comparison), unborn)
+		if err != nil {
+			return Context{}, err
+		}
+	}
+	fixedCtx := capture.ctx
+	raw, err := gitOutput(fixedCtx, repoRoot, false, nameStatusArgs(comparison, postTree)...)
+	if err != nil {
+		return Context{}, fmt.Errorf("collect captured review paths: %w", err)
+	}
+	changed, err := parseNameStatus(raw)
+	if err != nil {
+		return Context{}, err
+	}
+	sortChanged(changed)
+	before, err := capturedTreeEntries(fixedCtx, repoRoot, comparison)
+	if err != nil {
+		return Context{}, err
+	}
+	after, err := capturedTreeEntries(fixedCtx, repoRoot, postTree)
+	if err != nil {
+		return Context{}, err
+	}
+	blobs, err := selectedBlobs(fixedCtx, repoRoot, changed, before, after)
+	if err != nil {
+		return Context{}, err
+	}
+
+	historyBase, upper := comparison, head
+	if scope == ScopeWorkingTree && !unborn {
+		historyBase = ""
+	}
+	if unborn {
+		upper = ""
+	}
+	secretBlobs, blobErr := collectSecretBlobHashes(fixedCtx, repoRoot, historyBase, upper, postTree)
+	secretPaths, pathErr := collectSecretPathTaint(fixedCtx, repoRoot, historyBase, upper)
+	redactAll := blobErr != nil || pathErr != nil
+	if secretBlobs == nil {
+		secretBlobs = make(map[string]struct{})
+	}
+	if secretPaths == nil {
+		secretPaths = make(map[string]bool)
+	}
+	// The final baseline-to-tree delta can hide paths that existed at HEAD
+	// and were removed during capture. Connect that intermediate transition
+	// too, so a secret path cannot escape through a later delete/add pair.
+	var headBefore map[string]capturedBlob
+	var headChanges []changedFile
+	if !unborn && scope != ScopeBranch {
+		headBefore, err = capturedTreeEntries(fixedCtx, repoRoot, head)
+		if err != nil {
+			return Context{}, err
+		}
+		headDelta, deltaErr := gitOutput(fixedCtx, repoRoot, false, nameStatusArgs(head, postTree)...)
+		if deltaErr != nil {
+			redactAll = true
+		} else {
+			headChanges, deltaErr = parseNameStatus(headDelta)
+			if deltaErr != nil {
+				redactAll = true
+			}
+		}
+	}
+	for {
+		oldPaths, oldBlobs := len(secretPaths), len(secretBlobs)
+		if headBefore != nil {
+			propagateCapturedTaint(secretPaths, secretBlobs, headChanges, headBefore, after)
+		}
+		propagateCapturedTaint(secretPaths, secretBlobs, changed, before, after)
+		if oldPaths == len(secretPaths) && oldBlobs == len(secretBlobs) {
+			break
+		}
+	}
+	remainingPatch := maxCaptureBytes
+	for i := range changed {
+		file := &changed[i]
+		file.post = after[file.Path]
+		file.blob = blobs[file.post.id]
+		oldPath := file.Path
+		if file.sourcePath != "" {
+			oldPath = file.sourcePath
+		}
+		file.beforeBlob = blobs[before[oldPath].id]
+		for _, path := range file.paths() {
+			for _, entry := range []capturedBlob{before[path], after[path]} {
+				if blob, ok := blobs[entry.id]; ok && (bytes.IndexByte(blob, 0) >= 0 || !utf8.Valid(blob)) {
+					file.binaryChange = true
+				}
+			}
+		}
+		file.screeningFailed = redactAll
+		file.Redacted = redactAll || IsSecretPath(file.Path) || IsSecretPath(file.sourcePath) || secretPaths[file.Path] || secretPaths[file.sourcePath]
+		args := []string{"diff", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", "--find-copies", "--find-copies-harder", "--src-prefix=a/", "--dst-prefix=b/", comparison, postTree, "--"}
+		args = append(args, file.paths()...)
+		file.diff, err = gitLimitedOutput(fixedCtx, repoRoot, false, nil, remainingPatch, args...)
+		if err != nil {
+			return Context{}, fmt.Errorf("render captured review diff: %w", err)
+		}
+		remainingPatch -= len(file.diff)
+		if file.Redacted || file.binaryChange || diffReferencesSecretBlob(file.diff, secretBlobs) {
+			if diffReferencesSecretBlob(file.diff, secretBlobs) {
+				file.Redacted = true
+			}
+			file.diff = nil
+		}
+	}
+	redactSecretLikeContent(changed)
+	criteria, err := readCriteriaFile(opts.CriteriaFile)
+	if err != nil {
+		return Context{}, err
+	}
+	manifest, _, err := prepareFileContent(changed, MaxReviewContentBytes-len(criteria))
+	if err != nil {
+		return Context{}, err
+	}
+	if opts.CriteriaFile != "" {
+		manifest = append(manifest, ManifestEntry{Path: RedactSecretLikeDiagnostic(opts.CriteriaFile), ByteSize: int64(len(criteria)), SHA256: digestBytes(criteria), Status: "full"})
+	}
+	sort.Slice(manifest, func(i, j int) bool { return manifest[i].Path < manifest[j].Path })
+	base.Ref = RedactSecretLikeDiagnostic(base.Ref)
+	payload := renderSanitizedContext(scope, base, comparison, branch, head, changed, RedactSecretLikeDiagnostic(opts.CriteriaFile), criteria, manifest)
+	if err := ctx.Err(); err != nil {
+		return Context{}, fmt.Errorf("review capture canceled: %w", err)
+	}
+	if err := capture.cleanup(); err != nil {
+		return Context{}, fmt.Errorf("remove private review capture: %w", err)
+	}
+	result = Context{CanonicalCWD: canonicalCWD, RepositoryRoot: repoRoot, StateDir: stateDir, Scope: scope, Base: base, ComparisonBase: comparison, Branch: branch, Head: head, SanitizedBytes: len(payload), InputDigest: "sha256:" + digestBytes(payload), AllowLiveRepoRead: opts.AllowLiveRepoRead, Files: publicFiles(changed), Manifest: manifest}
 	needsWorkspace := !opts.AllowLiveRepoRead || !ShouldInline(len(changed), len(payload))
 	if needsWorkspace {
 		result.Workspace, err = os.MkdirTemp(stateDir, reviewWorkspacePrefix)
 		if err != nil {
-			return Context{}, err
-		}
-		if err := os.Chmod(result.Workspace, 0o700); err != nil {
-			_ = os.RemoveAll(result.Workspace)
 			return Context{}, err
 		}
 		workspaceForCleanup := result
@@ -347,6 +382,21 @@ func Assemble(ctx context.Context, opts Options) (result Context, err error) {
 		return Context{}, err
 	}
 	return result, nil
+}
+
+type reviewDiagnosticError struct {
+	cause   error
+	message string
+}
+
+func (err *reviewDiagnosticError) Error() string { return err.message }
+func (err *reviewDiagnosticError) Unwrap() error { return err.cause }
+
+func comparisonForCapture(head, emptyTree string) string {
+	if head != "" {
+		return head
+	}
+	return emptyTree
 }
 
 // PrepareContractWorkspace creates a private backend workspace for a
@@ -485,37 +535,27 @@ func readExistingContractWorkspaceFile(path string) ([]byte, error) {
 // verifyHeadUnchanged rejects a context assembled across two committed tips.
 // A captured "HEAD" denotes an initial best-effort fallback, for which this
 // check intentionally preserves the existing behavior.
-func verifyHeadUnchanged(captured, current string) error {
-	if captured == "HEAD" || captured == current {
-		return nil
-	}
-	return fmt.Errorf("repository HEAD moved during review assembly (%s -> %s); re-run the review on a quiescent repo", captured, current)
+// ResolveBase follows the explicit, default-remote, unpushed-upstream chain.
+func ResolveBase(ctx context.Context, cwd, explicit string) (Base, error) {
+	head, _ := resolveCommit(ctx, cwd, "HEAD")
+	return resolveBaseAtHead(ctx, cwd, explicit, head)
 }
 
-// ResolveBase follows the required explicit, default-remote, unpushed-upstream
-// chain. An upstream at HEAD describes a pushed feature branch, not its review
-// base, so it is deliberately skipped. No command contacts a remote.
-func ResolveBase(ctx context.Context, cwd, explicit string) (Base, error) {
+func resolveBaseAtHead(ctx context.Context, cwd, explicit, head string) (Base, error) {
 	if explicit != "" {
 		commit, err := resolveCommit(ctx, cwd, explicit)
 		if err != nil {
-			return Base{}, fmt.Errorf("resolve explicit --base %q: %w", explicit, err)
+			return Base{}, fmt.Errorf("resolve explicit --base %q: %w", RedactSecretLikeDiagnostic(explicit), err)
 		}
 		return Base{Ref: explicit, Commit: commit, Source: "explicit"}, nil
 	}
-
-	if ref, ok := defaultRemoteBranch(ctx, cwd); ok {
-		commit, err := resolveCommit(ctx, cwd, ref)
-		if err == nil {
-			return Base{Ref: ref, Commit: commit, Source: "default-remote"}, nil
-		}
+	if base, ok := defaultRemoteBase(ctx, cwd); ok {
+		return base, nil
 	}
-
-	head, headErr := resolveCommit(ctx, cwd, "HEAD")
 	if upstreamRaw, err := gitOutput(ctx, cwd, false, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); err == nil {
 		upstream := strings.TrimSpace(string(upstreamRaw))
 		if upstream != "" && upstream != "@{upstream}" {
-			if commit, resolveErr := resolveCommit(ctx, cwd, upstream); resolveErr == nil && (headErr != nil || commit != head) {
+			if commit, resolveErr := resolveCommit(ctx, cwd, upstream); resolveErr == nil && commit != head {
 				return Base{Ref: upstream, Commit: commit, Source: "upstream-unpushed"}, nil
 			}
 		}
@@ -628,9 +668,9 @@ func ComposePrompt(kind string, assembled Context) (string, error) {
 	} else {
 		prompt.WriteString("For the report's Scope boundary, use the supplied branch, resolved base tip commit when supplied, comparison baseline when supplied, and HEAD commit identifiers; do not infer or claim a full commit list.\n")
 	}
-	prompt.WriteString("Reading the assembled context is the first and only required step. Do not probe for already-supplied metadata or context, and do not put the expressly unnecessary redundant metadata probe before the context read with &&. A sandbox denial of that expressly unnecessary probe is not a reason to stop: read the assembled context and complete the review.\n")
+	prompt.WriteString("The supplied packet is the evidence to review. Read it before drawing conclusions; do not infer missing identifiers.\n")
 	if assembled.AllowLiveRepoRead {
-		prompt.WriteString("LIVE-REPOSITORY MODE was explicitly enabled. Delegate still applies its path/history redaction and final content scan to the context it assembles; this flag makes backend file reads easier by using the live repository as its working directory. After reading the assembled context, you may inspect the current repository read-only to validate and self-collect supplemental context, but do not use it to recover or override supplied identifiers. Do not expose secret-looking file contents in the response.\n")
+		prompt.WriteString("LIVE-REPOSITORY MODE was explicitly enabled. Delegate still applies its path/history redaction and final content scan to the context it assembles; this flag makes backend file reads easier by using the live repository as its working directory. After reading the assembled context, you may inspect the current repository read-only for supplemental context. Those live reads are outside the captured-input guarantee. Do not use live reads to recover redacted content or override supplied identifiers.\n")
 	} else {
 		prompt.WriteString("Delegate has provided only its assembled context in this workspace, with secret-looking paths represented as path/status only and secret-like content replaced by a redaction marker. This does not prevent a same-user backend from reading repository or other filesystem files itself; review only this context and do not try to inspect or reconstruct redacted content. OS-level isolation requires a container or sandbox profile.\n")
 	}
@@ -639,6 +679,9 @@ func ComposePrompt(kind string, assembled Context) (string, error) {
 		path := artifactFilename
 		if assembled.AllowLiveRepoRead {
 			path = assembled.ArtifactPath
+			if RedactSecretLikeDiagnostic(path) != path {
+				return "", errors.New("review artifact path contains secret-like metadata; choose a different state directory")
+			}
 		}
 		prompt.WriteString("Read the complete sanitized patch artifact from " + strconv.Quote(path) + ".\n")
 	} else {
@@ -792,7 +835,7 @@ func repositoryRoot(ctx context.Context, cwd string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve git repository from --cwd %q: %w", cwd, err)
 	}
-	root := strings.TrimSpace(string(raw))
+	root := strings.TrimSuffix(string(raw), "\n")
 	canonical, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return "", err
@@ -823,89 +866,37 @@ func resolveCommit(ctx context.Context, cwd, ref string) (string, error) {
 	return strings.TrimSpace(string(raw)), nil
 }
 
-func defaultRemoteBranch(ctx context.Context, cwd string) (string, bool) {
+func defaultRemoteBase(ctx context.Context, cwd string) (Base, bool) {
+	var origin string
 	if raw, err := gitOutput(ctx, cwd, false, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
-		if ref := strings.TrimSpace(string(raw)); ref != "" {
-			return ref, true
-		}
-	}
-	raw, err := gitOutput(ctx, cwd, false, "for-each-ref", "--format=%(refname)", "refs/remotes")
-	if err != nil {
-		return "", false
+		origin = strings.TrimSpace(string(raw))
 	}
 	var refs []string
-	for _, line := range strings.Split(string(raw), "\n") {
-		refname := strings.TrimSpace(line)
-		if !strings.HasSuffix(refname, "/HEAD") {
-			continue
-		}
-		resolved, resolveErr := gitOutput(ctx, cwd, false, "symbolic-ref", "--quiet", "--short", refname)
-		if resolveErr == nil {
-			if ref := strings.TrimSpace(string(resolved)); ref != "" {
-				refs = append(refs, ref)
+	if raw, err := gitOutput(ctx, cwd, false, "for-each-ref", "--format=%(refname)", "refs/remotes"); err == nil {
+		for _, refname := range strings.Split(string(raw), "\n") {
+			if !strings.HasSuffix(refname, "/HEAD") || refname == "refs/remotes/origin/HEAD" {
+				continue
+			}
+			if resolved, err := gitOutput(ctx, cwd, false, "symbolic-ref", "--quiet", "--short", refname); err == nil {
+				if ref := strings.TrimSpace(string(resolved)); ref != "" {
+					refs = append(refs, ref)
+				}
 			}
 		}
 	}
-	if len(refs) == 0 {
-		return "", false
-	}
 	sort.Strings(refs)
-	return refs[0], true
-}
-
-func workingTreeChanges(ctx context.Context, repoRoot, base string) ([]changedFile, error) {
-	raw, err := gitOutput(ctx, repoRoot, false, nameStatusArgs(base, "")...)
-	if err != nil {
-		return nil, fmt.Errorf("collect tracked working-tree paths: %w", err)
+	refs = append([]string{origin}, refs...)
+	seen := make(map[string]bool)
+	for _, ref := range refs {
+		if ref == "" || seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		if commit, err := resolveCommit(ctx, cwd, ref); err == nil {
+			return Base{Ref: ref, Commit: commit, Source: "default-remote"}, true
+		}
 	}
-	files, err := parseNameStatus(raw)
-	if err != nil {
-		return nil, err
-	}
-	if err := appendUntracked(ctx, repoRoot, &files); err != nil {
-		return nil, err
-	}
-	sortChanged(files)
-	return files, nil
-}
-
-func branchChanges(ctx context.Context, repoRoot, baseCommit, headRef string) ([]changedFile, string, error) {
-	mergeBaseRaw, err := gitOutput(ctx, repoRoot, false, "merge-base", baseCommit, headRef)
-	if err != nil {
-		return nil, "", fmt.Errorf("resolve merge base for %q: %w", baseCommit, err)
-	}
-	mergeBase := strings.TrimSpace(string(mergeBaseRaw))
-	raw, err := gitOutput(ctx, repoRoot, false, nameStatusArgs(mergeBase, headRef)...)
-	if err != nil {
-		return nil, "", fmt.Errorf("collect branch paths: %w", err)
-	}
-	files, err := parseNameStatus(raw)
-	if err != nil {
-		return nil, "", err
-	}
-	sortChanged(files)
-	return files, mergeBase, nil
-}
-
-func autoChanges(ctx context.Context, repoRoot, baseCommit, headRef string) ([]changedFile, string, error) {
-	mergeBaseRaw, err := gitOutput(ctx, repoRoot, false, "merge-base", baseCommit, headRef)
-	if err != nil {
-		return nil, "", fmt.Errorf("resolve merge base for %q: %w", baseCommit, err)
-	}
-	mergeBase := strings.TrimSpace(string(mergeBaseRaw))
-	raw, err := gitOutput(ctx, repoRoot, false, nameStatusArgs(mergeBase, "")...)
-	if err != nil {
-		return nil, "", fmt.Errorf("collect automatic review paths: %w", err)
-	}
-	files, err := parseNameStatus(raw)
-	if err != nil {
-		return nil, "", err
-	}
-	if err := appendUntracked(ctx, repoRoot, &files); err != nil {
-		return nil, "", err
-	}
-	sortChanged(files)
-	return files, mergeBase, nil
+	return Base{}, false
 }
 
 func nameStatusArgs(from, to string) []string {
@@ -914,31 +905,6 @@ func nameStatusArgs(from, to string) []string {
 		args = append(args, to)
 	}
 	return append(args, "--")
-}
-
-func appendUntracked(ctx context.Context, repoRoot string, files *[]changedFile) error {
-	seen := make(map[string]int, len(*files))
-	for i, file := range *files {
-		seen[file.Path] = i
-	}
-	untracked, err := gitOutput(ctx, repoRoot, false, "ls-files", "--others", "--exclude-standard", "-z", "--")
-	if err != nil {
-		return fmt.Errorf("collect untracked working-tree paths: %w", err)
-	}
-	for _, path := range splitNUL(untracked) {
-		if path == "" {
-			continue
-		}
-		untrackedFile := changedFile{File: File{Path: path, Status: "??"}, untracked: true}
-		if index, ok := seen[path]; ok {
-			if strings.HasPrefix((*files)[index].Status, "D") {
-				(*files)[index] = untrackedFile
-			}
-			continue
-		}
-		*files = append(*files, untrackedFile)
-	}
-	return nil
 }
 
 type pathHistoryNode struct {
@@ -1114,70 +1080,31 @@ func (graph *pathHistoryGraph) propagatedPathNames() map[string]bool {
 	return paths
 }
 
-// collectSecretBlobHashes taints content that appeared at a secret-looking
-// path anywhere in the committed review range, index, or current worktree.
-// Diffs referencing a tainted pre- or post-image are rendered path/status-only.
-func collectSecretBlobHashes(ctx context.Context, repoRoot, historyBase, upperRev string) (map[string]struct{}, error) {
+// collectSecretBlobHashes screens fixed history and captured tree blobs only.
+func collectSecretBlobHashes(ctx context.Context, repoRoot, historyBase, upperRev string, captured ...string) (map[string]struct{}, error) {
 	hashes := make(map[string]struct{})
-	var commits []string
+	revisions := append([]string{historyBase, upperRev}, captured...)
 	if historyBase != "" && upperRev != "" {
 		raw, err := gitOutput(ctx, repoRoot, false, "rev-list", historyBase+".."+upperRev)
 		if err != nil {
 			return nil, fmt.Errorf("collect review commits for secret redaction: %w", err)
 		}
-		commits = strings.Fields(string(raw))
-	} else if upperRev != "" {
-		commits = []string{upperRev}
+		revisions = append(revisions, strings.Fields(string(raw))...)
 	}
-	for _, commit := range commits {
-		raw, err := gitOutput(ctx, repoRoot, false, "ls-tree", "-r", "-z", "--full-tree", commit)
+	seen := make(map[string]bool)
+	for _, rev := range revisions {
+		if rev == "" || seen[rev] {
+			continue
+		}
+		seen[rev] = true
+		entries, err := capturedTreeEntries(ctx, repoRoot, rev)
 		if err != nil {
-			return nil, fmt.Errorf("inspect commit %s for secret redaction: %w", commit, err)
+			return nil, err
 		}
-		for _, entry := range splitNUL(raw) {
-			metadata, path, ok := strings.Cut(entry, "\t")
-			fields := strings.Fields(metadata)
-			if !ok || len(fields) < 3 || !IsSecretPath(path) {
-				continue
+		for path, entry := range entries {
+			if IsSecretPath(path) {
+				hashes[entry.id] = struct{}{}
 			}
-			hashes[fields[2]] = struct{}{}
-		}
-	}
-
-	index, err := gitOutput(ctx, repoRoot, false, "ls-files", "--stage", "-z", "--")
-	if err != nil {
-		return nil, fmt.Errorf("inspect index for secret redaction: %w", err)
-	}
-	for _, entry := range splitNUL(index) {
-		metadata, path, ok := strings.Cut(entry, "\t")
-		fields := strings.Fields(metadata)
-		if !ok || len(fields) < 2 || !IsSecretPath(path) {
-			continue
-		}
-		hashes[fields[1]] = struct{}{}
-	}
-
-	paths, err := gitOutput(ctx, repoRoot, false, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--")
-	if err != nil {
-		return nil, fmt.Errorf("inspect worktree paths for secret redaction: %w", err)
-	}
-	for _, path := range splitNUL(paths) {
-		if !IsSecretPath(path) {
-			continue
-		}
-		info, statErr := os.Lstat(filepath.Join(repoRoot, filepath.FromSlash(path)))
-		if errors.Is(statErr, os.ErrNotExist) || statErr == nil && info.IsDir() {
-			continue
-		}
-		if statErr != nil {
-			return nil, fmt.Errorf("inspect secret worktree path %q: %w", path, statErr)
-		}
-		raw, hashErr := gitOutput(ctx, repoRoot, false, "hash-object", "--no-filters", "--", path)
-		if hashErr != nil {
-			return nil, fmt.Errorf("hash secret worktree path %q: %w", path, hashErr)
-		}
-		if hash := strings.TrimSpace(string(raw)); hash != "" {
-			hashes[hash] = struct{}{}
 		}
 	}
 	return hashes, nil
@@ -1204,28 +1131,6 @@ func diffReferencesSecretBlob(diff []byte, secretBlobs map[string]struct{}) bool
 		}
 	}
 	return false
-}
-
-func trackedDiff(ctx context.Context, repoRoot, from, to string, paths ...string) ([]byte, error) {
-	args := []string{"diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--find-renames", "--find-copies", "--find-copies-harder", from}
-	if to != "" {
-		args = append(args, to)
-	}
-	args = append(args, "--")
-	args = append(args, paths...)
-	raw, err := gitOutput(ctx, repoRoot, false, args...)
-	if err != nil {
-		return nil, fmt.Errorf("collect sanitized diff for %q: %w", paths, err)
-	}
-	return raw, nil
-}
-
-func untrackedDiff(ctx context.Context, repoRoot, path string) ([]byte, error) {
-	raw, err := gitOutput(ctx, repoRoot, true, "diff", "--no-index", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--", "/dev/null", path)
-	if err != nil {
-		return nil, fmt.Errorf("collect sanitized untracked diff for %q: %w", path, err)
-	}
-	return raw, nil
 }
 
 func parseNameStatus(raw []byte) ([]changedFile, error) {
@@ -1296,18 +1201,18 @@ func readCriteriaFile(path string) ([]byte, error) {
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("read --criteria-file %q: %w", path, err)
+		return nil, fmt.Errorf("read --criteria-file %q: %w", RedactSecretLikeDiagnostic(path), err)
 	}
 	defer file.Close()
 	raw, err := io.ReadAll(io.LimitReader(file, MaxCriteriaFileBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read --criteria-file %q: %w", path, err)
+		return nil, fmt.Errorf("read --criteria-file %q: %w", RedactSecretLikeDiagnostic(path), err)
 	}
 	if len(raw) > MaxCriteriaFileBytes {
 		return nil, fmt.Errorf("--criteria-file exceeds the %d-byte limit", MaxCriteriaFileBytes)
 	}
 	if !utf8.Valid(raw) || bytes.IndexByte(raw, 0) >= 0 {
-		return nil, fmt.Errorf("--criteria-file %q must contain UTF-8 text", path)
+		return nil, fmt.Errorf("--criteria-file %q must contain UTF-8 text without NUL bytes", RedactSecretLikeDiagnostic(path))
 	}
 	return raw, nil
 }
@@ -1317,252 +1222,77 @@ func digestBytes(raw []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-type sourceMetadata struct {
-	byteSize int64
-	digest   string
-	regular  bool
-	exists   bool
-	raw      []byte
-	binary   bool
-}
-
-func inspectSourcePath(path string, retain bool) (sourceMetadata, error) {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return sourceMetadata{}, nil
-	}
-	if err != nil {
-		return sourceMetadata{}, err
-	}
-	metadata := sourceMetadata{exists: true, byteSize: info.Size(), regular: info.Mode().IsRegular()}
-	if info.Mode()&os.ModeSymlink != 0 {
-		target, readErr := os.Readlink(path)
-		if readErr != nil {
-			return sourceMetadata{}, readErr
-		}
-		metadata.byteSize = int64(len(target))
-		metadata.digest = digestBytes([]byte(target))
-		metadata.binary = true
-		return metadata, nil
-	}
-	if !metadata.regular {
-		metadata.binary = true
-		metadata.digest = digestBytes(nil)
-		return metadata, nil
-	}
-	if retain {
-		raw, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return sourceMetadata{}, readErr
-		}
-		metadata.raw = raw
-		metadata.byteSize = int64(len(raw))
-		metadata.digest = digestBytes(raw)
-		metadata.binary = bytes.IndexByte(raw, 0) >= 0 || !utf8.Valid(raw)
-		return metadata, nil
-	}
-	file, openErr := os.Open(path)
-	if openErr != nil {
-		return sourceMetadata{}, openErr
-	}
-	hash := sha256.New()
-	buffer := make([]byte, 32*1024)
-	var pendingUTF8 []byte
-	validUTF8 := true
-	for {
-		count, readErr := file.Read(buffer)
-		if count > 0 {
-			_, _ = hash.Write(buffer[:count])
-			if bytes.IndexByte(buffer[:count], 0) >= 0 {
-				metadata.binary = true
-			}
-			if validUTF8 {
-				chunk := append(pendingUTF8, buffer[:count]...)
-				pendingUTF8 = nil
-				for offset := 0; offset < len(chunk); {
-					if !utf8.FullRune(chunk[offset:]) {
-						pendingUTF8 = append(pendingUTF8, chunk[offset:]...)
-						break
-					}
-					runeValue, runeSize := utf8.DecodeRune(chunk[offset:])
-					if runeValue == utf8.RuneError && runeSize == 1 {
-						validUTF8 = false
-						pendingUTF8 = nil
-						break
-					}
-					offset += runeSize
-				}
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			_ = file.Close()
-			return sourceMetadata{}, readErr
-		}
-	}
-	if !validUTF8 || len(pendingUTF8) > 0 {
-		metadata.binary = true
-	}
-	if closeErr := file.Close(); closeErr != nil {
-		return sourceMetadata{}, closeErr
-	}
-	metadata.digest = hex.EncodeToString(hash.Sum(nil))
-	return metadata, nil
-}
-
-func prepareFileContent(repoRoot string, files []changedFile, remaining int) ([]ManifestEntry, int, error) {
+func prepareFileContent(files []changedFile, remaining int) ([]ManifestEntry, int, error) {
 	manifest := make([]ManifestEntry, 0, len(files)+1)
 	if remaining < 0 {
 		remaining = 0
 	}
-	add := func(entry ManifestEntry) {
-		manifest = append(manifest, entry)
-	}
 	for i := range files {
 		file := &files[i]
-		path := filepath.Join(repoRoot, filepath.FromSlash(file.Path))
-		if !filepath.IsLocal(file.Path) {
-			return nil, remaining, fmt.Errorf("changed review path %q is not local to the repository", file.Path)
-		}
-		if len(file.Status) > 0 && file.Status[0] == 'D' {
-			digest := digestBytes(nil)
-			if file.Redacted {
-				reason := "secret-path"
-				if !IsSecretPath(file.Path) && !IsSecretPath(file.sourcePath) {
-					reason = "secret-screening-failed"
-				}
-				add(ManifestEntry{Path: file.Path, SHA256: digest, Status: "omitted", Reason: reason})
-			} else {
-				add(ManifestEntry{Path: file.Path, SHA256: digest, Status: "omitted", Reason: "deleted"})
-			}
+		path := RedactSecretLikeDiagnostic(file.Path)
+		if file.post.id == "" {
+			manifest = append(manifest, ManifestEntry{Path: path, Status: "omitted", Reason: "deleted"})
 			continue
 		}
-		metadata, err := inspectSourcePath(path, false)
-		if err != nil {
-			return nil, remaining, fmt.Errorf("inspect changed review path %q: %w", file.Path, err)
-		}
-		if !metadata.exists {
-			metadata.digest = digestBytes(nil)
-			if file.Redacted {
-				reason := "secret-path"
-				if !IsSecretPath(file.Path) && !IsSecretPath(file.sourcePath) {
-					reason = "secret-screening-failed"
-				}
-				add(ManifestEntry{Path: file.Path, SHA256: metadata.digest, Status: "omitted", Reason: reason})
-			} else {
-				add(ManifestEntry{Path: file.Path, SHA256: metadata.digest, Status: "omitted", Reason: "deleted"})
-			}
-			continue
-		}
-		entry := ManifestEntry{Path: file.Path, ByteSize: metadata.byteSize, SHA256: metadata.digest}
+		entry := ManifestEntry{Path: path, ByteSize: int64(len(file.blob)), SHA256: digestBytes(file.blob)}
 		if file.Redacted {
 			entry.Status = "omitted"
 			entry.Reason = "secret-path"
 			if !IsSecretPath(file.Path) && !IsSecretPath(file.sourcePath) {
-				entry.Reason = "secret-screening-failed"
+				entry.Reason = "secret-tainted"
+				if file.screeningFailed {
+					entry.Reason = "secret-screening-failed"
+				}
 			}
-			add(entry)
-			continue
-		}
-		if metadata.binary || bytes.Contains(file.diff, []byte("GIT binary patch")) || bytes.Contains(file.diff, []byte("Binary files ")) {
+		} else if file.binaryChange || bytes.IndexByte(file.blob, 0) >= 0 || !utf8.Valid(file.blob) {
 			entry.Status = "omitted"
 			entry.Reason = "binary"
-			add(entry)
-			continue
-		}
-		if !metadata.regular {
-			entry.Status = "omitted"
-			entry.Reason = "binary"
-			add(entry)
-			continue
-		}
-
-		canRetain := metadata.byteSize <= MaxChangedFileBytes && metadata.byteSize <= int64(remaining)
-		if canRetain {
-			retained, err := inspectSourcePath(path, true)
-			if err != nil {
-				return nil, remaining, fmt.Errorf("read changed review path %q: %w", file.Path, err)
-			}
-			if !retained.exists || retained.byteSize != metadata.byteSize || retained.digest != metadata.digest {
-				return nil, remaining, fmt.Errorf("changed review path %q moved while preparing the packet; re-run on a quiescent worktree", file.Path)
-			}
-			metadata = retained
-			if metadata.binary {
-				entry.ByteSize = metadata.byteSize
-				entry.SHA256 = metadata.digest
-				entry.Status = "omitted"
-				entry.Reason = "binary"
-				add(entry)
-				continue
-			}
-			content, redacted := redactSourceText(metadata.raw)
-			file.content = content
-			if redacted {
-				file.contentStatus = "partial"
-				file.contentReason = "secret-content"
-				entry.Status = "partial"
-				entry.Reason = "secret-content"
-			} else {
+		} else if len(file.blob) <= MaxChangedFileBytes && len(file.blob) <= remaining {
+			content, redacted := redactSourceText(file.blob)
+			if len(content) <= remaining && len(content) <= MaxChangedFileBytes {
+				file.content = content
 				file.contentStatus = "full"
 				entry.Status = "full"
-			}
-			if len(content) > remaining {
-				file.content = truncateUTF8(partialSourceExcerpt(path, file.diff, remaining), remaining)
+				if redacted {
+					file.contentStatus = "partial"
+					file.contentReason = "secret-content"
+					entry.Status = "partial"
+					entry.Reason = "secret-content"
+				}
+				remaining -= len(content)
+			} else {
+				file.content = partialSourceExcerpt(file.blob, file.diff, minInt(MaxPartialFileBytes, remaining))
 				file.contentStatus = "partial"
 				file.contentReason = "over-budget"
 				entry.Status = "partial"
 				entry.Reason = "over-budget"
 				remaining -= len(file.content)
-			} else {
-				remaining -= len(content)
 			}
-			add(entry)
 		} else {
-			file.content = partialSourceExcerpt(path, file.diff, minInt(MaxPartialFileBytes, remaining))
-			if metadata.byteSize > 0 && remaining > 0 && len(file.content) == 0 {
-				return nil, remaining, fmt.Errorf("read changed review path %q for a partial context excerpt", file.Path)
-			}
-			file.content = truncateUTF8(file.content, remaining)
+			file.content = partialSourceExcerpt(file.blob, file.diff, minInt(MaxPartialFileBytes, remaining))
 			file.contentStatus = "partial"
 			file.contentReason = "over-budget"
 			entry.Status = "partial"
 			entry.Reason = "over-budget"
 			remaining -= len(file.content)
-			if remaining < 0 {
-				remaining = 0
-			}
-			add(entry)
 		}
-		if file.contentStatus != "" && file.contentStatus != "full" {
-			current, err := inspectSourcePath(path, false)
-			if err != nil {
-				return nil, remaining, fmt.Errorf("verify changed review path %q after reading its context: %w", file.Path, err)
-			}
-			if !current.exists || current.byteSize != entry.ByteSize || current.digest != entry.SHA256 {
-				return nil, remaining, fmt.Errorf("changed review path %q moved while preparing the packet; re-run on a quiescent worktree", file.Path)
-			}
+		if entry.Status == "partial" && entry.Reason == "over-budget" && len(file.content) == 0 && len(file.blob) != 0 {
+			entry.Status = "omitted"
+			file.contentStatus = "omitted"
 		}
+		manifest = append(manifest, entry)
 	}
-	seen := make(map[string]struct{}, len(manifest))
+	seen := make(map[string]bool)
 	for _, entry := range manifest {
-		seen[entry.Path] = struct{}{}
+		seen[entry.Path] = true
 	}
 	for _, file := range files {
-		if file.sourcePath == "" || file.sourcePath == file.Path || file.Status[0] != 'R' {
-			continue
+		path := RedactSecretLikeDiagnostic(file.sourcePath)
+		if file.sourcePath != "" && file.sourcePath != file.Path && len(file.Status) > 0 && file.Status[0] == 'R' && !seen[path] {
+			manifest = append(manifest, ManifestEntry{Path: path, Status: "omitted", Reason: "deleted"})
+			seen[path] = true
 		}
-		if _, found := seen[file.sourcePath]; found {
-			continue
-		}
-		reason := "deleted"
-		if IsSecretPath(file.sourcePath) {
-			reason = "secret-path"
-		}
-		add(ManifestEntry{Path: file.sourcePath, SHA256: digestBytes(nil), Status: "omitted", Reason: reason})
 	}
-	sort.Slice(manifest, func(i, j int) bool { return manifest[i].Path < manifest[j].Path })
 	return manifest, remaining, nil
 }
 
@@ -1577,10 +1307,10 @@ func truncateUTF8(raw []byte, maxBytes int) []byte {
 	if maxBytes <= 0 {
 		return nil
 	}
-	if len(raw) <= maxBytes {
-		return raw
+	truncated := raw
+	if len(truncated) > maxBytes {
+		truncated = truncated[:maxBytes]
 	}
-	truncated := raw[:maxBytes]
 	for len(truncated) > 0 && !utf8.Valid(truncated) {
 		truncated = truncated[:len(truncated)-1]
 	}
@@ -1589,7 +1319,7 @@ func truncateUTF8(raw []byte, maxBytes int) []byte {
 
 var diffNewLineRange = regexp.MustCompile(`(?m)^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@`)
 
-func partialSourceExcerpt(path string, diff []byte, maxBytes int) []byte {
+func partialSourceExcerpt(raw []byte, diff []byte, maxBytes int) []byte {
 	if maxBytes <= 0 {
 		return nil
 	}
@@ -1622,13 +1352,8 @@ func partialSourceExcerpt(path string, diff []byte, maxBytes int) []byte {
 		}
 		merged = append(merged, current)
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	scanner.Buffer(make([]byte, 4096), maxCaptureBytes+1)
 	var out bytes.Buffer
 	lineNo, rangeIndex := 0, 0
 	previousIncluded := false
@@ -1697,7 +1422,7 @@ func partialSourceExcerpt(path string, diff []byte, maxBytes int) []byte {
 		}
 		previousIncluded = true
 	}
-	return out.Bytes()
+	return truncateUTF8(out.Bytes(), maxBytes)
 }
 
 func minInt(left, right int) int {
@@ -1732,9 +1457,9 @@ func renderSanitizedContext(scope string, base Base, comparisonBase, branch, hea
 	}
 	out.WriteString(fmt.Sprintf("file_count\t%d\n", len(files)))
 	for _, file := range files {
-		pathText := strconv.Quote(file.Path)
+		pathText := strconv.Quote(RedactSecretLikeDiagnostic(file.Path))
 		if file.sourcePath != "" {
-			pathText = strconv.Quote(file.sourcePath) + " -> " + pathText
+			pathText = strconv.Quote(RedactSecretLikeDiagnostic(file.sourcePath)) + " -> " + pathText
 		}
 		if file.Redacted {
 			out.WriteString("REDACTED\t" + file.Status + "\t" + pathText + "\n")
@@ -1783,6 +1508,7 @@ func publicFiles(files []changedFile) []File {
 	out := make([]File, len(files))
 	for i := range files {
 		out[i] = files[i].File
+		out[i].Path = RedactSecretLikeDiagnostic(out[i].Path)
 	}
 	return out
 }
@@ -1826,18 +1552,26 @@ func writePrivateFile(path string, payload []byte) error {
 	return nil
 }
 
-func gitOutput(ctx context.Context, cwd string, acceptDiff bool, args ...string) ([]byte, error) {
-	commandArgs := []string{"-C", cwd, "--literal-pathspecs", "-c", "core.attributesFile=/dev/null", "-c", "attr.tree=refs/delegate/empty-attributes"}
-	for _, driver := range configuredFilterDrivers(ctx, cwd) {
-		commandArgs = append(commandArgs,
-			"-c", "filter."+driver+".clean=",
-			"-c", "filter."+driver+".process=",
-			"-c", "filter."+driver+".required=false",
-		)
+func gitCommandArgs(ctx context.Context, cwd string, args ...string) []string {
+	commandArgs := []string{"-C", cwd}
+	// check-ignore does not support Git's literal pathspec magic; its arguments
+	// are paths, separated from options with --.
+	if len(args) == 0 || args[0] != "check-ignore" {
+		commandArgs = append(commandArgs, "--literal-pathspecs")
 	}
-	commandArgs = append(commandArgs, args...)
-	cmd := exec.CommandContext(ctx, "git", commandArgs...)
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_ATTR_NOSYSTEM=1")
+	commandArgs = append(commandArgs, "-c", "core.attributesFile=/dev/null", "-c", "attr.tree=refs/delegate/empty-attributes")
+	for _, driver := range configuredFilterDrivers(ctx, cwd) {
+		commandArgs = append(commandArgs, "-c", "filter."+driver+".clean=", "-c", "filter."+driver+".process=", "-c", "filter."+driver+".required=false")
+	}
+	return append(commandArgs, args...)
+}
+
+func gitOutput(ctx context.Context, cwd string, acceptDiff bool, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", gitCommandArgs(ctx, cwd, args...)...)
+	cmd.Env = append(gitEnvironment(ctx), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1")
+	if len(args) > 0 && args[0] == "check-ignore" {
+		cmd.Env = append(cmd.Env, "GIT_LITERAL_PATHSPECS=0")
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -1853,12 +1587,12 @@ func gitOutput(ctx context.Context, cwd string, acceptDiff bool, args ...string)
 	if detail == "" {
 		detail = err.Error()
 	}
-	return nil, errors.New(detail)
+	return nil, errors.New(RedactSecretLikeDiagnostic(detail))
 }
 
 func configuredFilterDrivers(ctx context.Context, cwd string) []string {
 	cmd := exec.CommandContext(ctx, "git", "-C", cwd, "config", "--null", "--name-only", "--get-regexp", `^filter\..*\.(clean|process|required)$`)
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_ATTR_NOSYSTEM=1")
+	cmd.Env = append(gitEnvironment(ctx), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1")
 	raw, err := cmd.Output()
 	if err != nil && len(raw) == 0 {
 		return nil
