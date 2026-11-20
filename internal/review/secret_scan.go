@@ -182,17 +182,17 @@ var privateKeyHunkHeader = regexp.MustCompile(`^@@ -([0-9]+)(?:,([0-9]+))? \+([0
 
 func redactPrivateKeyDiffHunks(diff, before, after []byte) []byte {
 	oldRanges, newRanges := privateKeyLineRanges(before), privateKeyLineRanges(after)
+	// A path-limited diff can contain more than one file after copy/rename
+	// detection. Withhold it if its hunk-to-blob association is ambiguous.
+	if bytes.Contains(diff, []byte("\ndiff --git ")) {
+		return []byte(secretRedactionMarker + "\n")
+	}
 	if len(oldRanges) == 0 && len(newRanges) == 0 {
 		return diff
 	}
 	starts := diffHunkStarts(diff)
 	if len(starts) == 0 {
 		return diff
-	}
-	// A path-limited diff can contain more than one file after copy/rename
-	// detection. Withhold it if its hunk-to-blob association is ambiguous.
-	if bytes.Contains(diff, []byte("\ndiff --git ")) {
-		return []byte(secretRedactionMarker + "\n")
 	}
 	var out bytes.Buffer
 	out.Write(diff[:starts[0]])

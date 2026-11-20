@@ -319,6 +319,41 @@ func TestAssembleRedactsRenameCopyWhenEitherEndpointIsSecretAndOmitsBinaryConten
 	}
 }
 
+func TestCopyDiffWithAmbiguousPrivateKeySourceIsWithheld(t *testing.T) {
+	repo := newGitFixture(t)
+	lines := make([]string, 60)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("ordinary line %02d", i+1)
+	}
+	original := strings.Join(lines, "\n") + "\n"
+	writeFixtureFile(t, repo, "source.txt", original)
+	gitFixture(t, repo, "add", "source.txt")
+	gitFixture(t, repo, "commit", "-m", "ordinary source")
+
+	lines[0] = "-----BEGIN RSA PRIVATE KEY-----"
+	lines[49] = "PRIVATE_KEY_BODY_FROM_COPY_DIFF_MUST_NOT_LEAK"
+	lines[50] = "-----END RSA PRIVATE KEY-----"
+	writeFixtureFile(t, repo, "source.txt", strings.Join(lines, "\n")+"\n")
+	writeFixtureFile(t, repo, "copy.txt", original)
+
+	assembled, err := Assemble(context.Background(), Options{
+		CWD:      repo,
+		Scope:    ScopeWorkingTree,
+		StateDir: filepath.Join(t.TempDir(), "state"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer Cleanup(assembled)
+	packet := packetBytes(t, assembled)
+	if !bytes.Contains(packet, []byte(`"status":"C100"`)) && !bytes.Contains(packet, []byte("C100")) {
+		t.Fatalf("fixture did not produce a copy entry:\n%s", packet)
+	}
+	if bytes.Contains(packet, []byte("PRIVATE_KEY_BODY_FROM_COPY_DIFF_MUST_NOT_LEAK")) {
+		t.Fatalf("private-key body leaked through the copy diff:\n%s", packet)
+	}
+}
+
 func TestAssembleRedactsContentThatTraversedSecretRenameChainAndCopies(t *testing.T) {
 	repo := newGitFixture(t)
 	writeFixtureFile(t, repo, "public.txt", "public base\n")
@@ -907,7 +942,7 @@ func TestAssembleRedactsSecretLikeBranchMetadata(t *testing.T) {
 	}
 }
 
-func TestBranchChangesUseCapturedHead(t *testing.T) {
+func TestSecretHistoryScreeningUsesCapturedHead(t *testing.T) {
 	repo := newGitFixture(t)
 	base := gitFixtureOutput(t, repo, "rev-parse", "HEAD")
 	gitFixture(t, repo, "switch", "-c", "feature")
@@ -928,28 +963,14 @@ func TestBranchChangesUseCapturedHead(t *testing.T) {
 	gitFixture(t, repo, "rm", "later-secret.txt")
 	gitFixture(t, repo, "commit", "-m", "remove later secret")
 
-	files, diffBase, err := branchChanges(context.Background(), repo, base, capturedHead)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(files) != 2 || files[0].Path != ".env" || files[1].Path != "captured.go" {
-		t.Fatalf("captured-head files = %#v, want only .env and captured.go", files)
-	}
-	diff, err := trackedDiff(context.Background(), repo, diffBase, capturedHead, files[1].paths()...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(diff), "CAPTURED_SECRET_BLOB_MUST_NOT_LEAK") || strings.Contains(string(diff), "LATER_HEAD_CHANGE") {
-		t.Fatalf("captured-head diff = %q", diff)
-	}
-	paths, err := collectSecretPathTaint(context.Background(), repo, diffBase, capturedHead)
+	paths, err := collectSecretPathTaint(context.Background(), repo, base, capturedHead)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !paths[".env"] || paths["later-secret.txt"] {
 		t.Fatalf("captured-head secret paths = %#v", paths)
 	}
-	hashes, err := collectSecretBlobHashes(context.Background(), repo, diffBase, capturedHead)
+	hashes, err := collectSecretBlobHashes(context.Background(), repo, base, capturedHead)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -959,6 +980,7 @@ func TestBranchChangesUseCapturedHead(t *testing.T) {
 	if _, ok := hashes[laterSecretBlob]; ok {
 		t.Fatalf("later secret blob %q was tainted outside captured range", laterSecretBlob)
 	}
+	diff := []byte("index 0000000000000000000000000000000000000000.." + capturedSecretBlob + " 100644\n")
 	if !diffReferencesSecretBlob(diff, hashes) {
 		t.Fatal("captured secret blob did not redact the captured diff")
 	}

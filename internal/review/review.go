@@ -899,24 +899,6 @@ func defaultRemoteBase(ctx context.Context, cwd string) (Base, bool) {
 	return Base{}, false
 }
 
-func branchChanges(ctx context.Context, repoRoot, baseCommit, headRef string) ([]changedFile, string, error) {
-	mergeBaseRaw, err := gitOutput(ctx, repoRoot, false, "merge-base", baseCommit, headRef)
-	if err != nil {
-		return nil, "", fmt.Errorf("resolve merge base for %q: %w", baseCommit, err)
-	}
-	mergeBase := strings.TrimSpace(string(mergeBaseRaw))
-	raw, err := gitOutput(ctx, repoRoot, false, nameStatusArgs(mergeBase, headRef)...)
-	if err != nil {
-		return nil, "", fmt.Errorf("collect branch paths: %w", err)
-	}
-	files, err := parseNameStatus(raw)
-	if err != nil {
-		return nil, "", err
-	}
-	sortChanged(files)
-	return files, mergeBase, nil
-}
-
 func nameStatusArgs(from, to string) []string {
 	args := []string{"diff", "--name-status", "-z", "--find-renames", "--find-copies", "--find-copies-harder", from}
 	if to != "" {
@@ -1149,20 +1131,6 @@ func diffReferencesSecretBlob(diff []byte, secretBlobs map[string]struct{}) bool
 		}
 	}
 	return false
-}
-
-func trackedDiff(ctx context.Context, repoRoot, from, to string, paths ...string) ([]byte, error) {
-	args := []string{"diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--find-renames", "--find-copies", "--find-copies-harder", from}
-	if to != "" {
-		args = append(args, to)
-	}
-	args = append(args, "--")
-	args = append(args, paths...)
-	raw, err := gitOutput(ctx, repoRoot, false, args...)
-	if err != nil {
-		return nil, fmt.Errorf("collect sanitized diff for %q: %w", paths, err)
-	}
-	return raw, nil
 }
 
 func parseNameStatus(raw []byte) ([]changedFile, error) {
