@@ -45,6 +45,9 @@ func TestTaskIntentAndTimeoutWirePresence(t *testing.T) {
 			if code := run(args, strings.NewReader("inspect or edit"), &out, &stderr); code != 0 {
 				t.Fatalf("code=%d stderr=%q", code, stderr.String())
 			}
+			if len(fake.submits) != 1 {
+				t.Fatalf("submits=%d, want exactly one", len(fake.submits))
+			}
 			spec := fake.submits[0].TaskSpec
 			wantIntent := engine.Intent(tc.intent)
 			if wantIntent == "" {
@@ -99,11 +102,15 @@ func TestReviewTimeoutWirePresenceAndInspectIntent(t *testing.T) {
 					if tc.duration != "" {
 						args = append(args, "--timeout", tc.duration)
 					}
+					before := len(fake.submits)
 					var out, stderr bytes.Buffer
 					if code := run(args, nil, &out, &stderr); code != 0 {
 						t.Fatalf("code=%d stderr=%q", code, stderr.String())
 					}
-					spec := fake.submits[len(fake.submits)-1].TaskSpec
+					if len(fake.submits) != before+1 {
+						t.Fatalf("new submits=%d, want exactly one", len(fake.submits)-before)
+					}
+					spec := fake.submits[before].TaskSpec
 					if spec.Intent != engine.IntentInspect || spec.InputMode != taskInputModeFixed {
 						t.Fatalf("intent/input=%q/%q", spec.Intent, spec.InputMode)
 					}
@@ -157,10 +164,26 @@ func TestTaskHelpDescribesHostExecution(t *testing.T) {
 	if code := run([]string{"task", "--help"}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	for _, fragment := range []string{"host access", "not an enforced permission boundary", "build/test", "-intent", "default 2h", "unlimited"} {
+	for _, fragment := range []string{"host access", "not an enforced permission boundary", "build/test", "-intent", "default 2h", "unlimited", "rejects caller steering", "deadline notice", "agentbus session discard <job-id>"} {
 		if !strings.Contains(stderr.String(), fragment) {
 			t.Fatalf("help=%q missing %q", stderr.String(), fragment)
 		}
+	}
+}
+
+func TestReviewHelpDescribesFixedInputAndDeadlineNotice(t *testing.T) {
+	for _, command := range []string{"review", "adversarial-review"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{command, "--help"}, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			for _, fragment := range []string{"reject caller steering", "deadline notice"} {
+				if !strings.Contains(stderr.String(), fragment) {
+					t.Fatalf("help=%q missing %q", stderr.String(), fragment)
+				}
+			}
+		})
 	}
 }
 

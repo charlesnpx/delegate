@@ -220,6 +220,7 @@ func parseReviewOptions(kind string, args []string, stderr io.Writer) (reviewOpt
 		_, _ = fmt.Fprintln(fs.Output(), "  This does not prevent a same-user backend from reading repository or other filesystem files itself.")
 		_, _ = fmt.Fprintln(fs.Output(), "  --allow-live-repo-read makes those reads easier by using the repository as cwd.")
 		_, _ = fmt.Fprintln(fs.Output(), "  OS-level isolation requires a container/sandbox profile.")
+		_, _ = fmt.Fprintln(fs.Output(), "  Reviews reject caller steering; finite reviews may receive an Agentbus deadline notice.")
 		fs.PrintDefaults()
 	}
 	fs.StringVar(&opts.Backend, "backend", "", "backend name discovered from agentbus")

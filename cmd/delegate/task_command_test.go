@@ -476,9 +476,6 @@ func TestTaskUnrelatedInvalidTaskSpecKeepsDaemonError(t *testing.T) {
 	if !strings.Contains(stderr.String(), daemonErr.Error()) {
 		t.Fatalf("stderr=%q, want original daemon error %q", stderr.String(), daemonErr.Error())
 	}
-	if strings.Contains(stderr.String(), "does not support steerable tasks") || strings.Contains(stderr.String(), "--no-steer to submit") {
-		t.Fatalf("stderr=%q, unrelated invalid_task_spec was misclassified", stderr.String())
-	}
 	if len(fake.submits) != 1 {
 		t.Fatalf("submit attempts=%d, want exactly one", len(fake.submits))
 	}

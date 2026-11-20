@@ -205,12 +205,13 @@ func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
 		_, _ = fmt.Fprintln(fs.Output(), "Usage of delegate task:")
 		_, _ = fmt.Fprintln(fs.Output(), "  Tasks run with host access. Inspect is an instruction, not an enforced permission boundary;")
 		_, _ = fmt.Fprintln(fs.Output(), "  ordinary build/test artifacts, caches, temporary files and local services are allowed.")
+		_, _ = fmt.Fprintln(fs.Output(), "  Finite tasks may receive an Agentbus deadline notice, even with fixed input.")
 		fs.PrintDefaults()
 	}
 	fs.StringVar(&opts.Backend, "backend", "", "backend name")
 	fs.StringVar(&opts.CWD, "cwd", "", "absolute working directory")
 	fs.StringVar(&intent, "intent", string(engine.IntentInspect), "task intent: inspect or edit")
-	fs.BoolVar(&noSteer, "no-steer", false, "submit a fixed-input task that cannot be steered")
+	fs.BoolVar(&noSteer, "no-steer", false, "submit a fixed-input task that rejects caller steering")
 	fs.StringVar(&opts.Model, "model", "", "backend model")
 	fs.StringVar(&opts.Effort, "effort", "", "backend effort")
 	fs.Func("timeout", "execution timeout (default 2h; 0 or 0s means unlimited; maximum 4h)", func(raw string) error {
@@ -225,7 +226,7 @@ func parseTaskOptions(args []string, stderr io.Writer) (taskOptions, error) {
 	fs.StringVar(&opts.SchemaFile, "schema-file", "", "read optional JSON Schema output contract from file")
 	fs.StringVar(&opts.RequestID, "request-id", "", "caller-owned request identity")
 	fs.StringVar(&opts.ResumeJobID, "resume", "", "resume a prior job; creates a new job with a fresh deadline")
-	fs.BoolVar(&opts.RetainSession, "retain-session", false, "request session retention for later continuation; dispose with agentbus session discard")
+	fs.BoolVar(&opts.RetainSession, "retain-session", false, "request session retention; dispose with agentbus session discard <job-id>")
 	fs.Var(&tags, "tag", "task tag in key=value form (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return taskOptions{}, err
