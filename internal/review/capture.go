@@ -235,7 +235,21 @@ func rejectSpecialFiles(ctx context.Context, repoRoot, captureDir string) error 
 		if entry.Name() == ".git" && entry.IsDir() {
 			return filepath.SkipDir
 		}
-		if entry.IsDir() || entry.Type().IsRegular() || entry.Type()&os.ModeSymlink != 0 {
+		if entry.IsDir() {
+			rel, err := filepath.Rel(repoRoot, path)
+			if err != nil {
+				return err
+			}
+			ignored, err := reviewPathIgnored(ctx, repoRoot, filepath.ToSlash(rel))
+			if err != nil {
+				return err
+			}
+			if ignored {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Type().IsRegular() || entry.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
 		info, err := entry.Info()
@@ -250,15 +264,23 @@ func rejectSpecialFiles(ctx context.Context, repoRoot, captureDir string) error 
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		ignored, err := gitOutput(ctx, repoRoot, true, "check-ignore", "--no-index", "--", rel)
+		ignored, err := reviewPathIgnored(ctx, repoRoot, rel)
 		if err != nil {
-			return fmt.Errorf("check review path ignore rules: %w", err)
+			return err
 		}
-		if len(ignored) == 0 {
+		if !ignored {
 			return fmt.Errorf("unsupported special file at review path %q", RedactSecretLikeDiagnostic(rel))
 		}
 		return nil
 	})
+}
+
+func reviewPathIgnored(ctx context.Context, repoRoot, path string) (bool, error) {
+	ignored, err := gitOutput(ctx, repoRoot, true, "check-ignore", "--no-index", "--", path)
+	if err != nil {
+		return false, fmt.Errorf("check review path ignore rules: %w", err)
+	}
+	return len(ignored) > 0, nil
 }
 
 func (capture *reviewCapture) apply(repoRoot string, patch []byte) error {
